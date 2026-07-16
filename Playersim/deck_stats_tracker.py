@@ -9,12 +9,13 @@ import threading
 import re
 import glob
 import tempfile
+import copy
 from collections import defaultdict, Counter
 from typing import Dict, List, Any, Optional, Tuple, Union
 from enum import Enum
 import math
 # Version information for tracking schema changes
-STATS_VERSION = "3.3.0"  # Player-relative turn analytics
+STATS_VERSION = "3.4.0"  # Canonical-ID per-deck card analytics
 
 
 def _deck_seat_share(appearances: int, total_games: int) -> float:
@@ -135,6 +136,7 @@ class DeckStatsTracker:
         self.persistence_interval_games = max(
             1, int(persistence_interval_games))
         self._games_since_persistence = 0
+        self._last_record_flush_succeeded = None
         self._meta_data_cache = None
         self._meta_data_dirty = False
         self._individual_card_cache = {}
@@ -2186,34 +2188,22 @@ class DeckStatsTracker:
                 "win_rate": 0
             }
         
-        # Try to get from individual card stats first
-        card_file = self._card_stats_file(card_name)
-        card_stats = self._individual_card_cache.get(card_file)
-        if card_stats is None:
-            card_stats = self.load(card_file)
+        # Canonical aggregate files are keyed by ID. A legacy name file is
+        # imported only when it identifies this card without ambiguity.
+        card_file = self._card_stats_file(card_name, card_id)
+        card_stats = self._load_individual_card_stats(
+            card_id, card_name, persist_migration=True)
         if card_stats:
             return card_stats
-        
-        # If not found, try to get from meta data
-        meta_data = self._load_meta_data()
-        if card_name in meta_data["cards"]:
-            meta_card_stats = meta_data["cards"][card_name]
-            return {
-                "name": card_name,
-                "games_played": meta_card_stats.get("games", 0),
-                "wins": meta_card_stats.get("wins", 0),
-                "losses": meta_card_stats.get("losses", 0),
-                "usage_count": meta_card_stats.get("usage_count", 0),
-                "win_rate": meta_card_stats.get("win_rate", 0),
-                "archetypes": meta_card_stats.get("archetypes", {})
-            }
-        
+
         # Initialize default stats
         stats = {
+            "id": card_id,
             "name": card_name,
             "games_played": 0,
             "wins": 0,
             "losses": 0,
+            "draws": 0,
             "usage_count": 0,
             "win_rate": 0,
             "drawn_win_rate": 0,
@@ -2224,60 +2214,85 @@ class DeckStatsTracker:
                 "behind": {"wins": 0, "losses": 0, "played": 0}
             }
         }
-        
-        # Look through all deck files to collect card stats
-        deck_files = self._get_all_deck_files()
-        
-        for file_path in deck_files:
-            deck_stats = self.load(file_path)
-            if not deck_stats or "card_performance" not in deck_stats:
-                continue
-            
-            # Check if this card has stats in this deck by card ID
-            card_str = str(card_id)
-            if card_str in deck_stats["card_performance"]:
-                card_perf = deck_stats["card_performance"][card_str]
-                
-                # Aggregate stats
+
+        # Name-keyed meta data is also legacy identity. It is safe only when
+        # the active card corpus has a single canonical ID for this name.
+        meta_data = self._load_meta_data()
+        meta_card_stats = meta_data.get("cards", {}).get(card_name)
+        used_meta = (
+            isinstance(meta_card_stats, dict)
+            and self._matching_card_ids(card_name) == {str(card_id)})
+        if used_meta:
+            stats["games_played"] = meta_card_stats.get("games", 0)
+            stats["wins"] = meta_card_stats.get("wins", 0)
+            stats["losses"] = meta_card_stats.get("losses", 0)
+            stats["draws"] = meta_card_stats.get("draws", 0)
+            stats["usage_count"] = meta_card_stats.get("usage_count", 0)
+            stats["archetypes"] = meta_card_stats.get("archetypes", {})
+        else:
+            # Rebuild from canonical per-deck records. A legacy name record is
+            # used only if that deck composition maps the name to this one ID.
+            for file_path in self._get_all_deck_files():
+                deck_stats = self.load(file_path)
+                if not deck_stats or not (
+                        "card_performance" in deck_stats
+                        or "card_performance_by_name" in deck_stats):
+                    continue
+
+                card_str = str(card_id)
+                card_performance = deck_stats.get("card_performance", {})
+                card_perf = card_performance.get(card_str)
+                if card_perf is None:
+                    legacy = deck_stats.get("card_performance_by_name", {})
+                    candidate = legacy.get(card_name)
+                    ids_for_name = {
+                        str(entry.get("id"))
+                        for entry in deck_stats.get("card_list", [])
+                        if (isinstance(entry, dict)
+                            and str(entry.get("name", "")).casefold()
+                            == str(card_name).casefold())
+                    }
+                    if ids_for_name == {card_str}:
+                        card_perf = candidate
+                if not isinstance(card_perf, dict):
+                    continue
+
                 stats["games_played"] += card_perf.get("games_played", 0)
                 stats["wins"] += card_perf.get("wins", 0)
                 stats["losses"] += card_perf.get("losses", 0)
+                stats["draws"] += card_perf.get("draws", 0)
                 stats["usage_count"] += card_perf.get("usage_count", 0)
-                
-                # Merge performance by position
+
                 for position in ["ahead", "parity", "behind"]:
-                    if position in card_perf.get("performance_by_position", {}):
-                        pos_stats = card_perf["performance_by_position"][position]
-                        stats["performance_by_position"][position]["wins"] += pos_stats.get("wins", 0)
-                        stats["performance_by_position"][position]["losses"] += pos_stats.get("losses", 0)
-                        stats["performance_by_position"][position]["played"] += pos_stats.get("played", 0)
-                
-                # Merge performance by turn
-                for turn, turn_stats in card_perf.get("performance_by_turn", {}).items():
-                    if turn not in stats["performance_by_turn"]:
-                        stats["performance_by_turn"][turn] = {"wins": 0, "losses": 0, "played": 0}
-                    
-                    stats["performance_by_turn"][turn]["wins"] += turn_stats.get("wins", 0)
-                    stats["performance_by_turn"][turn]["losses"] += turn_stats.get("losses", 0)
-                    stats["performance_by_turn"][turn]["played"] += turn_stats.get("played", 0)
-            
-            # Also check by card name if present
-            if "card_performance_by_name" in deck_stats and card_name in deck_stats["card_performance_by_name"]:
-                card_perf = deck_stats["card_performance_by_name"][card_name]
-                
-                # Aggregate stats (avoiding double-counting if already counted by ID)
-                if card_str not in deck_stats["card_performance"]:
-                    stats["games_played"] += card_perf.get("games_played", 0)
-                    stats["wins"] += card_perf.get("wins", 0)
-                    stats["losses"] += card_perf.get("losses", 0)
-                    stats["usage_count"] += card_perf.get("usage_count", 0)
+                    if position in card_perf.get(
+                            "performance_by_position", {}):
+                        pos_stats = card_perf[
+                            "performance_by_position"][position]
+                        aggregate = stats[
+                            "performance_by_position"][position]
+                        aggregate["wins"] += pos_stats.get("wins", 0)
+                        aggregate["losses"] += pos_stats.get("losses", 0)
+                        aggregate["played"] += pos_stats.get("played", 0)
+
+                for turn, turn_stats in card_perf.get(
+                        "performance_by_turn", {}).items():
+                    aggregate = stats["performance_by_turn"].setdefault(
+                        turn, {"wins": 0, "losses": 0, "played": 0})
+                    aggregate["wins"] += turn_stats.get("wins", 0)
+                    aggregate["losses"] += turn_stats.get("losses", 0)
+                    aggregate["played"] += turn_stats.get("played", 0)
         
         # Calculate aggregate win rates
         if stats["games_played"] > 0:
-            stats["win_rate"] = stats["wins"] / stats["games_played"]
+            stats["win_rate"] = (
+                stats["wins"] + 0.5 * stats["draws"]
+            ) / stats["games_played"]
         
-        # Save card stats for future use
-        self.save(card_file, stats)
+        self._individual_card_cache[card_file] = stats
+        if self.save(card_file, stats):
+            self._dirty_individual_card_files.discard(card_file)
+        else:
+            self._dirty_individual_card_files.add(card_file)
         
         return stats
     
@@ -2288,7 +2303,9 @@ class DeckStatsTracker:
                     game_stage: str = None, game_state: Union[str, GamePosition] = "parity", 
                     mulligan_data: Dict = None, opening_hands: Dict = None,
                     draw_history: Dict = None, play_order: Dict = None,
-                    play_history: Dict = None) -> bool:
+                    play_history: Dict = None,
+                    winner_archetype: str = None,
+                    loser_archetype: str = None) -> bool:
         """Record a game result with comprehensive error handling and additional tracking"""
         try:
             # Initialize card database if needed
@@ -2310,17 +2327,25 @@ class DeckStatsTracker:
                 loser_deck_fingerprint = hashlib.md5(str(loser_deck).encode()).hexdigest()
             
             # Determine archetypes safely
-            try:
-                winner_archetype = self.identify_archetype(winner_deck)
-            except Exception as e:
-                logging.error(f"Error identifying winner archetype: {e}")
-                winner_archetype = "midrange"  # Default fallback value
+            if winner_archetype is None:
+                try:
+                    winner_archetype = self.identify_archetype(winner_deck)
+                except Exception as e:
+                    logging.error(f"Error identifying winner archetype: {e}")
+                    winner_archetype = "midrange"  # Default fallback value
+            winner_archetype = str(
+                getattr(winner_archetype, "value", winner_archetype)
+                or "midrange").strip().lower() or "midrange"
                 
-            try:
-                loser_archetype = self.identify_archetype(loser_deck)
-            except Exception as e:
-                logging.error(f"Error identifying loser archetype: {e}")
-                loser_archetype = "midrange"  # Default fallback value
+            if loser_archetype is None:
+                try:
+                    loser_archetype = self.identify_archetype(loser_deck)
+                except Exception as e:
+                    logging.error(f"Error identifying loser archetype: {e}")
+                    loser_archetype = "midrange"  # Default fallback value
+            loser_archetype = str(
+                getattr(loser_archetype, "value", loser_archetype)
+                or "midrange").strip().lower() or "midrange"
             
             # Determine game stage and state
             # Handle game stage conversion
@@ -2437,17 +2462,24 @@ class DeckStatsTracker:
             
             # Training workers batch the many small compressed card/deck files;
             # direct callers retain the historical immediate-persistence default.
+            self._last_record_flush_succeeded = None
             self._games_since_persistence += 1
             if self._games_since_persistence >= \
                     self.persistence_interval_games:
-                self.save_updates_sync()
+                self._last_record_flush_succeeded = bool(
+                    self.save_updates_sync())
+                if not self._last_record_flush_succeeded:
+                    logging.error(
+                        "Game analytics were accepted but their scheduled "
+                        "flush failed; dirty updates remain queued")
             
             if is_draw:
                 logging.info(f"Game recorded: Draw between {winner_archetype} and {loser_archetype}, Turns: {turn_count}")
             else:
                 logging.info(f"Game recorded: {winner_archetype} (W) vs {loser_archetype} (L), Turns: {turn_count}")
             
-            return game_result_success and success_1 and success_2 and success_3
+            return (
+                game_result_success and success_1 and success_2 and success_3)
         
         except Exception as e:
             logging.error(f"Error recording game statistics: {e}")
@@ -2577,7 +2609,6 @@ class DeckStatsTracker:
                 "matchups": {},
                 "specific_matchups": {},
                 "card_performance": {},
-                "card_performance_by_name": {},
                 "meta_position": {},
                 # "last_updated": time.time() # Removed time dependency
             }
@@ -2603,7 +2634,9 @@ class DeckStatsTracker:
 
             if deck_name is not None and deck_name != stats.get("name", ""): stats["name"] = deck_name
 
-
+        # The caller may own a more authoritative classification than an old
+        # persisted snapshot. Keep deck and individual-card buckets aligned.
+        stats["archetype"] = archetype
         # Update dynamic game statistics.
         stats["games"] += 1
         if is_draw:
@@ -2730,51 +2763,290 @@ class DeckStatsTracker:
 
         return self._replace_deck_stats(deck_id, stats)
 
-    def _update_card_stats(self, winner_deck_id: str, loser_deck_id: str, 
-                        cards_played: Dict[int, List[int]],
-                        game_stage: GameStage, game_state: GamePosition,
-                        is_draw: bool = False, opening_hands: Dict = None,
-                        draw_history: Dict = None, play_order: Dict = None,
-                        play_history: Dict = None) -> bool:
-        """
-        Update statistics for individual cards with enhanced tracking.
-        
-        Args:
-            winner_deck_id: ID of the winning deck
-            loser_deck_id: ID of the losing deck
-            cards_played: Dictionary mapping player ID to list of cards played
-            game_stage: Stage of the game when it ended
-            game_state: State of the game from the winner's perspective
-            is_draw: Whether the game ended in a draw
-            opening_hands: Dictionary with opening hand cards for each player
-            draw_history: Dictionary mapping turn numbers to cards drawn that turn
-            play_order: Dictionary indicating which player went first
-            
-        Returns:
-            bool: Whether all updates were successful
-        """
+    @staticmethod
+    def _card_performance_template(card_name: str) -> Dict:
+        """Return the canonical per-deck card-performance schema."""
+        return {
+            "name": card_name,
+            "games_played": 0,
+            "wins": 0,
+            "losses": 0,
+            "draws": 0,
+            "usage_count": 0,
+            "win_rate": 0,
+            "games_drawn": 0,
+            "wins_when_drawn": 0,
+            "games_not_drawn": 0,
+            "wins_when_not_drawn": 0,
+            "games_in_opening_hand": 0,
+            "wins_when_in_opening_hand": 0,
+            "performance_by_turn": {},
+            "performance_by_stage": {
+                "early": {
+                    "wins": 0, "losses": 0, "draws": 0, "played": 0},
+                "mid": {
+                    "wins": 0, "losses": 0, "draws": 0, "played": 0},
+                "late": {
+                    "wins": 0, "losses": 0, "draws": 0, "played": 0},
+            },
+            "performance_by_position": {
+                "ahead": {
+                    "wins": 0, "losses": 0, "draws": 0, "played": 0},
+                "parity": {
+                    "wins": 0, "losses": 0, "draws": 0, "played": 0},
+                "behind": {
+                    "wins": 0, "losses": 0, "draws": 0, "played": 0},
+            },
+            "play_order_performance": {
+                "play_first": {
+                    "wins": 0, "losses": 0, "draws": 0, "played": 0},
+                "play_second": {
+                    "wins": 0, "losses": 0, "draws": 0, "played": 0},
+            },
+            "play_curve_stats": {
+                "on_curve": {"games": 0, "wins": 0, "draws": 0},
+                "under_curve": {"games": 0, "wins": 0, "draws": 0},
+                "over_curve": {"games": 0, "wins": 0, "draws": 0},
+            },
+        }
+
+    @classmethod
+    def _merge_card_performance_defaults(
+            cls, target: Dict, defaults: Dict) -> None:
+        """Fill missing legacy fields without replacing accumulated values."""
+        for key, default in defaults.items():
+            if isinstance(default, dict):
+                current = target.get(key)
+                if not isinstance(current, dict):
+                    target[key] = copy.deepcopy(default)
+                else:
+                    cls._merge_card_performance_defaults(current, default)
+            elif key not in target:
+                target[key] = copy.deepcopy(default)
+
+    @staticmethod
+    def _migrate_name_card_performance(
+            deck_stats: Dict, composition: List[Dict]) -> None:
+        """Move legacy name-keyed entries into the canonical ID map."""
+        legacy = deck_stats.pop("card_performance_by_name", None)
+        if not isinstance(legacy, dict):
+            return
+        canonical = deck_stats.setdefault("card_performance", {})
+        ids_by_name = defaultdict(set)
+        for card_entry in composition:
+            card_name = card_entry.get("name")
+            if card_name:
+                ids_by_name[card_name].add(str(card_entry.get("id")))
+        for card_name, card_keys in ids_by_name.items():
+            if card_name not in legacy:
+                continue
+            if len(card_keys) != 1:
+                logging.warning(
+                    "Dropping ambiguous legacy card statistics for %r; "
+                    "composition IDs=%s",
+                    card_name, sorted(card_keys))
+                continue
+            card_key = next(iter(card_keys))
+            if card_key not in canonical:
+                canonical[card_key] = copy.deepcopy(legacy[card_name])
+
+    @staticmethod
+    def _record_card_outcome(bucket: Dict, outcome: str) -> None:
+        field = {
+            "win": "wins",
+            "loss": "losses",
+            "draw": "draws",
+        }[outcome]
+        if field in bucket:
+            bucket[field] += 1
+
+    def _update_deck_card_performance(
+            self, deck_stats: Dict, composition: List[Dict],
+            cards_played: List[int], opening_hand: List[int],
+            draw_history: Dict, play_history: Dict,
+            went_first: Optional[bool], game_stage: GameStage,
+            game_state: GamePosition, outcome: str) -> bool:
+        """Apply one deck seat's card telemetry to canonical ID records."""
+        played = set(cards_played or ())
+        opening = set(opening_hand or ())
+        player_draw_history = _player_turn_history(
+            draw_history or {}, went_first)
+        player_play_history = _player_turn_history(
+            play_history or {}, went_first)
+        play_position = (
+            "play_first" if went_first is True
+            else "play_second" if went_first is False
+            else "unknown")
+        points = 1.0 if outcome == "win" else 0.5 if outcome == "draw" else 0.0
         success = True
-        
-        # Get deck stats
+
+        self._migrate_name_card_performance(deck_stats, composition)
+        performance = deck_stats.setdefault("card_performance", {})
+
+        for card_entry in composition:
+            card_id = card_entry["id"]
+            card_key = str(card_id)
+            card_name = card_entry.get(
+                "name") or self._get_card_name(card_id) or f"Card {card_id}"
+            defaults = self._card_performance_template(card_name)
+            card_perf = performance.setdefault(card_key, defaults)
+            self._merge_card_performance_defaults(card_perf, defaults)
+            card_perf["name"] = card_name
+
+            card_perf["games_played"] += 1
+            self._record_card_outcome(card_perf, outcome)
+
+            was_played = card_id in played
+            if was_played:
+                card_perf["usage_count"] += 1
+
+                stage_stats = card_perf["performance_by_stage"].setdefault(
+                    game_stage.value,
+                    {"wins": 0, "losses": 0, "draws": 0, "played": 0})
+                stage_stats["played"] += 1
+                self._record_card_outcome(stage_stats, outcome)
+
+                position_stats = card_perf[
+                    "performance_by_position"].setdefault(
+                        game_state.value,
+                        {"wins": 0, "losses": 0,
+                         "draws": 0, "played": 0})
+                position_stats["played"] += 1
+                self._record_card_outcome(position_stats, outcome)
+
+                order_stats = card_perf[
+                    "play_order_performance"].setdefault(
+                        play_position,
+                        {"wins": 0, "losses": 0,
+                         "draws": 0, "played": 0})
+                order_stats["played"] += 1
+                self._record_card_outcome(order_stats, outcome)
+
+                for turn, cards in player_play_history.items():
+                    if card_id not in cards:
+                        continue
+                    turn_key = str(turn)
+                    turn_stats = card_perf[
+                        "performance_by_turn"].setdefault(
+                            turn_key,
+                            {"played": 0, "wins": 0,
+                             "losses": 0, "draws": 0})
+                    turn_stats.setdefault("losses", 0)
+                    turn_stats["played"] += 1
+                    self._record_card_outcome(turn_stats, outcome)
+
+                    card = self.card_db.get(card_id)
+                    if not card or not hasattr(card, "cmc"):
+                        continue
+                    try:
+                        mana_value = int(card.cmc)
+                    except (TypeError, ValueError, OverflowError):
+                        continue
+                    curve_status = (
+                        "on_curve" if turn == mana_value
+                        else "under_curve" if turn < mana_value
+                        else "over_curve")
+                    curve_stats = card_perf["play_curve_stats"][curve_status]
+                    curve_stats["games"] += 1
+                    self._record_card_outcome(curve_stats, outcome)
+
+            in_opening_hand = card_id in opening
+            if in_opening_hand:
+                card_perf["games_in_opening_hand"] += 1
+                card_perf["wins_when_in_opening_hand"] += points
+
+            was_drawn = False
+            for turn, cards in player_draw_history.items():
+                if card_id not in cards:
+                    continue
+                was_drawn = True
+                turn_key = str(turn)
+                draw_stats = card_perf.setdefault(
+                    "draw_performance_by_turn", {}).setdefault(
+                        turn_key, {"drawn": 0, "wins": 0, "draws": 0})
+                draw_stats["drawn"] += 1
+                self._record_card_outcome(draw_stats, outcome)
+
+            if was_drawn or in_opening_hand:
+                card_perf["games_drawn"] += 1
+                card_perf["wins_when_drawn"] += points
+            else:
+                card_perf["games_not_drawn"] += 1
+                card_perf["wins_when_not_drawn"] += points
+
+            games_played = max(1, card_perf["games_played"])
+            card_perf["win_rate"] = (
+                card_perf["wins"] + 0.5 * card_perf["draws"]
+            ) / games_played
+            card_perf["drawn_win_rate"] = (
+                card_perf["wins_when_drawn"]
+                / max(1, card_perf["games_drawn"]))
+            card_perf["not_drawn_win_rate"] = (
+                card_perf["wins_when_not_drawn"]
+                / max(1, card_perf["games_not_drawn"]))
+            card_perf["opening_hand_win_rate"] = (
+                card_perf["wins_when_in_opening_hand"]
+                / max(1, card_perf["games_in_opening_hand"]))
+
+            if (card_perf["games_drawn"] > 0
+                    and card_perf["games_not_drawn"] > 0):
+                card_perf["improvement_factor"] = (
+                    card_perf["drawn_win_rate"]
+                    / max(0.01, card_perf["not_drawn_win_rate"]))
+            try:
+                base_score = (
+                    card_perf["improvement_factor"] - 0.5) * 2
+                win_rate_boost = card_perf["win_rate"] - 0.5
+                card_perf["performance_rating"] = max(
+                    0.0, min(
+                        1.0,
+                        0.5 + 0.25 * base_score
+                        + 0.25 * win_rate_boost))
+            except (KeyError, TypeError):
+                card_perf["performance_rating"] = 0.5
+
+            if not self._save_individual_card_stats(card_name, {
+                    "name": card_name,
+                    "id": card_id,
+                    "wins": 1 if outcome == "win" else 0,
+                    "losses": 1 if outcome == "loss" else 0,
+                    "draws": 1 if outcome == "draw" else 0,
+                    "games_played": 1,
+                    "was_played": was_played,
+                    "was_drawn": was_drawn,
+                    "in_opening_hand": in_opening_hand,
+                    "usage_count": 1 if was_played else 0,
+                    "win_rate": points,
+                    "game_stage": game_stage.value,
+                    "game_state": game_state.value,
+                    "deck_archetype": deck_stats.get(
+                        "archetype", "unknown"),
+            }):
+                success = False
+
+        return success
+
+    def _update_card_stats(self, winner_deck_id: str, loser_deck_id: str,
+                           cards_played: Dict[int, List[int]],
+                           game_stage: GameStage,
+                           game_state: GamePosition,
+                           is_draw: bool = False,
+                           opening_hands: Dict = None,
+                           draw_history: Dict = None,
+                           play_order: Dict = None,
+                           play_history: Dict = None) -> bool:
+        """Update canonical per-card aggregates for both deck seats."""
         winner_stats = self.get_deck_stats(winner_deck_id)
         loser_stats = self.get_deck_stats(loser_deck_id)
-        
         if not winner_stats or not loser_stats:
             return False
-        
-        # Ensure card_list is used consistently for composition
-        winner_composition = winner_stats.get("card_list", [])
-        loser_composition = loser_stats.get("card_list", [])
-        
-        # Initialize defaults for optional parameters
-        if opening_hands is None:
-            opening_hands = {"winner": [], "loser": []}
-        
-        if draw_history is None:
-            draw_history = {"winner": {}, "loser": {}}
-        
-        if play_order is None:
-            play_order = {"first_player": "unknown"}
+
+        opening_hands = opening_hands or {"winner": [], "loser": []}
+        draw_history = draw_history or {"winner": {}, "loser": {}}
+        play_order = play_order or {"first_player": "unknown"}
+        play_history = play_history or {}
+        cards_played = cards_played or {0: [], 1: []}
+
         first_player = play_order.get("first_player")
         winner_went_first = (
             True if first_player == "winner"
@@ -2783,818 +3055,40 @@ class DeckStatsTracker:
             True if first_player == "loser"
             else False if first_player == "winner" else None)
         loser_game_state = _opposing_position(game_state)
-            
-        # Process cards for winner deck
-        first_played = cards_played.get(0, [])
-        first_opening_hand = opening_hands.get("winner", [])
-        first_draw_history = _player_turn_history(
-            draw_history.get("winner", {}), winner_went_first)
-        
-        # Track when cards were played (by turn)
-        first_play_history = {}
-        real_winner_history = (play_history or {}).get("winner") or {}
-        if real_winner_history:
-            # Triage fix (July 2026): use the REAL turns recorded by
-            # gs.track_card_played. The CMC estimate below fabricated curve
-            # data (every 6-drop "played on turn 6").
-            first_play_history = _player_turn_history(
-                real_winner_history, winner_went_first)
-        # Missing telemetry stays unknown. Inferring the play turn from mana
-        # value makes every card look as though it was cast perfectly on curve.
-        
-        # Update card performances for winner deck
-        for card_entry in winner_composition:
-            card_id = card_entry["id"]
-            card_name = card_entry["name"]
-            
-            # Initialize ID-based card performance tracking
-            if "card_performance" not in winner_stats:
-                winner_stats["card_performance"] = {}
-                
-            if str(card_id) not in winner_stats["card_performance"]:
-                winner_stats["card_performance"][str(card_id)] = {
-                    "name": card_name,
-                    "games_played": 0,
-                    "wins": 0,
-                    "losses": 0,
-                    "draws": 0,
-                    "usage_count": 0,
-                    "win_rate": 0,
-                    "games_drawn": 0,
-                    "wins_when_drawn": 0,
-                    "games_not_drawn": 0,
-                    "wins_when_not_drawn": 0,
-                    "games_in_opening_hand": 0,
-                    "wins_when_in_opening_hand": 0,
-                    "performance_by_turn": {},
-                    "performance_by_stage": {
-                        "early": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "mid": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "late": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "performance_by_position": {
-                        "ahead": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "parity": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "behind": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "play_order_performance": {
-                        "play_first": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "play_second": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "play_curve_stats": {
-                        "on_curve": {"games": 0, "wins": 0, "draws": 0},
-                        "under_curve": {"games": 0, "wins": 0, "draws": 0},
-                        "over_curve": {"games": 0, "wins": 0, "draws": 0}
-                    }
-                }
-                
-            # Initialize name-based card performance tracking
-            if "card_performance_by_name" not in winner_stats:
-                winner_stats["card_performance_by_name"] = {}
-                
-            if card_name not in winner_stats["card_performance_by_name"]:
-                winner_stats["card_performance_by_name"][card_name] = {
-                    "name": card_name,
-                    "games_played": 0,
-                    "wins": 0,
-                    "losses": 0,
-                    "draws": 0,
-                    "usage_count": 0,
-                    "win_rate": 0,
-                    "games_drawn": 0,
-                    "wins_when_drawn": 0,
-                    "games_not_drawn": 0,
-                    "wins_when_not_drawn": 0,
-                    "games_in_opening_hand": 0,
-                    "wins_when_in_opening_hand": 0,
-                    "performance_by_turn": {},
-                    "performance_by_stage": {
-                        "early": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "mid": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "late": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "performance_by_position": {
-                        "ahead": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "parity": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "behind": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "play_order_performance": {
-                        "play_first": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "play_second": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "play_curve_stats": {
-                        "on_curve": {"games": 0, "wins": 0, "draws": 0},
-                        "under_curve": {"games": 0, "wins": 0, "draws": 0},
-                        "over_curve": {"games": 0, "wins": 0, "draws": 0}
-                    }
-                }
-                
-            # Get references to both card performance objects for more concise code
-            card_perf = winner_stats["card_performance"][str(card_id)]
-            name_perf = winner_stats["card_performance_by_name"][card_name]
-            
-            # Update basic game stats
-            card_perf["games_played"] += 1
-            name_perf["games_played"] += 1
-            
-            if is_draw:
-                card_perf["draws"] += 1
-                name_perf["draws"] += 1
-            else:
-                card_perf["wins"] += 1
-                name_perf["wins"] += 1
-            
-            # Check if card was played
-            was_played = card_id in first_played
-            if was_played:
-                card_perf["usage_count"] += 1
-                name_perf["usage_count"] += 1
-                
-                # Track performance by game stage
-                stage_key = game_stage.value
-                if stage_key not in card_perf["performance_by_stage"]:
-                    card_perf["performance_by_stage"][stage_key] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    
-                card_perf["performance_by_stage"][stage_key]["played"] += 1
-                if is_draw:
-                    card_perf["performance_by_stage"][stage_key]["draws"] += 1
-                else:
-                    card_perf["performance_by_stage"][stage_key]["wins"] += 1
-                    
-                # Same for name-based tracking
-                if stage_key not in name_perf["performance_by_stage"]:
-                    name_perf["performance_by_stage"][stage_key] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    
-                name_perf["performance_by_stage"][stage_key]["played"] += 1
-                if is_draw:
-                    name_perf["performance_by_stage"][stage_key]["draws"] += 1
-                else:
-                    name_perf["performance_by_stage"][stage_key]["wins"] += 1
-                
-                # Track performance by game state/position
-                position_key = game_state.value
-                if position_key not in card_perf["performance_by_position"]:
-                    card_perf["performance_by_position"][position_key] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                
-                card_perf["performance_by_position"][position_key]["played"] += 1
-                if is_draw:
-                    card_perf["performance_by_position"][position_key]["draws"] += 1
-                else:
-                    card_perf["performance_by_position"][position_key]["wins"] += 1
-                
-                # Same for name-based tracking
-                if position_key not in name_perf["performance_by_position"]:
-                    name_perf["performance_by_position"][position_key] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                
-                name_perf["performance_by_position"][position_key]["played"] += 1
-                if is_draw:
-                    name_perf["performance_by_position"][position_key]["draws"] += 1
-                else:
-                    name_perf["performance_by_position"][position_key]["wins"] += 1
-                
-                # Track play order performance
-                first_player = play_order.get("first_player")
-                play_position = (
-                    "play_first" if first_player == "winner"
-                    else "play_second" if first_player == "loser"
-                    else "unknown")
-                if play_position not in card_perf["play_order_performance"]:
-                    card_perf["play_order_performance"][play_position] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                
-                card_perf["play_order_performance"][play_position]["played"] += 1
-                if is_draw:
-                    card_perf["play_order_performance"][play_position]["draws"] += 1
-                else:
-                    card_perf["play_order_performance"][play_position]["wins"] += 1
-                    
-                # Same for name-based tracking
-                if play_position not in name_perf["play_order_performance"]:
-                    name_perf["play_order_performance"][play_position] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                
-                name_perf["play_order_performance"][play_position]["played"] += 1
-                if is_draw:
-                    name_perf["play_order_performance"][play_position]["draws"] += 1
-                else:
-                    name_perf["play_order_performance"][play_position]["wins"] += 1
-                
-                # Check if played on curve
-                # First, find which turn the card was played
-                for turn, cards in first_play_history.items():
-                    if card_id in cards:
-                        # Get card's CMC
-                        card = self.card_db.get(card_id)
-                        if card and hasattr(card, 'cmc'):
-                            curve_status = ""
-                            if turn == int(card.cmc):  # On curve
-                                curve_status = "on_curve"
-                            elif turn < int(card.cmc):  # Under curve (played early)
-                                curve_status = "under_curve"
-                            else:  # Over curve (played late)
-                                curve_status = "over_curve"
-                            
-                            # Track curve performance
-                            if curve_status:
-                                # For ID-based tracking
-                                card_perf["play_curve_stats"][curve_status]["games"] += 1
-                                if is_draw:
-                                    card_perf["play_curve_stats"][curve_status]["draws"] += 1
-                                else:
-                                    card_perf["play_curve_stats"][curve_status]["wins"] += 1
-                                    
-                                # For name-based tracking
-                                name_perf["play_curve_stats"][curve_status]["games"] += 1
-                                if is_draw:
-                                    name_perf["play_curve_stats"][curve_status]["draws"] += 1
-                                else:
-                                    name_perf["play_curve_stats"][curve_status]["wins"] += 1
-                        
-                        # Record turn-by-turn performance
-                        turn_key = str(turn)
-                        if "performance_by_turn" not in card_perf:
-                            card_perf["performance_by_turn"] = {}
-                        if turn_key not in card_perf["performance_by_turn"]:
-                            card_perf["performance_by_turn"][turn_key] = {"played": 0, "wins": 0, "draws": 0}
-                            
-                        card_perf["performance_by_turn"][turn_key]["played"] += 1
-                        if is_draw:
-                            card_perf["performance_by_turn"][turn_key]["draws"] += 1
-                        else:
-                            card_perf["performance_by_turn"][turn_key]["wins"] += 1
-                            
-                        # For name-based tracking
-                        if "performance_by_turn" not in name_perf:
-                            name_perf["performance_by_turn"] = {}
-                        if turn_key not in name_perf["performance_by_turn"]:
-                            name_perf["performance_by_turn"][turn_key] = {"played": 0, "wins": 0, "draws": 0}
-                            
-                        name_perf["performance_by_turn"][turn_key]["played"] += 1
-                        if is_draw:
-                            name_perf["performance_by_turn"][turn_key]["draws"] += 1
-                        else:
-                            name_perf["performance_by_turn"][turn_key]["wins"] += 1
-            
-            # Check if card was in opening hand
-            in_opening_hand = card_id in first_opening_hand
-            if in_opening_hand:
-                card_perf["games_in_opening_hand"] += 1
-                name_perf["games_in_opening_hand"] += 1
-                
-                if is_draw:
-                    # Award half a win for draws
-                    card_perf["wins_when_in_opening_hand"] += 0.5
-                    name_perf["wins_when_in_opening_hand"] += 0.5
-                else:
-                    card_perf["wins_when_in_opening_hand"] += 1
-                    name_perf["wins_when_in_opening_hand"] += 1
-            
-            # Track drawn cards
-            was_drawn = False
-            for turn, cards in first_draw_history.items():
-                if card_id in cards:
-                    was_drawn = True
-                    turn_key = str(turn)
-                    
-                    # Initialize turn tracking if needed
-                    if "draw_performance_by_turn" not in card_perf:
-                        card_perf["draw_performance_by_turn"] = {}
-                    if turn_key not in card_perf["draw_performance_by_turn"]:
-                        card_perf["draw_performance_by_turn"][turn_key] = {
-                            "drawn": 0, "wins": 0, "draws": 0
-                        }
-                    
-                    # Update turn tracking
-                    card_perf["draw_performance_by_turn"][turn_key]["drawn"] += 1
-                    if is_draw:
-                        card_perf["draw_performance_by_turn"][turn_key]["draws"] += 1
-                    else:
-                        card_perf["draw_performance_by_turn"][turn_key]["wins"] += 1
-                        
-                    # Same for name-based tracking
-                    if "draw_performance_by_turn" not in name_perf:
-                        name_perf["draw_performance_by_turn"] = {}
-                    if turn_key not in name_perf["draw_performance_by_turn"]:
-                        name_perf["draw_performance_by_turn"][turn_key] = {
-                            "drawn": 0, "wins": 0, "draws": 0
-                        }
-                    
-                    name_perf["draw_performance_by_turn"][turn_key]["drawn"] += 1
-                    if is_draw:
-                        name_perf["draw_performance_by_turn"][turn_key]["draws"] += 1
-                    else:
-                        name_perf["draw_performance_by_turn"][turn_key]["wins"] += 1
-            
-            # Update drawn card statistics
-            if was_drawn or in_opening_hand:
-                card_perf["games_drawn"] += 1
-                if is_draw:
-                    card_perf["wins_when_drawn"] += 0.5  # Count draw as half a win
-                else:
-                    card_perf["wins_when_drawn"] += 1
-                    
-                name_perf["games_drawn"] += 1
-                if is_draw:
-                    name_perf["wins_when_drawn"] += 0.5
-                else:
-                    name_perf["wins_when_drawn"] += 1
-            else:
-                card_perf["games_not_drawn"] += 1
-                if is_draw:
-                    card_perf["wins_when_not_drawn"] += 0.5
-                else:
-                    card_perf["wins_when_not_drawn"] += 1
-                    
-                name_perf["games_not_drawn"] += 1
-                if is_draw:
-                    name_perf["wins_when_not_drawn"] += 0.5
-                else:
-                    name_perf["wins_when_not_drawn"] += 1
-            
-            # Calculate win rates safely with draw consideration
-            # Overall win rate
-            games_played = max(1, card_perf["games_played"])
-            card_perf["win_rate"] = (card_perf["wins"] + 0.5 * card_perf["draws"]) / games_played
-            
-            name_games_played = max(1, name_perf["games_played"])
-            name_perf["win_rate"] = (name_perf["wins"] + 0.5 * name_perf["draws"]) / name_games_played
-            
-            # Win rate when drawn
-            games_drawn = max(1, card_perf["games_drawn"])
-            card_perf["drawn_win_rate"] = card_perf["wins_when_drawn"] / games_drawn
-            
-            name_games_drawn = max(1, name_perf["games_drawn"])
-            name_perf["drawn_win_rate"] = name_perf["wins_when_drawn"] / name_games_drawn
-            
-            # Win rate when not drawn
-            games_not_drawn = max(1, card_perf["games_not_drawn"])
-            card_perf["not_drawn_win_rate"] = card_perf["wins_when_not_drawn"] / games_not_drawn
-            
-            name_games_not_drawn = max(1, name_perf["games_not_drawn"])
-            name_perf["not_drawn_win_rate"] = name_perf["wins_when_not_drawn"] / name_games_not_drawn
-            
-            # Win rate when in opening hand
-            opening_hand_games = max(1, card_perf["games_in_opening_hand"])
-            card_perf["opening_hand_win_rate"] = card_perf["wins_when_in_opening_hand"] / opening_hand_games
-            
-            name_opening_hand_games = max(1, name_perf["games_in_opening_hand"])
-            name_perf["opening_hand_win_rate"] = name_perf["wins_when_in_opening_hand"] / name_opening_hand_games
-            
-            # Calculate Improvement Factor (how much better is the win rate when drawn vs. not)
-            # A value > 1 means the card improves your chances when drawn
-            # A value < 1 means the card actually hurts your chances when drawn
-            try:
-                if card_perf["games_drawn"] > 0 and card_perf["games_not_drawn"] > 0:
-                    improvement_factor = card_perf["drawn_win_rate"] / max(0.01, card_perf["not_drawn_win_rate"])
-                    card_perf["improvement_factor"] = improvement_factor
-                    
-                if name_perf["games_drawn"] > 0 and name_perf["games_not_drawn"] > 0:
-                    name_improvement_factor = name_perf["drawn_win_rate"] / max(0.01, name_perf["not_drawn_win_rate"])
-                    name_perf["improvement_factor"] = name_improvement_factor
-            except (ZeroDivisionError, TypeError):
-                # Safety measure in case of division errors
-                card_perf["improvement_factor"] = 1.0
-                name_perf["improvement_factor"] = 1.0
-                
-            # Calculate performance rating (a normalized score from 0-1)
-            try:
-                # Base performance on improvement factor and win rate
-                base_score = (card_perf["improvement_factor"] - 0.5) * 2  # Scale to roughly -1 to 1
-                win_rate_boost = card_perf["win_rate"] - 0.5  # How much better than 50%
-                
-                # Combine factors and normalize to 0-1 range
-                performance_rating = max(0.0, min(1.0, 0.5 + 0.25 * base_score + 0.25 * win_rate_boost))
-                card_perf["performance_rating"] = performance_rating
-                
-                # Same for name-based
-                name_base_score = (name_perf["improvement_factor"] - 0.5) * 2
-                name_win_rate_boost = name_perf["win_rate"] - 0.5
-                name_performance_rating = max(0.0, min(1.0, 0.5 + 0.25 * name_base_score + 0.25 * name_win_rate_boost))
-                name_perf["performance_rating"] = name_performance_rating
-            except (KeyError, TypeError):
-                # Default rating if calculation fails
-                card_perf["performance_rating"] = 0.5
-                name_perf["performance_rating"] = 0.5
-                    
-            # Also save card stats to separate card file
-            self._save_individual_card_stats(card_name, {
-                "name": card_name,
-                "id": card_id,
-                "wins": 0 if is_draw else 1,
-                "losses": 0,
-                "draws": 1 if is_draw else 0,
-                "games_played": 1,
-                "was_played": was_played,
-                "was_drawn": was_drawn,
-                "in_opening_hand": in_opening_hand,
-                "usage_count": 1 if was_played else 0,
-                "win_rate": 0.5 if is_draw else 1.0,
-                "game_stage": game_stage.value,
-                "game_state": game_state.value,
-                "deck_archetype": winner_stats.get("archetype", "unknown")
-            })
 
-        # Process cards for loser deck (similar logic as above)
-        second_played = cards_played.get(1, [])
-        second_opening_hand = opening_hands.get("loser", [])
-        second_draw_history = _player_turn_history(
-            draw_history.get("loser", {}), loser_went_first)
-        
-        # Track when cards were played (by turn)
-        second_play_history = {}
-        real_loser_history = (play_history or {}).get("loser") or {}
-        if real_loser_history:
-            # Real turns (see winner-side comment).
-            second_play_history = _player_turn_history(
-                real_loser_history, loser_went_first)
-        # Missing telemetry stays unknown; see the winner-side comment.
-        
-        # Update card performances for loser deck
-        for card_entry in loser_composition:
-            card_id = card_entry["id"]
-            card_name = card_entry["name"]
-            
-            # Initialize card performance if needed for ID-based tracking
-            if "card_performance" not in loser_stats:
-                loser_stats["card_performance"] = {}
-                
-            if str(card_id) not in loser_stats["card_performance"]:
-                loser_stats["card_performance"][str(card_id)] = {
-                    "name": card_name,
-                    "games_played": 0,
-                    "wins": 0,
-                    "losses": 0,
-                    "draws": 0,
-                    "usage_count": 0,
-                    "win_rate": 0,
-                    "games_drawn": 0,
-                    "wins_when_drawn": 0,
-                    "games_not_drawn": 0,
-                    "wins_when_not_drawn": 0,
-                    "games_in_opening_hand": 0,
-                    "wins_when_in_opening_hand": 0,
-                    "performance_by_turn": {},
-                    "performance_by_stage": {
-                        "early": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "mid": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "late": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "performance_by_position": {
-                        "ahead": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "parity": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "behind": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "play_order_performance": {
-                        "play_first": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "play_second": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "play_curve_stats": {
-                        "on_curve": {"games": 0, "wins": 0, "draws": 0},
-                        "under_curve": {"games": 0, "wins": 0, "draws": 0},
-                        "over_curve": {"games": 0, "wins": 0, "draws": 0}
-                    }
-                }
-                    
-            # Initialize card performance by name if needed
-            if "card_performance_by_name" not in loser_stats:
-                loser_stats["card_performance_by_name"] = {}
-                
-            if card_name not in loser_stats["card_performance_by_name"]:
-                loser_stats["card_performance_by_name"][card_name] = {
-                    "name": card_name,
-                    "games_played": 0,
-                    "wins": 0,
-                    "losses": 0,
-                    "draws": 0,
-                    "usage_count": 0,
-                    "win_rate": 0,
-                    "games_drawn": 0,
-                    "wins_when_drawn": 0,
-                    "games_not_drawn": 0,
-                    "wins_when_not_drawn": 0,
-                    "games_in_opening_hand": 0,
-                    "wins_when_in_opening_hand": 0,
-                    "performance_by_turn": {},
-                    "performance_by_stage": {
-                        "early": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "mid": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "late": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "performance_by_position": {
-                        "ahead": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "parity": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "behind": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "play_order_performance": {
-                        "play_first": {"wins": 0, "losses": 0, "draws": 0, "played": 0},
-                        "play_second": {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    },
-                    "play_curve_stats": {
-                        "on_curve": {"games": 0, "wins": 0, "draws": 0},
-                        "under_curve": {"games": 0, "wins": 0, "draws": 0},
-                        "over_curve": {"games": 0, "wins": 0, "draws": 0}
-                    }
-                }
-            
-            # Get references to both card performance objects for more concise code
-            card_perf = loser_stats["card_performance"][str(card_id)]
-            name_perf = loser_stats["card_performance_by_name"][card_name]
-            
-            # Update basic game stats
-            card_perf["games_played"] += 1
-            name_perf["games_played"] += 1
-            
-            if is_draw:
-                card_perf["draws"] += 1
-                name_perf["draws"] += 1
-            else:
-                card_perf["losses"] += 1  # Loss for the loser deck
-                name_perf["losses"] += 1  # Loss for the loser deck
-            
-            # Check if card was played
-            was_played = card_id in second_played
-            if was_played:
-                card_perf["usage_count"] += 1
-                name_perf["usage_count"] += 1
-                
-                # Track performance by game stage
-                stage_key = game_stage.value
-                if stage_key not in card_perf["performance_by_stage"]:
-                    card_perf["performance_by_stage"][stage_key] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    
-                card_perf["performance_by_stage"][stage_key]["played"] += 1
-                if is_draw:
-                    card_perf["performance_by_stage"][stage_key]["draws"] += 1
-                else:
-                    card_perf["performance_by_stage"][stage_key]["losses"] += 1  # Loss for loser
-                    
-                # Same for name-based tracking
-                if stage_key not in name_perf["performance_by_stage"]:
-                    name_perf["performance_by_stage"][stage_key] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                    
-                name_perf["performance_by_stage"][stage_key]["played"] += 1
-                if is_draw:
-                    name_perf["performance_by_stage"][stage_key]["draws"] += 1
-                else:
-                    name_perf["performance_by_stage"][stage_key]["losses"] += 1  # Loss for loser
-                
-                # Track performance from the loser's own perspective.
-                position_key = loser_game_state.value
-                    
-                if position_key not in card_perf["performance_by_position"]:
-                    card_perf["performance_by_position"][position_key] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                
-                card_perf["performance_by_position"][position_key]["played"] += 1
-                if is_draw:
-                    card_perf["performance_by_position"][position_key]["draws"] += 1
-                else:
-                    card_perf["performance_by_position"][position_key]["losses"] += 1  # Loss for loser
-                
-                # Same for name-based tracking
-                if position_key not in name_perf["performance_by_position"]:
-                    name_perf["performance_by_position"][position_key] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                
-                name_perf["performance_by_position"][position_key]["played"] += 1
-                if is_draw:
-                    name_perf["performance_by_position"][position_key]["draws"] += 1
-                else:
-                    name_perf["performance_by_position"][position_key]["losses"] += 1  # Loss for loser
-                
-                # Track play order performance
-                first_player = play_order.get("first_player")
-                play_position = (
-                    "play_first" if first_player == "loser"
-                    else "play_second" if first_player == "winner"
-                    else "unknown")
-                if play_position not in card_perf["play_order_performance"]:
-                    card_perf["play_order_performance"][play_position] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                
-                card_perf["play_order_performance"][play_position]["played"] += 1
-                if is_draw:
-                    card_perf["play_order_performance"][play_position]["draws"] += 1
-                else:
-                    card_perf["play_order_performance"][play_position]["losses"] += 1  # Loss for loser
-                    
-                # Same for name-based tracking
-                if play_position not in name_perf["play_order_performance"]:
-                    name_perf["play_order_performance"][play_position] = {"wins": 0, "losses": 0, "draws": 0, "played": 0}
-                
-                name_perf["play_order_performance"][play_position]["played"] += 1
-                if is_draw:
-                    name_perf["play_order_performance"][play_position]["draws"] += 1
-                else:
-                    name_perf["play_order_performance"][play_position]["losses"] += 1  # Loss for loser
-                    
-                # Check if played on curve
-                # First, find which turn the card was played
-                for turn, cards in second_play_history.items():
-                    if card_id in cards:
-                        # Get card's CMC
-                        card = self.card_db.get(card_id)
-                        if card and hasattr(card, 'cmc'):
-                            curve_status = ""
-                            if turn == int(card.cmc):  # On curve
-                                curve_status = "on_curve"
-                            elif turn < int(card.cmc):  # Under curve (played early)
-                                curve_status = "under_curve"
-                            else:  # Over curve (played late)
-                                curve_status = "over_curve"
-                            
-                            # Track curve performance
-                            if curve_status:
-                                # For ID-based tracking
-                                card_perf["play_curve_stats"][curve_status]["games"] += 1
-                                if is_draw:
-                                    card_perf["play_curve_stats"][curve_status]["draws"] += 1
-                                else:  # Loss for loser
-                                    pass
-                                    
-                                # For name-based tracking
-                                name_perf["play_curve_stats"][curve_status]["games"] += 1
-                                if is_draw:
-                                    name_perf["play_curve_stats"][curve_status]["draws"] += 1
-                                else:  # Loss for loser
-                                    pass
-                        
-                        # Record turn-by-turn performance
-                        turn_key = str(turn)
-                        if "performance_by_turn" not in card_perf:
-                            card_perf["performance_by_turn"] = {}
-                        if turn_key not in card_perf["performance_by_turn"]:
-                            card_perf["performance_by_turn"][turn_key] = {"played": 0, "wins": 0, "draws": 0}
-                            
-                        card_perf["performance_by_turn"][turn_key]["played"] += 1
-                        if is_draw:
-                            card_perf["performance_by_turn"][turn_key]["draws"] += 1
-                        # No wins to record for loser
-                            
-                        # For name-based tracking
-                        if "performance_by_turn" not in name_perf:
-                            name_perf["performance_by_turn"] = {}
-                        if turn_key not in name_perf["performance_by_turn"]:
-                            name_perf["performance_by_turn"][turn_key] = {"played": 0, "wins": 0, "draws": 0}
-                            
-                        name_perf["performance_by_turn"][turn_key]["played"] += 1
-                        if is_draw:
-                            name_perf["performance_by_turn"][turn_key]["draws"] += 1
-                        # No wins to record for loser
-            
-            # Check if card was in opening hand
-            in_opening_hand = card_id in second_opening_hand
-            if in_opening_hand:
-                card_perf["games_in_opening_hand"] += 1
-                name_perf["games_in_opening_hand"] += 1
-                
-                if is_draw:
-                    # Award half a win for draws
-                    card_perf["wins_when_in_opening_hand"] += 0.5
-                    name_perf["wins_when_in_opening_hand"] += 0.5
-                # No wins to add for loser
-            
-            # Track drawn cards
-            was_drawn = False
-            for turn, cards in second_draw_history.items():
-                if card_id in cards:
-                    was_drawn = True
-                    turn_key = str(turn)
-                    
-                    # Initialize turn tracking if needed
-                    if "draw_performance_by_turn" not in card_perf:
-                        card_perf["draw_performance_by_turn"] = {}
-                    if turn_key not in card_perf["draw_performance_by_turn"]:
-                        card_perf["draw_performance_by_turn"][turn_key] = {
-                            "drawn": 0, "wins": 0, "draws": 0
-                        }
-                    
-                    # Update turn tracking
-                    card_perf["draw_performance_by_turn"][turn_key]["drawn"] += 1
-                    if is_draw:
-                        card_perf["draw_performance_by_turn"][turn_key]["draws"] += 1
-                    # No wins to add for loser
-                        
-                    # Same for name-based tracking
-                    if "draw_performance_by_turn" not in name_perf:
-                        name_perf["draw_performance_by_turn"] = {}
-                    if turn_key not in name_perf["draw_performance_by_turn"]:
-                        name_perf["draw_performance_by_turn"][turn_key] = {
-                            "drawn": 0, "wins": 0, "draws": 0
-                        }
-                    
-                    name_perf["draw_performance_by_turn"][turn_key]["drawn"] += 1
-                    if is_draw:
-                        name_perf["draw_performance_by_turn"][turn_key]["draws"] += 1
-                    # No wins to add for loser
-            
-            # Update drawn card statistics
-            if was_drawn or in_opening_hand:
-                card_perf["games_drawn"] += 1
-                if is_draw:
-                    card_perf["wins_when_drawn"] += 0.5  # Count draw as half a win
-                # No wins to add for loser
-                    
-                name_perf["games_drawn"] += 1
-                if is_draw:
-                    name_perf["wins_when_drawn"] += 0.5
-                # No wins to add for loser
-            else:
-                card_perf["games_not_drawn"] += 1
-                if is_draw:
-                    card_perf["wins_when_not_drawn"] += 0.5
-                # No wins to add for loser
-                    
-                name_perf["games_not_drawn"] += 1
-                if is_draw:
-                    name_perf["wins_when_not_drawn"] += 0.5
-                # No wins to add for loser
-            
-            # Calculate win rates safely with draw consideration
-            # Overall win rate
-            games_played = max(1, card_perf["games_played"])
-            card_perf["win_rate"] = (card_perf["wins"] + 0.5 * card_perf["draws"]) / games_played
-            
-            name_games_played = max(1, name_perf["games_played"])
-            name_perf["win_rate"] = (name_perf["wins"] + 0.5 * name_perf["draws"]) / name_games_played
-            
-            # Win rate when drawn
-            games_drawn = max(1, card_perf["games_drawn"])
-            card_perf["drawn_win_rate"] = card_perf["wins_when_drawn"] / games_drawn
-            
-            name_games_drawn = max(1, name_perf["games_drawn"])
-            name_perf["drawn_win_rate"] = name_perf["wins_when_drawn"] / name_games_drawn
-            
-            # Win rate when not drawn
-            games_not_drawn = max(1, card_perf["games_not_drawn"])
-            card_perf["not_drawn_win_rate"] = card_perf["wins_when_not_drawn"] / games_not_drawn
-            
-            name_games_not_drawn = max(1, name_perf["games_not_drawn"])
-            name_perf["not_drawn_win_rate"] = name_perf["wins_when_not_drawn"] / name_games_not_drawn
-            
-            # Win rate when in opening hand
-            opening_hand_games = max(1, card_perf["games_in_opening_hand"])
-            card_perf["opening_hand_win_rate"] = card_perf["wins_when_in_opening_hand"] / opening_hand_games
-            
-            name_opening_hand_games = max(1, name_perf["games_in_opening_hand"])
-            name_perf["opening_hand_win_rate"] = name_perf["wins_when_in_opening_hand"] / name_opening_hand_games
-            
-            # Calculate Improvement Factor (how much better is the win rate when drawn vs. not)
-            try:
-                if card_perf["games_drawn"] > 0 and card_perf["games_not_drawn"] > 0:
-                    improvement_factor = card_perf["drawn_win_rate"] / max(0.01, card_perf["not_drawn_win_rate"])
-                    card_perf["improvement_factor"] = improvement_factor
-                    
-                if name_perf["games_drawn"] > 0 and name_perf["games_not_drawn"] > 0:
-                    name_improvement_factor = name_perf["drawn_win_rate"] / max(0.01, name_perf["not_drawn_win_rate"])
-                    name_perf["improvement_factor"] = name_improvement_factor
-            except (ZeroDivisionError, TypeError):
-                # Safety measure in case of division errors
-                card_perf["improvement_factor"] = 1.0
-                name_perf["improvement_factor"] = 1.0
-                
-            # Calculate performance rating (a normalized score from 0-1)
-            try:
-                # Base performance on improvement factor and win rate
-                base_score = (card_perf["improvement_factor"] - 0.5) * 2  # Scale to roughly -1 to 1
-                win_rate_boost = card_perf["win_rate"] - 0.5  # How much better than 50%
-                
-                # Combine factors and normalize to 0-1 range
-                performance_rating = max(0.0, min(1.0, 0.5 + 0.25 * base_score + 0.25 * win_rate_boost))
-                card_perf["performance_rating"] = performance_rating
-                
-                # Same for name-based
-                name_base_score = (name_perf["improvement_factor"] - 0.5) * 2
-                name_win_rate_boost = name_perf["win_rate"] - 0.5
-                name_performance_rating = max(0.0, min(1.0, 0.5 + 0.25 * name_base_score + 0.25 * name_win_rate_boost))
-                name_perf["performance_rating"] = name_performance_rating
-            except (KeyError, TypeError):
-                # Default rating if calculation fails
-                card_perf["performance_rating"] = 0.5
-                name_perf["performance_rating"] = 0.5
-            
-            # Also save card stats to separate card file
-            self._save_individual_card_stats(card_name, {
-                "name": card_name,
-                "id": card_id,
-                "wins": 0,
-                "losses": 0 if is_draw else 1,
-                "draws": 1 if is_draw else 0,
-                "games_played": 1,
-                "was_played": was_played,
-                "was_drawn": was_drawn,
-                "in_opening_hand": in_opening_hand,
-                "usage_count": 1 if was_played else 0,
-                "win_rate": 0.5 if is_draw else 0.0,
-                "game_stage": game_stage.value,
-                "game_state": loser_game_state.value,
-                "deck_archetype": loser_stats.get("archetype", "unknown")
-            })
-        
-        # Save updated stats
-        if not self._replace_deck_stats(winner_deck_id, winner_stats):
-            success = False
-                
-        if not self._replace_deck_stats(loser_deck_id, loser_stats):
-            success = False
-                
-        return success
-        
+        winner_success = self._update_deck_card_performance(
+            winner_stats,
+            winner_stats.get("card_list", []),
+            cards_played.get(0, []),
+            opening_hands.get("winner", []),
+            draw_history.get("winner", {}),
+            play_history.get("winner", {}),
+            winner_went_first,
+            game_stage,
+            game_state,
+            "draw" if is_draw else "win",
+        )
+        loser_success = self._update_deck_card_performance(
+            loser_stats,
+            loser_stats.get("card_list", []),
+            cards_played.get(1, []),
+            opening_hands.get("loser", []),
+            draw_history.get("loser", {}),
+            play_history.get("loser", {}),
+            loser_went_first,
+            game_stage,
+            loser_game_state,
+            "draw" if is_draw else "loss",
+        )
+
+        winner_saved = self._replace_deck_stats(
+            winner_deck_id, winner_stats)
+        loser_saved = self._replace_deck_stats(
+            loser_deck_id, loser_stats)
+        return (
+            winner_success and loser_success
+            and winner_saved and loser_saved)
+
     def _save_individual_card_stats(self, card_name: str, stats_update: Dict) -> bool:
         """
         Save statistics for an individual card to its own file.
@@ -3610,17 +3104,18 @@ class DeckStatsTracker:
         if not card_name:
             return False
 
-        # Create file path
-        card_file = self._card_stats_file(card_name)
+        card_id = self._resolve_unique_card_id(
+            card_name, stats_update.get("id"))
+        card_file = self._card_stats_file(card_name, card_id)
 
         # Keep the working copy in memory. A Standard game touches dozens of
         # unique cards, so loading and rewriting one gzip per card per episode
         # dominated the statistics path during vectorized training.
-        card_stats = self._individual_card_cache.get(card_file)
-        if card_stats is None:
-            card_stats = self.load(card_file)
+        card_stats = self._load_individual_card_stats(
+            card_id, card_name, persist_migration=False)
         if not card_stats:
             card_stats = {
+                "id": card_id,
                 "name": card_name,
                 "games_played": 0,
                 "wins": 0,
@@ -3641,6 +3136,8 @@ class DeckStatsTracker:
                 }
             }
         else:
+            if card_id is not None:
+                card_stats["id"] = card_id
             # For older card files that might be missing these keys, initialize them.
             if "by_game_stage" not in card_stats:
                 card_stats["by_game_stage"] = {
@@ -3952,10 +3449,8 @@ class DeckStatsTracker:
         
         # Check individual card stats first
         if card_name:
-            card_file = self._card_stats_file(card_name)
-            card_stats = self._individual_card_cache.get(card_file)
-            if card_stats is None:
-                card_stats = self.load(card_file)
+            card_stats = self._load_individual_card_stats(
+                card_id, card_name, persist_migration=True)
             if card_stats:
                 return {
                     "win_rate": card_stats.get("win_rate", 0),
@@ -4029,22 +3524,102 @@ class DeckStatsTracker:
             sanitized = sanitized[:max_length]
         return sanitized or "card"
 
-    def _card_stats_file(self, card_name: str) -> str:
-        """Return a backward-compatible, collision-safe card aggregate path."""
+    def _matching_card_ids(self, card_name: str) -> set:
+        """Return known canonical IDs with the supplied display name."""
+        folded_name = str(card_name).casefold()
+        matches = {
+            str(card_id)
+            for card_id, known_name in self.card_id_to_name.items()
+            if str(known_name).casefold() == folded_name
+        }
+        for card_id, card in (self.card_db or {}).items():
+            if str(getattr(card, "name", "")).casefold() == folded_name:
+                matches.add(str(card_id))
+        return matches
+
+    def _resolve_unique_card_id(
+            self, card_name: str, card_id: Any = None) -> Any:
+        if card_id is not None:
+            return card_id
+        matches = self._matching_card_ids(card_name)
+        if len(matches) == 1:
+            return next(iter(matches))
+        return None
+
+    def _legacy_card_stats_files(self, card_name: str) -> List[str]:
+        """Return every path produced by the former name-keyed scheme."""
         base = self._sanitize_filename(card_name)
         legacy_path = f"cards/{base}.json"
-        existing = self._individual_card_cache.get(legacy_path)
-        if existing is None:
-            existing = self.load(legacy_path)
-        if (not existing
-                or str(existing.get("name", "")).casefold()
-                == str(card_name).casefold()):
-            return legacy_path
+        digest = hashlib.sha256(
+            str(card_name).encode("utf-8")).hexdigest()[:12]
+        collision_path = f"cards/{base[:37]}_{digest}.json"
+        return ([legacy_path] if collision_path == legacy_path
+                else [legacy_path, collision_path])
 
-        # Sanitization removes punctuation and truncates long names, so two
-        # distinct cards can otherwise share one file and aggregate identity.
-        digest = hashlib.sha256(str(card_name).encode("utf-8")).hexdigest()[:12]
-        return f"cards/{base[:37]}_{digest}.json"
+    def _load_card_stats_path(self, card_file: str) -> Optional[Dict]:
+        cached = self._individual_card_cache.get(card_file)
+        if cached is not None:
+            return cached
+        if not self.exists(card_file):
+            return None
+        loaded = self.load(card_file)
+        if isinstance(loaded, dict) and loaded:
+            self._individual_card_cache[card_file] = loaded
+            return loaded
+        return None
+
+    def _legacy_card_file_matches_id(
+            self, payload: Dict, card_name: str, card_id: Any) -> bool:
+        """Reject legacy name aggregates that could describe multiple IDs."""
+        target_id = str(card_id)
+        payload_id = payload.get("id")
+        if payload_id is not None:
+            return str(payload_id) == target_id
+        return self._matching_card_ids(card_name) == {target_id}
+
+    def _load_individual_card_stats(
+            self, card_id: Any, card_name: str,
+            persist_migration: bool = False) -> Optional[Dict]:
+        """Load canonical stats, migrating an unambiguous legacy file once."""
+        card_id = self._resolve_unique_card_id(card_name, card_id)
+        card_file = self._card_stats_file(card_name, card_id)
+        canonical = self._load_card_stats_path(card_file)
+        if canonical is not None or card_id is None:
+            return canonical
+
+        legacy_matches = []
+        for legacy_file in self._legacy_card_stats_files(card_name):
+            legacy = self._load_card_stats_path(legacy_file)
+            if (legacy is not None
+                    and str(legacy.get("name", "")).casefold()
+                    == str(card_name).casefold()
+                    and self._legacy_card_file_matches_id(
+                        legacy, card_name, card_id)):
+                legacy_matches.append(legacy)
+
+        if len(legacy_matches) != 1:
+            return None
+
+        migrated = copy.deepcopy(legacy_matches[0])
+        migrated["id"] = card_id
+        migrated["name"] = card_name
+        self._individual_card_cache[card_file] = migrated
+        if persist_migration and self.save(card_file, migrated):
+            self._dirty_individual_card_files.discard(card_file)
+        else:
+            self._dirty_individual_card_files.add(card_file)
+        return migrated
+
+    def _card_stats_file(
+            self, card_name: str, card_id: Any = None) -> str:
+        """Return the canonical-ID aggregate path, with a legacy fallback."""
+        card_id = self._resolve_unique_card_id(card_name, card_id)
+        if card_id is None:
+            return self._legacy_card_stats_files(card_name)[0]
+        identity = str(card_id)
+        safe_identity = self._sanitize_filename(identity)[:24]
+        digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:12]
+        return f"cards/id_{safe_identity}_{digest}.json"
     
     def _get_all_deck_files(self) -> List[str]:
         """Get all deck JSON files from storage"""

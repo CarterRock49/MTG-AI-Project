@@ -441,7 +441,7 @@ class HarvestFixturesTest(unittest.TestCase):
                 "unparsed_cards": set(),
             }
 
-        class SuccessfulEnvironment:
+        class SuccessfulEnvironment(RealEnvironment):
             constructed_agent_is_p1 = None
 
             def __init__(self, decks, card_db, **kwargs):
@@ -469,6 +469,9 @@ class HarvestFixturesTest(unittest.TestCase):
                 p1, p2 = self.decks._pair
                 self.current_deck_name_p1 = p1["name"]
                 self.current_deck_name_p2 = p2["name"]
+                self.current_agent_deck = self.current_deck_name_p2
+                self.current_opponent_deck = self.current_deck_name_p1
+                self.active_opponent_profile = "scripted"
                 self.game_state = FakeState()
                 self._game_result_recorded = False
                 self._game_result = None

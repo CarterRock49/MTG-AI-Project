@@ -1134,6 +1134,37 @@ class EffectFactory:
         if reflexive_effect:
             return [reflexive_effect]
 
+        # An exile followed by a delayed pronoun return is one linked action.
+        # Parse it before generic delayed-trigger extraction so registration
+        # happens only after the exact object has successfully entered exile.
+        delayed_blink_surface = re.sub(
+            r"\([^()]*\)", " ", effect_text).strip()
+        delayed_blink_match = re.fullmatch(
+            r"\s*(?:gift\b[^\n.;]*\r?\n\s*)?"
+            r"exile target\s+"
+            r"(?P<target_type>(?:(?:nonland|nontoken)\s+)?"
+            r"(?:creature|artifact|enchantment|planeswalker|battle|permanent))"
+            r"\s*\.\s*"
+            r"(?P<gift_condition>if the gift (?:wasn't|was not) promised,\s*)?"
+            r"return\s+(?:it|that card|that creature|that permanent)\s+"
+            r"to the battlefield under its owner(?:'|\u2019)?s control\s+"
+            r"with\s+(?:a|an|one)\s+"
+            r"(?P<counter_type>[+\-]\d+/[+\-]\d+|[\w-]+)\s+"
+            r"counter on it\s+at the beginning of (?:the |your )?next\s+"
+            r"(?P<phase>end step|upkeep|end of combat|combat|cleanup(?: step)?|main phase)"
+            r"\s*\.?\s*",
+            delayed_blink_surface, re.IGNORECASE)
+        if delayed_blink_match:
+            from .ability_types import ExileThenDelayedReturnEffect
+            return [ExileThenDelayedReturnEffect(
+                target_type=delayed_blink_match.group("target_type"),
+                counter_type=delayed_blink_match.group("counter_type"),
+                phase_key=delayed_blink_match.group("phase"),
+                return_unless_context_key=(
+                    "gift_promised"
+                    if delayed_blink_match.group("gift_condition") else None),
+                effect_text=effect_text)]
+
         # Meld's "exile them, then meld them" is one indivisible action. If
         # generic clause splitting handles the exile first, the pair is gone
         # before the meld instruction can identify it.

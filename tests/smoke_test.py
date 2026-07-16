@@ -390,6 +390,11 @@ def check_agent_ownership(env):
     assert clone.action_handler is not None and clone.action_handler is not gs.action_handler
     assert clone.strategic_planner is not None and clone.strategic_planner is not gs.strategic_planner
     assert clone.action_handler.game_state is clone, "clone's handler must bind to the clone"
+    assert clone.card_evaluator is not None and clone.card_evaluator is not gs.card_evaluator
+    assert clone.action_handler.card_evaluator is clone.card_evaluator, \
+        "clone handler and state must share exactly one evaluator"
+    assert clone.strategic_planner.card_evaluator is clone.card_evaluator, \
+        "clone planner and state must share exactly one evaluator"
 
 
 @stage("training environments alternate policy seats")
@@ -502,10 +507,17 @@ def check_stats_pipeline(decks, card_db):
                           "agent_version", "curriculum_stage",
                           "opponent_profile", "agent_deck",
                           "opponent_deck", "matchup_episode_index",
-                          "fidelity"):
+                          "game_id", "analytics_recording",
+                          "analytics_persistence_at_record", "fidelity"):
                 assert field in r, f"game log record missing '{field}'"
             assert r["schema_version"] == 2, "unexpected game log schema version"
             assert r["agent_version"] == "smoke-test", "agent version not stamped"
+            assert r["analytics_recording"] == {
+                "deck_stats": "accepted", "card_memory": "accepted"}, \
+                "analytics writer failure was not reflected accurately"
+            assert r["analytics_persistence_at_record"] == {
+                "deck_stats": "persisted", "card_memory": "deferred"}, \
+                "analytics durability was not reflected accurately"
         rep_path = os.path.join(paths["deck_stats_path"], "fidelity_report.json")
         assert os.path.exists(rep_path), "fidelity_report.json missing"
         rep = json.load(open(rep_path, encoding="utf-8"))

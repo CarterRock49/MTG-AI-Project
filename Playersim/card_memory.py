@@ -298,7 +298,9 @@ class CardMemory:
             # Card not found
             return {}
     
-    def register_card(self, card_id: int, card_name: str, card_data: Dict = None) -> None:
+    def register_card(
+            self, card_id: int, card_name: str,
+            card_data: Dict = None) -> bool:
         """
         Register a new card or update existing card data.
         
@@ -314,10 +316,10 @@ class CardMemory:
                 logging.error(
                     "Refusing to register card-memory identity %s as both %r and %r",
                     card_key, existing_name, card_name)
-                return
+                return False
             # Update ID-name mapping
             if not self.update_card_mapping(card_id, card_name):
-                return
+                return False
             
             # Create or update card entry
             if card_key not in self.card_data:
@@ -360,8 +362,10 @@ class CardMemory:
                     if self.card_data[card_key].get(key) != value:
                         self.card_data[card_key][key] = value
                         self._mutation_version += 1
+
+            return True
     
-    def update_card_performance(self, card_id: int, game_result: Dict) -> None:
+    def update_card_performance(self, card_id: int, game_result: Dict) -> bool:
         """
         Record performance of a card to the card memory system with improved error handling.
         
@@ -371,7 +375,7 @@ class CardMemory:
         """
         if not isinstance(game_result, dict):
             logging.error(f"Invalid game_result format for card {card_id}: expected dict, got {type(game_result)}")
-            return
+            return False
             
         try:
             card_key = str(card_id)
@@ -380,12 +384,13 @@ class CardMemory:
             with self.memory_lock:
                 # Register card if it doesn't exist
                 if card_name and (card_key not in self.card_data):
-                    self.register_card(card_id, card_name)
+                    if self.register_card(card_id, card_name) is False:
+                        return False
                     
                 # Skip if card isn't registered and we don't have a name
                 if card_key not in self.card_data:
                     logging.warning(f"Skipping update for unknown card: {card_id}")
-                    return
+                    return False
                 
                 # Work on a private copy so malformed telemetry cannot leave a
                 # half-applied game (for example games_played incremented but
@@ -520,10 +525,13 @@ class CardMemory:
                     self.save_memory_async()
                     logging.info(f"Triggered automatic save after {self.save_frequency} card updates")
 
+                return True
+
         except Exception as e:
             logging.error(f"Error recording card performance for card {card_id}: {e}")
             import traceback
             logging.debug(traceback.format_exc())
+            return False
 
     def _ensure_card_stats_fields(self, card_stats):
         """Ensure all required fields exist in card stats with defaults"""

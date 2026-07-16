@@ -58,7 +58,8 @@ class GameState(
                  "strategic_planner", "attackers_this_turn", "creatures_died_this_turn", 'strategy_memory',
                  "_logged_card_ids", "_logged_errors", "targeting_system",
                  "_phase_action_count", "priority_player", "stats_tracker",
-                 "card_memory", 'original_p2_deck', "_consecutive_no_ops",
+                 "card_memory", "deck_archetypes", 'original_p2_deck',
+                 "_consecutive_no_ops",
                  # *** ADDED action_handler ***
                  "action_handler", "impending_cards", "_offspring_cost_paid_context",
                  # Special card types
@@ -225,6 +226,7 @@ class GameState(
         self.strategy_memory = None # External system reference
         self.stats_tracker = None # External system reference
         self.card_memory = None # External system reference
+        self.deck_archetypes = {}
         self.ability_handler = None
         self.layer_system = None
         self.replacement_effects = None
@@ -401,7 +403,24 @@ class GameState(
     def _init_agent_subsystems(self):
         """Agent/strategy layer. Built here only for clones; the environment
         constructs and attaches these for the primary game state."""
-        # --- CRITICAL: Action Handler first if others depend on it during init ---
+        # Build the evaluator first so every clone subsystem adopts the same
+        # instance and shares one set of external references and caches.
+        try:
+            from .enhanced_card_evaluator import EnhancedCardEvaluator
+            self.card_evaluator = EnhancedCardEvaluator(
+                self,
+                getattr(self, 'stats_tracker', None),
+                getattr(self, 'card_memory', None)
+            )
+            logging.debug("Card evaluator initialized successfully.")
+        except ImportError as e:
+            logging.warning(f"Card evaluator module not available: {e}")
+            self.card_evaluator = None
+        except Exception as e:
+            logging.error(f"Error initializing EnhancedCardEvaluator: {e}")
+            self.card_evaluator = None
+
+        # ActionHandler adopts the evaluator already attached to this state.
         try:
             from .actions import ActionHandler # Import inside to avoid circular?
             self.action_handler = ActionHandler(self)
@@ -412,22 +431,6 @@ class GameState(
         except Exception as e:
             logging.error(f"Error initializing ActionHandler: {e}")
             self.action_handler = None
-
-        # --- Card Evaluator (can be created even if external refs are missing initially) ---
-        try:
-            from .enhanced_card_evaluator import EnhancedCardEvaluator
-            self.card_evaluator = EnhancedCardEvaluator(
-                self,
-                getattr(self, 'stats_tracker', None), # Pass potential external refs
-                getattr(self, 'card_memory', None)
-            )
-            logging.debug("Card evaluator initialized successfully.")
-        except ImportError as e:
-            logging.warning(f"Card evaluator module not available: {e}")
-            self.card_evaluator = None
-        except Exception as e:
-            logging.error(f"Error initializing EnhancedCardEvaluator: {e}")
-            self.card_evaluator = None
 
         # --- Strategic Planner ---
         try:
@@ -697,6 +700,7 @@ class GameState(
             self.attack_suggestion_used = False
             self.cards_played = {0: [], 1: []} # Explicit reset
             self.play_history = {0: {}, 1: {}} # {player_idx: {turn: [card_ids]}} — real play turns for stats
+            self.deck_archetypes = {}
             self.opening_hands = {'p1': [], 'p2': []}
             self.draw_history = {'p1': {}, 'p2': {}}
             self.terminal_reason = None
@@ -755,14 +759,8 @@ class GameState(
                 logging.error(f"Error initializing tracking variables: {e}")
                 # Continue with reset even if tracking var init fails
 
-            # Link external systems AFTER local subsystems are initialized
-            self.strategy_memory = getattr(self, 'strategy_memory', None)
-            self.stats_tracker = getattr(self, 'stats_tracker', None)
-            self.card_memory = getattr(self, 'card_memory', None)
-            if self.strategy_memory: self.strategy_memory.game_state = self
-            if self.stats_tracker: self.stats_tracker.game_state = self # Link if needed
-            if self.card_memory: self.card_memory.game_state = self # Link if needed
-            # Link subsystems that depend on external trackers
+            # External analytics stores are state-independent shared services.
+            # Only state-bound consumers receive references to them.
             if self.card_evaluator:
                 self.card_evaluator.stats_tracker = self.stats_tracker
                 self.card_evaluator.card_memory = self.card_memory
@@ -1106,6 +1104,7 @@ class GameState(
             "temp_control_effects", "abilities_activated_this_turn", "spells_cast_this_turn",
             "once_per_turn_triggers",
             "cards_played", "play_history", "opening_hands", "draw_history",
+            "deck_archetypes",
             "damage_dealt_this_turn", "cards_drawn_this_turn",
             "life_gained_this_turn", "damage_this_turn", "cards_to_graveyard_this_turn",
             "saga_counters", "battle_cards", "suspended_cards", "rebounded_cards", "phased_out_state",

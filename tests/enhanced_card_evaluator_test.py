@@ -68,11 +68,34 @@ class FakeGameState:
 
 
 class MutableMemory:
-    def __init__(self, effectiveness=0.5, optimal_turn=0):
+    def __init__(self, effectiveness=0.5, optimal_turn=0,
+                 has_entry=True, raise_on_read=False, games_played=5,
+                 archetype=None, archetype_games=0):
         self.effectiveness = effectiveness
         self.optimal_turn = optimal_turn
+        self.has_entry = has_entry
+        self.raise_on_read = raise_on_read
+        self.games_played = games_played
+        self.archetype = archetype
+        self.archetype_games = archetype_games
         self.recorded = None
         self.queried_ids = []
+        self.stats_queried_ids = []
+
+    def get_card_stats(self, card_id):
+        self.stats_queried_ids.append(card_id)
+        if self.raise_on_read:
+            raise RuntimeError("memory unavailable")
+        if not self.has_entry:
+            return {}
+        stats = {
+            "games_played": self.games_played,
+            "effectiveness_rating": self.effectiveness,
+        }
+        if self.archetype is not None:
+            stats["archetype_performance"] = {
+                self.archetype: {"games": self.archetype_games}}
+        return stats
 
     def get_effectiveness_for_archetype(self, card_id, archetype):
         self.queried_ids.append(card_id)
@@ -204,10 +227,85 @@ class EnhancedCardEvaluatorTests(unittest.TestCase):
             gs, stats_tracker=stats, card_memory=memory)
 
         self.assertGreater(evaluator.evaluate_card(runtime_id), 0.0)
-        self.assertEqual(memory.queried_ids, [7])
-        self.assertEqual(stats.requested_card_id, 7)
+        self.assertEqual(memory.stats_queried_ids, [7])
+        self.assertEqual(memory.queried_ids, [])
+        self.assertIsNone(stats.requested_card_id)
         evaluator.record_card_performance(runtime_id, {"is_win": True})
         self.assertEqual(memory.recorded[0], 7)
+
+    def test_card_memory_prevents_additive_deck_stats_history(self):
+        card = make_card("Primary History")
+        memory = MutableMemory(effectiveness=1.0)
+        stats = FakeStats({"games_played": 20, "wins": 0})
+        evaluator = EnhancedCardEvaluator(
+            FakeGameState({1: card}), stats_tracker=stats,
+            card_memory=memory)
+        without_stats = EnhancedCardEvaluator(
+            FakeGameState({1: card}), card_memory=MutableMemory(
+                effectiveness=1.0))
+
+        self.assertEqual(
+            evaluator.evaluate_card(1), without_stats.evaluate_card(1))
+        self.assertIsNone(stats.requested_card_id)
+
+    def test_deck_stats_fallback_for_missing_or_failed_card_memory(self):
+        card = make_card("Fallback History")
+        for memory in (
+                MutableMemory(has_entry=False),
+                MutableMemory(raise_on_read=True)):
+            with self.subTest(memory=type(memory).__name__,
+                              raises=memory.raise_on_read):
+                stats = FakeStats({"games_played": 20, "wins": 20})
+                evaluator = EnhancedCardEvaluator(
+                    FakeGameState({101: card}), stats_tracker=stats,
+                    card_memory=memory)
+                evaluator.game_state.card_instance_printings[101] = 7
+
+                value = evaluator.evaluate_card(101)
+
+                self.assertGreater(value, 0.0)
+                self.assertEqual(stats.requested_card_id, 7)
+
+    def test_deck_stats_fallback_for_sparse_card_memory(self):
+        card = make_card("Sparse History")
+        memory = MutableMemory(effectiveness=1.0, games_played=1)
+        stats = FakeStats({"games_played": 20, "wins": 0})
+        evaluator = EnhancedCardEvaluator(
+            FakeGameState({1: card}), stats_tracker=stats,
+            card_memory=memory)
+
+        evaluator.evaluate_card(1)
+
+        self.assertEqual(stats.requested_card_id, 1)
+        self.assertEqual(memory.queried_ids, [])
+
+    def test_mature_overall_memory_survives_sparse_archetype_bucket(self):
+        card = make_card("Mature Overall History")
+        memory = MutableMemory(
+            effectiveness=0.9, games_played=8,
+            archetype="control", archetype_games=1)
+        stats = FakeStats({"games_played": 20, "wins": 0})
+        evaluator = EnhancedCardEvaluator(
+            FakeGameState({1: card}), stats_tracker=stats,
+            card_memory=memory)
+
+        evaluator.evaluate_card(
+            1, context_details={"deck_archetype": "CONTROL"})
+
+        self.assertIsNone(stats.requested_card_id)
+        self.assertEqual(memory.queried_ids, [])
+
+    def test_board_synergy_cache_is_transient_and_explicitly_named(self):
+        cards = {
+            1: make_card("Synergy Card", subtypes=("wizard",)),
+            2: make_card("Board Wizard", subtypes=("wizard",)),
+        }
+        evaluator = EnhancedCardEvaluator(FakeGameState(cards))
+
+        evaluator._calculate_synergy_value(1, [2])
+
+        self.assertTrue(evaluator._board_synergy_cache)
+        self.assertFalse(hasattr(evaluator, "synergy_memory"))
 
     def test_nonfinite_history_stats_and_characteristics_are_bounded(self):
         card = make_card(

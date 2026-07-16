@@ -896,6 +896,41 @@ class GameStateTurnMixin:
             return bool(self.gain_life(
                 controller, int(payload.get("amount", 0) or 0),
                 source_id=payload.get("source_id")))
+        if payload.get("kind") == "delayed_blink_return":
+            returned_primary = None
+            for object_spec in payload.get("objects") or []:
+                card_id = object_spec.get("card_id")
+                card = self._safe_get_card(card_id)
+                current_generation = getattr(
+                    card, "_zone_change_generation", None)
+                if (object_spec.get("expected_zone_generation") is not None
+                        and current_generation
+                        != object_spec.get("expected_zone_generation")):
+                    continue
+                current_holder, current_zone = self.find_card_location(card_id)
+                if current_holder is None or current_zone != "exile":
+                    continue
+                owner_id = object_spec.get("owner_id")
+                owner = (self.p1 if owner_id == "p1" else
+                         self.p2 if owner_id == "p2" else
+                         self._find_card_owner_fallback(card_id)
+                         or current_holder)
+                move_context = {}
+                if returned_primary is not None:
+                    move_context["meld_primary_id"] = returned_primary
+                counter_type = payload.get("counter_type")
+                if counter_type:
+                    move_context["enter_counters"] = [{
+                        "type": counter_type, "count": 1}]
+                if not self.move_card(
+                        card_id, current_holder, "exile", owner, "battlefield",
+                        cause="delayed_blink_return", context=move_context):
+                    continue
+                if returned_primary is None:
+                    returned_primary = card_id
+            # A delayed zone-change instruction resolves successfully even if
+            # none of its tracked objects remain in the expected incarnation.
+            return True
         if payload.get("kind") != "oracle_text":
             return False
         from .ability_types import DelayedTriggerEffect

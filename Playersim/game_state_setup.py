@@ -415,19 +415,6 @@ class GameStateSetupMixin:
         if self.replacement_effects:
             self.replacement_effects.register_card_replacement_effects(card_id, player)
 
-    def record_strategy_pattern(self, action_idx, reward):
-        """Record one deterministic action outcome for explicit callers."""
-        if getattr(self, 'strategy_memory', None) is not None:
-            try:
-                pattern = self.strategy_memory.extract_strategy_pattern(self)
-                self.strategy_memory.update_strategy(
-                    pattern, reward, action_idx=action_idx)
-                if not hasattr(self, 'current_action_sequence'):
-                    self.current_action_sequence = []
-                self.current_action_sequence.append(action_idx)
-            except Exception as e:
-                logging.error(f"Error recording strategy pattern: {str(e)}")
-
     def handle_card_type_specific_rules(self, card_id, zone, player):
         """
         Handle rules specific to different card types when they enter a zone.

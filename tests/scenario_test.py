@@ -4020,8 +4020,8 @@ def s_stats_draw_opening_and_play_telemetry():
     before_opening = env.card_memory.card_data.get(
         str(opening_id), {}).get('in_opening_hand', 0)
     env._record_cards_to_memory(
-        [opening_id, drawn_id], [], gs.cards_played, gs.turn,
-        "TelemetryDeck", "OpponentDeck", gs.opening_hands,
+        [opening_id, drawn_id], gs.cards_played, "TelemetryDeck",
+        gs.opening_hands,
         gs.draw_history, gs.play_history, is_win=True, player_idx=0)
     drawn_stats = env.card_memory.card_data[str(drawn_printing)]
     opening_stats = env.card_memory.card_data[str(opening_id)]
@@ -14708,6 +14708,85 @@ def scenario_combustion_and_daydream_atomic_effects():
         gs, None, controller, targets={"creatures": [blink_target]})
     assert blink_target in controller["battlefield"] \
         and gs._safe_get_card(blink_target).counters.get("+1/+1") == 1
+
+
+@scenario("603.7 / Parting Gust",
+          "ungifted Parting Gust returns its exiled card with a counter at the next end step")
+def scenario_parting_gust_delayed_blink_return():
+    from Playersim.ability_types import ExileThenDelayedReturnEffect
+    from Playersim.ability_utils import EffectFactory
+    gs = fresh(SEED + 257)
+    controller, opponent = gs.p1, gs.p2
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    gs.priority_pass_count = 0
+    gust_id = inject_real_card(gs, controller, "Parting Gust", "hand")
+    target_id = inject_into_zone(gs, opponent, {
+        "name": "Parting Gust Target", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature - Bird", "oracle_text": "",
+        "power": "1", "toughness": "1",
+    }, "battlefield")
+    gs.card_instance_owners[target_id] = "p2"
+    assert gs.apply_temporary_control(target_id, controller), \
+        "could not stage the opponent-owned target under the caster's control"
+    assert target_id in controller["battlefield"] \
+        and target_id not in opponent["battlefield"]
+    gust = gs._safe_get_card(gust_id)
+    effects = EffectFactory.create_effects(
+        gust.oracle_text, source_name=gust.name)
+    assert len(effects) == 1 \
+        and isinstance(effects[0], ExileThenDelayedReturnEffect), \
+        f"Parting Gust did not parse atomically: {effects}"
+    unrelated_gift = EffectFactory.create_effects(
+        "Gift a tapped Fish\nDraw a card. Exile target nontoken creature. "
+        "Return that card to the battlefield under its owner's control with "
+        "a +1/+1 counter on it at the beginning of the next end step.")
+    graveyard_return = EffectFactory.create_effects(
+        "Exile target creature card from a graveyard. Return that card to "
+        "the battlefield under its owner's control with a +1/+1 counter on "
+        "it at the beginning of the next end step.")
+    assert not any(isinstance(
+        effect, ExileThenDelayedReturnEffect) for effect in unrelated_gift)
+    assert not any(isinstance(
+        effect, ExileThenDelayedReturnEffect) for effect in graveyard_return)
+    fidelity_before = gs.fidelity_counters["unparsed_effects"]
+
+    controller["mana_pool"] = {
+        "W": 10, "U": 10, "B": 10, "R": 10, "G": 10, "C": 10}
+    assert gs.cast_spell(gust_id, controller), "Parting Gust cast failed"
+    assert gs.phase == gs.PHASE_TARGETING and gs.targeting_context
+    handler = get_env().action_handler
+    candidates = handler._get_target_selection_candidates(
+        controller, gs.targeting_context)
+    assert target_id in candidates, "Parting Gust omitted a legal nontoken creature"
+    _, chosen = handler._handle_select_target(candidates.index(target_id), {})
+    assert chosen and gs.stack and gs.stack[-1][1] == gust_id
+    assert gs.resolve_top_of_stack(), "Parting Gust did not resolve"
+    assert target_id in opponent["exile"] \
+        and target_id not in opponent["battlefield"]
+    assert len(gs.delayed_triggers) == 1
+    assert not gs._safe_get_card(target_id).counters.get("+1/+1")
+
+    # The delayed instruction tracks the zone incarnation, not merely the
+    # reusable runtime ID. A clone whose card leaves and reenters exile must
+    # not return that new object when the old trigger fires.
+    stale = gs.clone()
+    stale_opponent = stale.p2
+    assert stale.move_card(
+        target_id, stale_opponent, "exile", stale_opponent, "hand")
+    assert stale.move_card(
+        target_id, stale_opponent, "hand", stale_opponent, "exile")
+    stale.process_delayed_triggers(stale.PHASE_END_STEP)
+    assert target_id in stale_opponent["exile"] \
+        and target_id not in stale_opponent["battlefield"]
+    assert not stale._safe_get_card(target_id).counters.get("+1/+1")
+
+    gs.process_delayed_triggers(gs.PHASE_END_STEP)
+    assert target_id in opponent["battlefield"] \
+        and target_id not in opponent["exile"]
+    assert gs._safe_get_card(target_id).counters.get("+1/+1") == 1
+    assert not gs.delayed_triggers
+    assert gs.fidelity_counters["unparsed_effects"] == fidelity_before
 
 
 @scenario("707.10 / 608.3b", "Sage copies its creature spell and the copy resolves as a token")

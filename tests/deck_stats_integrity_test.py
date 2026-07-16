@@ -19,6 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 from Playersim.deck_stats_tracker import (
     DeckStatsTracker,
     GamePosition,
+    GameStage,
 )
 
 
@@ -91,6 +92,33 @@ class DeckStatsIntegrityTest(unittest.TestCase):
             self.assertTrue(any(
                 (Path(directory) / "decks").glob("*.json")))
 
+    def test_record_game_separates_acceptance_from_retryable_flush_failure(self):
+        cards = {
+            1: SimpleNamespace(name="Retry Winner", cmc=1),
+            2: SimpleNamespace(name="Retry Loser", cmc=1),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = DeckStatsTracker(
+                directory, card_db=cards, use_compression=False,
+                persistence_interval_games=1)
+            tracker.identify_archetype = lambda _deck: "midrange"
+            tracker.update_meta_with_game_result = Mock(return_value=True)
+
+            with patch.object(tracker, "save", return_value=False):
+                self.assertTrue(tracker.record_game(
+                    [1], [2], cards, 4,
+                    cards_played={0: [1], 1: [2]}))
+
+            self.assertFalse(tracker._last_record_flush_succeeded)
+            self.assertEqual(tracker._games_since_persistence, 1)
+            self.assertEqual(len(tracker.batch_updates), 2)
+            self.assertEqual(len(tracker._dirty_individual_card_files), 2)
+
+            self.assertTrue(tracker.save_updates_sync())
+            self.assertEqual(tracker._games_since_persistence, 0)
+            self.assertEqual(tracker.batch_updates, {})
+            self.assertEqual(tracker._dirty_individual_card_files, set())
+
     def test_dict_deck_fingerprint_is_supported_end_to_end(self):
         with tempfile.TemporaryDirectory() as directory:
             tracker = self._tracker(directory)
@@ -127,6 +155,54 @@ class DeckStatsIntegrityTest(unittest.TestCase):
             self.assertEqual(updates[1]["game_state"], GamePosition.BEHIND)
             self.assertIsNone(updates[0]["play_order"])
             self.assertIsNone(updates[1]["play_order"])
+
+    def test_record_game_uses_supplied_archetypes_without_reclassification(self):
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self._tracker(directory)
+            tracker.identify_archetype = Mock(
+                side_effect=AssertionError("unexpected classification"))
+            tracker.update_meta_with_game_result = Mock(return_value=True)
+            tracker._update_deck_stats = Mock(return_value=True)
+            tracker._update_card_stats = Mock(return_value=True)
+            tracker.save_updates_sync = Mock(return_value=True)
+
+            self.assertTrue(tracker.record_game(
+                [1], [2], {}, 6,
+                winner_archetype="aggro",
+                loser_archetype="control"))
+
+            tracker.identify_archetype.assert_not_called()
+            meta_kwargs = tracker.update_meta_with_game_result.call_args.kwargs
+            self.assertEqual(meta_kwargs["winner_archetype"], "aggro")
+            self.assertEqual(meta_kwargs["loser_archetype"], "control")
+            deck_calls = tracker._update_deck_stats.call_args_list
+            self.assertEqual(deck_calls[0].kwargs["archetype"], "aggro")
+            self.assertEqual(deck_calls[1].kwargs["archetype"], "control")
+
+    def test_supplied_archetype_replaces_existing_deck_classification(self):
+        cards = {
+            1: SimpleNamespace(name="Winner Card", cmc=1),
+            2: SimpleNamespace(name="Loser Card", cmc=1),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self._tracker(directory, cards)
+            tracker.update_meta_with_game_result = Mock(return_value=True)
+            self.assertTrue(tracker.record_game(
+                [1], [2], cards, 4,
+                winner_archetype="aggro", loser_archetype="control"))
+            self.assertTrue(tracker.record_game(
+                [1], [2], cards, 4,
+                winner_archetype="tempo", loser_archetype="ramp"))
+
+            winner = tracker.get_deck_stats(
+                tracker.get_deck_fingerprint([1]))
+            loser = tracker.get_deck_stats(
+                tracker.get_deck_fingerprint([2]))
+            self.assertEqual(winner["archetype"], "tempo")
+            self.assertEqual(loser["archetype"], "ramp")
+            winner_card = tracker.get_card_stats(1)
+            self.assertEqual(winner_card["archetypes"]["aggro"]["games"], 1)
+            self.assertEqual(winner_card["archetypes"]["tempo"]["games"], 1)
 
     def test_real_card_history_does_not_invent_cmc_play_turns(self):
         cards = {
@@ -195,6 +271,58 @@ class DeckStatsIntegrityTest(unittest.TestCase):
                     card_stats["play_curve_stats"]["on_curve"]["games"], 1)
                 self.assertEqual(
                     stats["draw_history_stats"]["3"][card_id]["games"], 1)
+            self.assertEqual(
+                loser["card_performance"]["2"]
+                ["performance_by_turn"]["3"]["losses"],
+                1)
+
+    def test_legacy_turn_bucket_repairs_missing_loss_counter(self):
+        cards = {2: SimpleNamespace(name="Legacy Turn Card", cmc=3)}
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self._tracker(directory, cards)
+            card_perf = tracker._card_performance_template(
+                "Legacy Turn Card")
+            card_perf["performance_by_turn"]["3"] = {
+                "played": 1, "wins": 1, "draws": 0}
+            deck_stats = {"card_performance": {"2": card_perf}}
+
+            self.assertTrue(tracker._update_deck_card_performance(
+                deck_stats,
+                [{"id": 2, "name": "Legacy Turn Card"}],
+                [2], [], {}, {6: [2]}, False,
+                GameStage.MID, GamePosition.BEHIND, "loss"))
+
+            turn_stats = deck_stats["card_performance"]["2"] \
+                ["performance_by_turn"]["3"]
+            self.assertEqual(turn_stats["played"], 2)
+            self.assertEqual(turn_stats["losses"], 1)
+
+    def test_real_play_turn_survives_missing_mana_value(self):
+        cards = {
+            1: SimpleNamespace(name="Variable Cost Winner", cmc=None),
+            2: SimpleNamespace(name="Variable Cost Loser", cmc=None),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self._tracker(directory, cards)
+            tracker.update_meta_with_game_result = Mock(return_value=True)
+            self.assertTrue(tracker.record_game(
+                [1], [2], cards, 6,
+                cards_played={0: [1], 1: [2]},
+                play_history={
+                    "winner": {5: [1]},
+                    "loser": {6: [2]},
+                },
+                play_order={"first_player": "winner"}))
+
+            winner = tracker.get_deck_stats(
+                tracker.get_deck_fingerprint([1]))
+            card_stats = winner["card_performance"]["1"]
+            self.assertEqual(
+                card_stats["performance_by_turn"]["3"]["played"], 1)
+            self.assertEqual(
+                sum(bucket["games"] for bucket in
+                    card_stats["play_curve_stats"].values()),
+                0)
 
     def test_unknown_play_order_stays_unknown_in_card_aggregates(self):
         cards = {
@@ -244,6 +372,170 @@ class DeckStatsIntegrityTest(unittest.TestCase):
             self.assertEqual(tracker.get_card_stats(1)["wins"], 1)
             self.assertEqual(tracker.get_card_stats(2)["losses"], 1)
 
+    def test_same_name_card_ids_keep_distinct_global_aggregates(self):
+        cards = {
+            10: SimpleNamespace(name="Shared Name", cmc=1),
+            11: SimpleNamespace(name="Shared Name", cmc=1),
+            20: SimpleNamespace(name="Other Card", cmc=1),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self._tracker(directory, cards)
+            tracker.update_meta_with_game_result = Mock(return_value=True)
+            self.assertTrue(tracker.record_game(
+                [10], [20], cards, 4,
+                cards_played={0: [10], 1: [20]}))
+            self.assertTrue(tracker.record_game(
+                [20], [11], cards, 4,
+                cards_played={0: [20], 1: [11]}))
+
+            first_path = tracker._card_stats_file("Shared Name", 10)
+            second_path = tracker._card_stats_file("Shared Name", 11)
+            self.assertNotEqual(first_path, second_path)
+            first = tracker.get_card_stats(10)
+            second = tracker.get_card_stats(11)
+            self.assertEqual(first["id"], 10)
+            self.assertEqual(first["games_played"], 1)
+            self.assertEqual(first["wins"], 1)
+            self.assertEqual(first["losses"], 0)
+            self.assertEqual(second["id"], 11)
+            self.assertEqual(second["games_played"], 1)
+            self.assertEqual(second["wins"], 0)
+            self.assertEqual(second["losses"], 1)
+
+    def test_ambiguous_legacy_card_file_is_not_migrated_to_either_id(self):
+        cards = {
+            10: SimpleNamespace(name="Shared Name", cmc=1),
+            11: SimpleNamespace(name="Shared Name", cmc=1),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self._tracker(directory, cards)
+            self.assertTrue(tracker.save("cards/Shared_Name.json", {
+                "name": "Shared Name", "games_played": 99,
+                "wins": 99, "losses": 0, "draws": 0,
+                "usage_count": 99, "win_rate": 1.0,
+            }))
+            self.assertTrue(tracker.save("decks/first.json", {
+                "card_list": [{"id": 10, "name": "Shared Name"}],
+                "card_performance": {"10": {
+                    "games_played": 2, "wins": 2, "losses": 0,
+                    "draws": 0, "usage_count": 1,
+                }},
+            }))
+            self.assertTrue(tracker.save("decks/second.json", {
+                "card_list": [{"id": 11, "name": "Shared Name"}],
+                "card_performance": {"11": {
+                    "games_played": 3, "wins": 0, "losses": 3,
+                    "draws": 0, "usage_count": 2,
+                }},
+            }))
+
+            first = tracker.get_card_stats(10)
+            second = tracker.get_card_stats(11)
+            self.assertEqual((first["games_played"], first["wins"]), (2, 2))
+            self.assertEqual(
+                (second["games_played"], second["losses"]), (3, 3))
+
+    def test_individual_card_file_is_loaded_only_once_across_readers(self):
+        cards = {1: SimpleNamespace(name="Cached Card", cmc=2)}
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self._tracker(directory, cards)
+            payload = {
+                "name": "Cached Card", "games_played": 4,
+                "wins": 3, "losses": 1, "draws": 0,
+                "usage_count": 2, "win_rate": 0.75,
+                "archetypes": {}, "by_game_stage": {},
+                "by_game_state": {},
+            }
+            self.assertTrue(tracker.save(
+                "cards/Cached_Card.json", payload))
+            tracker._individual_card_cache.clear()
+
+            with patch.object(
+                    tracker, "load", wraps=tracker.load) as tracked_load:
+                self.assertEqual(tracker.get_card_stats(1)["wins"], 3)
+                self.assertEqual(tracker.get_card_stats(1)["wins"], 3)
+                self.assertEqual(
+                    tracker._get_card_metrics(1)["games_played"], 4)
+
+            self.assertEqual(tracked_load.call_count, 1)
+            canonical_file = tracker._card_stats_file("Cached Card", 1)
+            self.assertTrue(tracker.exists(canonical_file))
+            self.assertEqual(
+                tracker._individual_card_cache[canonical_file]["id"], 1)
+
+    def test_failed_derived_card_save_stays_dirty_for_retry(self):
+        cards = {1: SimpleNamespace(name="Derived Card", cmc=2)}
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self._tracker(directory, cards)
+            self.assertTrue(tracker.save("decks/source.json", {
+                "card_list": [{"id": 1, "name": "Derived Card"}],
+                "card_performance": {"1": {
+                    "games_played": 4, "wins": 3, "losses": 1,
+                    "draws": 0, "usage_count": 2,
+                }},
+            }))
+            card_file = tracker._card_stats_file("Derived Card", 1)
+
+            with patch.object(tracker, "save", return_value=False):
+                self.assertEqual(tracker.get_card_stats(1)["wins"], 3)
+
+            self.assertIn(card_file, tracker._dirty_individual_card_files)
+            self.assertFalse(tracker.exists(card_file))
+            self.assertTrue(tracker._flush_auxiliary_stats())
+            self.assertNotIn(card_file, tracker._dirty_individual_card_files)
+            self.assertTrue(tracker.exists(card_file))
+
+    def test_game_updates_migrate_and_remove_legacy_name_card_stats(self):
+        cards = {
+            1: SimpleNamespace(name="Winner Card", cmc=1),
+            2: SimpleNamespace(name="Loser Card", cmc=1),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self._tracker(directory, cards)
+            tracker.update_meta_with_game_result = Mock(return_value=True)
+            self.assertTrue(tracker.record_game(
+                [1], [2], cards, 4,
+                cards_played={0: [1], 1: [2]}))
+
+            winner_id = tracker.get_deck_fingerprint([1])
+            winner = tracker.get_deck_stats(winner_id)
+            loser = tracker.get_deck_stats(
+                tracker.get_deck_fingerprint([2]))
+            self.assertNotIn("card_performance_by_name", winner)
+            self.assertNotIn("card_performance_by_name", loser)
+            legacy = winner["card_performance"].pop("1")
+            winner["card_performance_by_name"] = {
+                "Winner Card": legacy}
+            tracker._replace_deck_stats(winner_id, winner)
+
+            self.assertTrue(tracker.record_game(
+                [1], [2], cards, 4,
+                cards_played={0: [1], 1: [2]}))
+            migrated = tracker.get_deck_stats(winner_id)
+            self.assertNotIn("card_performance_by_name", migrated)
+            self.assertEqual(
+                migrated["card_performance"]["1"]["games_played"], 2)
+
+    def test_ambiguous_legacy_name_stats_are_not_copied_to_multiple_ids(self):
+        stats = {
+            "card_performance": {"1": {"wins": 3}},
+            "card_performance_by_name": {
+                "Shared Name": {"games_played": 7, "wins": 7}},
+        }
+        composition = [
+            {"id": 1, "name": "Shared Name"},
+            {"id": 2, "name": "Shared Name"},
+        ]
+
+        with patch(
+                "Playersim.deck_stats_tracker.logging.warning") as warning:
+            DeckStatsTracker._migrate_name_card_performance(
+                stats, composition)
+
+        self.assertEqual(stats["card_performance"], {"1": {"wins": 3}})
+        self.assertNotIn("card_performance_by_name", stats)
+        warning.assert_called_once()
+
     def test_environment_maps_p1_start_when_p2_wins(self):
         from Playersim.environment import AlphaZeroMTGEnv
 
@@ -270,7 +562,8 @@ class DeckStatsIntegrityTest(unittest.TestCase):
             p2={"life": 20}, agent_is_p1=True, turn=4, max_turns=30,
             terminal_reason="life_total", cards_played={0: [], 1: []},
             play_history={0: {}, 1: {}}, opening_hands={},
-            draw_history={}, mulligan_data={})
+            draw_history={}, mulligan_data={},
+            deck_archetypes={0: "aggro", 1: "control"})
 
         manifest = SimpleNamespace(persist=Mock())
         with patch("Playersim.card_support.get_manifest",
@@ -279,10 +572,102 @@ class DeckStatsIntegrityTest(unittest.TestCase):
         kwargs = tracker.record_game.call_args.kwargs
         self.assertEqual(kwargs["winner_deck_name"], "P2 Deck")
         self.assertEqual(kwargs["play_order"], {"first_player": "loser"})
-        memory_calls = env._record_cards_to_memory.call_args_list
-        self.assertEqual(memory_calls[0].args[0], [2])
-        self.assertEqual(memory_calls[0].args[4:6], ("control", "aggro"))
-        self.assertEqual(memory_calls[1].args[4:6], ("aggro", "control"))
+        self.assertEqual(kwargs["winner_archetype"], "control")
+        self.assertEqual(kwargs["loser_archetype"], "aggro")
+        tracker.identify_archetype.assert_not_called()
+        memory_calls = {
+            call.kwargs["player_idx"]: call.kwargs
+            for call in env._record_cards_to_memory.call_args_list
+        }
+        self.assertEqual(memory_calls[0]["player_deck"], [1])
+        self.assertEqual(memory_calls[0]["player_archetype"], "aggro")
+        self.assertFalse(memory_calls[0]["is_win"])
+        self.assertEqual(memory_calls[1]["player_deck"], [2])
+        self.assertEqual(memory_calls[1]["player_archetype"], "control")
+        self.assertTrue(memory_calls[1]["is_win"])
+
+    def test_failed_tracker_result_is_diagnostic_and_at_most_once(self):
+        from Playersim.environment import AlphaZeroMTGEnv
+
+        env = AlphaZeroMTGEnv.__new__(AlphaZeroMTGEnv)
+        tracker = SimpleNamespace(
+            record_game=Mock(return_value=False), base_path="unused",
+            identify_archetype=Mock(return_value="unknown"))
+        env.has_stats_tracker = True
+        env.stats_tracker = tracker
+        env.has_card_memory = False
+        env.card_memory = None
+        env.card_db = {}
+        env.original_p1_deck = [1]
+        env.original_p2_deck = [2]
+        env.current_deck_name_p1 = "P1 Deck"
+        env.current_deck_name_p2 = "P2 Deck"
+        env._game_result_recorded = False
+        env._game_logged = True
+        env.game_state = SimpleNamespace(
+            p1={"life": 20},
+            p2={"life": 0, "lost_game": True},
+            agent_is_p1=True, turn=4, max_turns=30,
+            terminal_reason="life_total", cards_played={0: [], 1: []},
+            play_history={0: {}, 1: {}}, opening_hands={},
+            draw_history={}, mulligan_data={})
+
+        manifest = SimpleNamespace(persist=Mock())
+        with patch("Playersim.card_support.get_manifest",
+                   return_value=manifest):
+            env.ensure_game_result_recorded()
+            env.ensure_game_result_recorded()
+
+        tracker.record_game.assert_called_once()
+        self.assertTrue(env._game_result_recorded)
+        self.assertTrue(env._stats_result_record_attempted)
+        self.assertFalse(env._stats_result_record_accepted)
+        self.assertTrue(env._game_result_recording_failed)
+
+    def test_flush_failure_does_not_relabel_an_accepted_game(self):
+        from Playersim.environment import AlphaZeroMTGEnv
+
+        env = AlphaZeroMTGEnv.__new__(AlphaZeroMTGEnv)
+        tracker = SimpleNamespace(
+            record_game=Mock(return_value=True), base_path="unused",
+            _last_record_flush_succeeded=False,
+            identify_archetype=Mock(return_value="midrange"))
+        env.has_stats_tracker = True
+        env.stats_tracker = tracker
+        env.has_card_memory = False
+        env.card_memory = None
+        env.card_db = {}
+        env.original_p1_deck = [1]
+        env.original_p2_deck = [2]
+        env.current_deck_name_p1 = "P1 Deck"
+        env.current_deck_name_p2 = "P2 Deck"
+        env._game_result_recorded = False
+        env._game_logged = True
+        env.game_state = SimpleNamespace(
+            p1={"life": 20},
+            p2={"life": 0, "lost_game": True},
+            agent_is_p1=True, turn=4, max_turns=30,
+            terminal_reason="life_total", cards_played={0: [], 1: []},
+            play_history={0: {}, 1: {}}, opening_hands={},
+            draw_history={}, mulligan_data={})
+
+        manifest = SimpleNamespace(persist=Mock())
+        with patch("Playersim.card_support.get_manifest",
+                   return_value=manifest):
+            env.ensure_game_result_recorded()
+
+        self.assertTrue(env._stats_result_record_accepted)
+        self.assertFalse(env._stats_result_flush_succeeded)
+        self.assertFalse(env._game_result_recording_failed)
+        self.assertTrue(env._game_result_flush_failed)
+
+    def test_card_memory_only_archetype_has_a_stable_bucket(self):
+        from Playersim.environment import AlphaZeroMTGEnv
+
+        env = AlphaZeroMTGEnv.__new__(AlphaZeroMTGEnv)
+        env.stats_tracker = None
+
+        self.assertEqual(env._stats_archetype_label([1, 2]), "midrange")
 
     def test_environment_canonicalizes_opening_and_draw_telemetry(self):
         from Playersim.environment import AlphaZeroMTGEnv

@@ -5,6 +5,10 @@ import random
 import logging
 import re
 import math
+import tempfile
+import threading
+import uuid
+import weakref
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -29,6 +33,10 @@ from .observation_schema import (
     OBSERVATION_SCHEMA_SHA256, OBSERVATION_SCHEMA_VERSION,
     SEMANTIC_IDENTITY_MAX,
 )
+
+
+_STATS_ARTIFACT_LOCKS = weakref.WeakValueDictionary()
+_STATS_ARTIFACT_LOCKS_GUARD = threading.Lock()
 
 
 def _card_number(card, attribute, default=0.0):
@@ -83,6 +91,8 @@ class AlphaZeroMTGEnv(gym.Env):
         self._fidelity_agg = {"games_recorded": 0, "unimplemented_action": 0,
                               "unparsed_mana": 0, "unparsed_modal": 0,
                               "unparsed_effects": 0, "unparsed_cards": {}}
+        self._stats_artifact_states = {}
+        self._current_stats_artifact_entry = None
         self.max_turns = max_turns
         self.max_hand_size = max_hand_size
         self.reward_discount = float(reward_discount)
@@ -606,22 +616,36 @@ class AlphaZeroMTGEnv(gym.Env):
 
     def _episode_metadata(self):
         return {
-            "episode_seed": self.reset_seed,
+            "episode_seed": getattr(self, "reset_seed", None),
             "p1_deck": getattr(self, "current_deck_name_p1", None),
             "p2_deck": getattr(self, "current_deck_name_p2", None),
             "agent_is_p1": bool(getattr(
                 getattr(self, "game_state", None), "agent_is_p1", True)),
-            "curriculum_stage": self.current_curriculum_stage,
-            "curriculum_stage_index": self.current_curriculum_stage_index,
-            "opponent_profile": self.active_opponent_profile,
-            "agent_deck": self.current_agent_deck,
-            "opponent_deck": self.current_opponent_deck,
-            "matchup_episode_index": self.current_matchup_episode_index,
-            "training_timestep": self.training_timestep,
-            "evaluation_timestep": self.evaluation_timestep,
+            "curriculum_stage": getattr(
+                self, "current_curriculum_stage", None),
+            "curriculum_stage_index": getattr(
+                self, "current_curriculum_stage_index", None),
+            "opponent_profile": getattr(
+                self, "active_opponent_profile", "scripted"),
+            "agent_deck": getattr(self, "current_agent_deck", None),
+            "opponent_deck": getattr(self, "current_opponent_deck", None),
+            "matchup_episode_index": getattr(
+                self, "current_matchup_episode_index", None),
+            "training_timestep": getattr(
+                self, "training_timestep", None),
+            "evaluation_timestep": getattr(
+                self, "evaluation_timestep", None),
             "evaluation_checkpoint_sha256":
-                self.evaluation_checkpoint_sha256,
+                getattr(self, "evaluation_checkpoint_sha256", None),
         }
+
+    def _finalize_previous_episode_artifacts(self):
+        """Do not discard a terminal row merely because a new reset arrived."""
+        if (getattr(self, '_game_result_recorded', False)
+                and not getattr(self, '_game_logged', False)
+                and not self._ensure_stats_artifacts_written()):
+            raise RuntimeError(
+                "Cannot reset while the previous game's provenance is pending")
 
     def reset(self, seed=None, options=None):
             """
@@ -635,6 +659,7 @@ class AlphaZeroMTGEnv(gym.Env):
             Returns:
                 tuple: Initial observation and info dictionary
             """
+            self._finalize_previous_episode_artifacts()
             explicit_options = dict(options or {})
             scheduled_case = None
             scheduled_index = None
@@ -673,7 +698,16 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.current_episode_actions = []
                 self.replay_actions = []
                 self._game_result_recorded = False
+                self._stats_result_record_attempted = False
+                self._card_memory_result_record_attempted = False
+                self._stats_result_record_accepted = None
+                self._stats_result_flush_succeeded = None
+                self._card_memory_result_record_accepted = None
+                self._game_result_recording_failed = False
+                self._game_result_flush_failed = False
                 self._game_logged = False
+                self._game_artifact_write_failed = False
+                self._current_stats_artifact_entry = None
                 self._logged_card_ids = set()
                 self._logged_errors = set()
                 self.last_observation_error = None
@@ -762,6 +796,10 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.game_state.reset(self.original_p1_deck, self.original_p2_deck, seed)
                 gs = self.game_state # Alias
                 gs.agent_is_p1 = seat_is_p1
+                gs.deck_archetypes = {
+                    0: self._stats_archetype_label(self.original_p1_deck),
+                    1: self._stats_archetype_label(self.original_p2_deck),
+                }
                 selected_case = (
                     scheduled_case or curriculum_case or explicit_options)
                 self.current_curriculum_stage = selected_case.get("stage")
@@ -886,7 +924,8 @@ class AlphaZeroMTGEnv(gym.Env):
     def ensure_game_result_recorded(self, forced_result=None):
         """Make sure game result is recorded if it hasn't been already (Added None checks)."""
         if getattr(self, '_game_result_recorded', False):
-            return  # Already recorded
+            self._ensure_stats_artifacts_written()
+            return  # Analytics writers were already claimed for this game.
 
         gs = self.game_state
         # Ensure players exist
@@ -938,9 +977,9 @@ class AlphaZeroMTGEnv(gym.Env):
             if my_lost and opp_lost: # Both lost simultaneously
                 is_draw = True; winner_life = me.get("life", 0); self._game_result = "draw_both_loss"
             elif my_lost:
-                is_p1_winner = not gs.agent_is_p1; winner_life = opp.get("life", 0); self._game_result = "win" if is_p1_winner else "loss"
+                is_p1_winner = not gs.agent_is_p1; winner_life = opp.get("life", 0); self._game_result = "loss"
             elif opp_lost:
-                is_p1_winner = gs.agent_is_p1; winner_life = me.get("life", 0); self._game_result = "win" if is_p1_winner else "loss"
+                is_p1_winner = gs.agent_is_p1; winner_life = me.get("life", 0); self._game_result = "win"
             elif me.get("won_game", False): # Explicit win flag
                  is_p1_winner = gs.agent_is_p1; winner_life = me.get("life", 0); self._game_result = "win"
             elif opp.get("won_game", False):
@@ -970,33 +1009,57 @@ class AlphaZeroMTGEnv(gym.Env):
         original_p2_deck = getattr(self, 'original_p2_deck', [])
         p1_name = getattr(self, 'current_deck_name_p1', "Unknown_P1")
         p2_name = getattr(self, 'current_deck_name_p2', "Unknown_P2")
-        p1_archetype = self._stats_archetype_label(original_p1_deck)
-        p2_archetype = self._stats_archetype_label(original_p2_deck)
+        deck_archetypes = getattr(gs, 'deck_archetypes', {}) or {}
+        p1_archetype = (
+            deck_archetypes.get(0)
+            or self._stats_archetype_label(original_p1_deck))
+        p2_archetype = (
+            deck_archetypes.get(1)
+            or self._stats_archetype_label(original_p2_deck))
+
+        # Claim each optional writer before invoking it. A failed or partial
+        # writer must not count the same terminal game again on a later ensure.
+        stats_available = bool(
+            getattr(self, 'has_stats_tracker', False)
+            and getattr(self, 'stats_tracker', None))
+        card_memory_available = bool(
+            getattr(self, 'has_card_memory', False)
+            and getattr(self, 'card_memory', None))
 
         # --- Record the game result ---
-        if self.has_stats_tracker and self.stats_tracker:
+        if (stats_available and not getattr(
+                self, '_stats_result_record_attempted', False)):
+            self._stats_result_record_attempted = True
+            self._stats_result_record_accepted = False
+            self._stats_result_flush_succeeded = None
             try:
                 # Prepare arguments based on win/loss/draw
                 if is_draw:
                     winner_deck_list, loser_deck_list = original_p1_deck, original_p2_deck
                     winner_name, loser_name = p1_name, p2_name
+                    winner_archetype, loser_archetype = (
+                        p1_archetype, p2_archetype)
                 else:
                     winner_deck_list = original_p1_deck if is_p1_winner else original_p2_deck
                     loser_deck_list = original_p2_deck if is_p1_winner else original_p1_deck
                     winner_name = p1_name if is_p1_winner else p2_name
                     loser_name = p2_name if is_p1_winner else p1_name
+                    winner_archetype = (
+                        p1_archetype if is_p1_winner else p2_archetype)
+                    loser_archetype = (
+                        p2_archetype if is_p1_winner else p1_archetype)
 
-                # --- ADDED: None check before call ---
-                if winner_deck_list is None or loser_deck_list is None or winner_name is None or loser_name is None:
-                     logging.error("Cannot record game result: Deck list or name is None.")
-                     return
+                if (winner_deck_list is None or loser_deck_list is None
+                        or winner_name is None or loser_name is None):
+                    raise ValueError(
+                        "Cannot record game result: deck list or name is None")
 
                 _cards_mapped, _history_mapped = self._stats_result_mapped(
                     gs, True if is_draw else is_p1_winner)
                 _opening_mapped, _draws_mapped, _mulligans_mapped = (
                     self._stats_telemetry_mapped(
                         gs, True if is_draw else is_p1_winner))
-                self.stats_tracker.record_game(
+                stats_result = self.stats_tracker.record_game(
                     winner_deck=winner_deck_list,
                     loser_deck=loser_deck_list,
                     card_db=self.card_db,
@@ -1015,50 +1078,88 @@ class AlphaZeroMTGEnv(gym.Env):
                         "first_player": "winner"
                         if (is_draw or is_p1_winner) else "loser"
                     },
-                    is_draw=is_draw
+                    is_draw=is_draw,
+                    winner_archetype=winner_archetype,
+                    loser_archetype=loser_archetype,
                 )
-                self._game_result_recorded = True
+                self._stats_result_record_accepted = (
+                    stats_result is not False)
+                self._stats_result_flush_succeeded = getattr(
+                    self.stats_tracker,
+                    '_last_record_flush_succeeded', None)
+                if not self._stats_result_record_accepted:
+                    logging.error(
+                        "DeckStatsTracker rejected the terminal game record")
+                elif self._stats_result_flush_succeeded is False:
+                    logging.error(
+                        "DeckStatsTracker accepted the terminal game, but its "
+                        "scheduled flush failed and remains queued")
             except Exception as stat_e:
                  logging.error(f"Error during stats_tracker.record_game: {stat_e}", exc_info=True)
 
         # Record cards to card memory system
-        if self.has_card_memory and self.card_memory:
+        if (card_memory_available and not getattr(
+                self, '_card_memory_result_record_attempted', False)):
+            self._card_memory_result_record_attempted = True
+            self._card_memory_result_record_accepted = False
             try:
-                 # --- Use the same robust determination as above ---
-                if is_draw:
-                    p1_deck_list_mem = getattr(self, 'original_p1_deck', [])
-                    p2_deck_list_mem = getattr(self, 'original_p2_deck', [])
-                    self._record_cards_to_memory(p1_deck_list_mem, p2_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                           p1_archetype, p2_archetype, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=True, is_win=False, player_idx=0) # P1 perspective
-                    self._record_cards_to_memory(p2_deck_list_mem, p1_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                           p2_archetype, p1_archetype, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=True, is_win=False, player_idx=1) # P2 perspective
-                else:
-                    winner_deck_list_mem = original_p1_deck if is_p1_winner else original_p2_deck
-                    loser_deck_list_mem = original_p2_deck if is_p1_winner else original_p1_deck
-                    winner_archetype_mem = p1_archetype if is_p1_winner else p2_archetype
-                    loser_archetype_mem = p2_archetype if is_p1_winner else p1_archetype
-                    winner_idx = 0 if is_p1_winner else 1
-                    loser_idx = 1 - winner_idx
-                    self._record_cards_to_memory(winner_deck_list_mem, loser_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                               winner_archetype_mem, loser_archetype_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=False, player_idx=winner_idx)
-                    self._record_cards_to_memory(loser_deck_list_mem, winner_deck_list_mem, getattr(gs, 'cards_played', {0: [], 1: []}), gs.turn,
-                                               loser_archetype_mem, winner_archetype_mem, getattr(gs, 'opening_hands', {}), getattr(gs, 'draw_history', {}), getattr(gs, 'play_history', {}), is_draw=False, is_win=False, player_idx=loser_idx)
+                memory_results = []
+                for player_idx, player_deck, player_archetype in (
+                        (0, original_p1_deck, p1_archetype),
+                        (1, original_p2_deck, p2_archetype)):
+                    memory_results.append(self._record_cards_to_memory(
+                        player_deck=player_deck,
+                        cards_played_data=getattr(
+                            gs, 'cards_played', {0: [], 1: []}),
+                        player_archetype=player_archetype,
+                        opening_hands_data=getattr(gs, 'opening_hands', {}),
+                        draw_history_data=getattr(gs, 'draw_history', {}),
+                        play_history_data=getattr(gs, 'play_history', {}),
+                        is_draw=is_draw,
+                        is_win=(
+                            not is_draw
+                            and is_p1_winner == (player_idx == 0)),
+                        player_idx=player_idx,
+                    ))
+                self._card_memory_result_record_accepted = all(
+                    result is not False for result in memory_results)
+                if not self._card_memory_result_record_accepted:
+                    logging.error(
+                        "CardMemory rejected part of the terminal game record")
             except Exception as mem_e:
                  logging.error(f"Error recording cards to memory: {mem_e}", exc_info=True)
+
+        # This is the at-most-once terminal-processing guard. Writer acceptance
+        # is tracked separately because neither reducer is transactional and a
+        # blind retry after a partial update can duplicate counters.
+        self._game_result_recorded = bool(
+            (not stats_available or getattr(
+                self, '_stats_result_record_attempted', False))
+            and (not card_memory_available or getattr(
+                self, '_card_memory_result_record_attempted', False)))
+        self._game_result_recording_failed = bool(
+            (stats_available and not getattr(
+                self, '_stats_result_record_accepted', False))
+            or (card_memory_available and not getattr(
+                self, '_card_memory_result_record_accepted', False)))
+        self._game_result_flush_failed = bool(
+            stats_available
+            and getattr(self, '_stats_result_flush_succeeded', None) is False)
+        if self._game_result_recording_failed:
+            logging.error(
+                "Terminal game analytics were only partially accepted: "
+                "deck_stats=%r card_memory=%r",
+                getattr(self, '_stats_result_record_accepted', None),
+                getattr(self, '_card_memory_result_record_accepted', None))
 
         # Append provenance immediately. The stats tracker itself may batch its
         # compressed aggregate files for a small, configured episode window.
         if getattr(self, '_game_result_recorded', False):
-            if not getattr(self, '_game_logged', False):
-                try:
-                    self._write_stats_artifacts()
-                    self._game_logged = True
-                except Exception as log_e:
-                    logging.error(f"Error writing game log/fidelity report: {log_e}")
+            self._ensure_stats_artifacts_written()
             try:
                 if getattr(self, 'stats_tracker', None):
-                    # record_game() already flushes the tracker's pending deck
-                    # batch. Avoid a second event-loop/save pass per episode.
+                    # record_game() owns the tracker's batching cadence. Avoid a
+                    # second event-loop/save pass per episode.
                     try:
                         from .card_support import get_manifest
                         get_manifest().persist(getattr(self.stats_tracker, 'base_path', './deck_stats'))
@@ -1112,6 +1213,228 @@ class AlphaZeroMTGEnv(gym.Env):
         instead of this env, leaving records stamped "unversioned"."""
         self.agent_version = str(version)
 
+    @staticmethod
+    def _empty_fidelity_aggregate():
+        return {
+            "games_recorded": 0,
+            "unimplemented_action": 0,
+            "unparsed_mana": 0,
+            "unparsed_modal": 0,
+            "unparsed_effects": 0,
+            "unparsed_cards": {},
+        }
+
+    @classmethod
+    def _apply_fidelity_to_aggregate(cls, aggregate, fidelity):
+        """Fold one durable game row into a fidelity aggregate."""
+        aggregate["games_recorded"] += 1
+        for key in (
+                "unimplemented_action", "unparsed_mana", "unparsed_modal",
+                "unparsed_effects"):
+            try:
+                count = int(fidelity.get(key, 0) or 0)
+            except (TypeError, ValueError, OverflowError):
+                count = 0
+            aggregate[key] += max(0, count)
+
+        unparsed_cards = fidelity.get("unparsed_cards", ())
+        if not isinstance(unparsed_cards, (list, tuple, set)):
+            unparsed_cards = ()
+        for name in unparsed_cards:
+            name = str(name)
+            aggregate["unparsed_cards"][name] = (
+                aggregate["unparsed_cards"].get(name, 0) + 1)
+
+    @staticmethod
+    def _atomic_write_text(path, payload):
+        """Replace a text file only after its temporary file is durable."""
+        path = os.path.abspath(os.fspath(path))
+        directory = os.path.dirname(path)
+        os.makedirs(directory, exist_ok=True)
+        descriptor, temporary_path = tempfile.mkstemp(
+            prefix=f".{os.path.basename(path)}.", suffix=".tmp",
+            dir=directory, text=True)
+        try:
+            handle = os.fdopen(
+                descriptor, "w", encoding="utf-8", newline="")
+            descriptor = None
+            with handle:
+                handle.write(payload)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary_path, path)
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+            if os.path.exists(temporary_path):
+                os.remove(temporary_path)
+
+    @classmethod
+    def _atomic_write_json(cls, path, payload):
+        cls._atomic_write_text(
+            path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+    @staticmethod
+    def _artifact_log_signature(log_path):
+        try:
+            stat = os.stat(log_path)
+        except FileNotFoundError:
+            return None
+        return (stat.st_size, stat.st_mtime_ns)
+
+    @staticmethod
+    def _stats_artifact_lock(base):
+        """Serialize commits from env objects sharing one artifact path."""
+        key = os.path.abspath(os.fspath(base))
+        with _STATS_ARTIFACT_LOCKS_GUARD:
+            lock = _STATS_ARTIFACT_LOCKS.get(key)
+            if lock is None:
+                lock = threading.RLock()
+                _STATS_ARTIFACT_LOCKS[key] = lock
+            return lock
+
+    def _load_stats_artifact_state(self, base):
+        """Load the JSONL source of truth once and repair a partial tail."""
+        base = os.path.abspath(os.fspath(base))
+        log_path = os.path.join(base, "game_log.jsonl")
+        log_signature = self._artifact_log_signature(log_path)
+        states = getattr(self, '_stats_artifact_states', None)
+        if not isinstance(states, dict):
+            states = {}
+            self._stats_artifact_states = states
+        cached = states.get(base)
+        if (cached is not None
+                and cached.get("log_signature") == log_signature):
+            return cached
+
+        aggregate = self._empty_fidelity_aggregate()
+        game_ids = set()
+        entries_by_id = {}
+        valid_entries = []
+        needs_repair = False
+        if os.path.exists(log_path):
+            with open(log_path, "r", encoding="utf-8") as handle:
+                lines = handle.readlines()
+            if (lines and lines[-1].strip()
+                    and not lines[-1].endswith(("\n", "\r"))):
+                # Appending to a valid legacy row without a final newline would
+                # concatenate two JSON objects and corrupt both records.
+                needs_repair = True
+            nonempty_indexes = [
+                index for index, line in enumerate(lines) if line.strip()]
+            last_nonempty = nonempty_indexes[-1] if nonempty_indexes else -1
+            for index, line in enumerate(lines):
+                if not line.strip():
+                    continue
+                try:
+                    entry = json.loads(line)
+                except json.JSONDecodeError as error:
+                    if index != last_nonempty:
+                        raise ValueError(
+                            f"Malformed game log row {index + 1}") from error
+                    logging.warning(
+                        "Discarding incomplete trailing game log row %d from %s",
+                        index + 1, log_path)
+                    needs_repair = True
+                    continue
+                if not isinstance(entry, dict):
+                    raise ValueError(
+                        f"Game log row {index + 1} is not an object")
+
+                game_id = entry.get("game_id")
+                if game_id is not None:
+                    game_id = str(game_id)
+                    previous = entries_by_id.get(game_id)
+                    if previous is not None:
+                        if previous != entry:
+                            raise ValueError(
+                                f"Conflicting duplicate game_id {game_id}")
+                        needs_repair = True
+                        continue
+                    game_ids.add(game_id)
+                    entries_by_id[game_id] = entry
+                valid_entries.append(entry)
+                self._apply_fidelity_to_aggregate(
+                    aggregate, entry.get("fidelity") or {})
+
+            if needs_repair:
+                repaired_payload = "".join(
+                    json.dumps(entry, sort_keys=True) + "\n"
+                    for entry in valid_entries)
+                self._atomic_write_text(log_path, repaired_payload)
+                log_signature = self._artifact_log_signature(log_path)
+
+        state = {
+            "aggregate": aggregate,
+            "game_ids": game_ids,
+            "entries_by_id": entries_by_id,
+            "log_signature": log_signature,
+        }
+        states[base] = state
+        return state
+
+    def _commit_stats_artifact_entry(self, base, entry, generated_at):
+        """Commit one idempotent row and its derived report under a path lock."""
+        state = self._load_stats_artifact_state(base)
+        game_id = str(entry["game_id"])
+        log_path = os.path.join(base, "game_log.jsonl")
+        if game_id not in state["game_ids"]:
+            try:
+                with open(
+                        log_path, "a", encoding="utf-8", newline="") as handle:
+                    handle.write(json.dumps(entry, sort_keys=True) + "\n")
+                    handle.flush()
+                    os.fsync(handle.fileno())
+            except Exception:
+                # A failed append may nevertheless have reached disk. Force a
+                # rescan so the retry can recognize a complete row or repair a
+                # partial trailing row instead of blindly appending again.
+                self._stats_artifact_states.pop(base, None)
+                raise
+            state["game_ids"].add(game_id)
+            state["entries_by_id"][game_id] = entry
+            state["log_signature"] = self._artifact_log_signature(log_path)
+            self._apply_fidelity_to_aggregate(
+                state["aggregate"], entry.get("fidelity") or {})
+
+        report = {
+            **state["aggregate"],
+            "unparsed_cards": dict(
+                state["aggregate"].get("unparsed_cards", {})),
+            "agent_version": getattr(
+                self, 'agent_version', "unversioned"),
+            "generated_at": generated_at,
+        }
+        self._atomic_write_json(
+            os.path.join(base, "fidelity_report.json"), report)
+
+        aggregate = getattr(self, '_fidelity_agg', None)
+        if not isinstance(aggregate, dict):
+            aggregate = {}
+            self._fidelity_agg = aggregate
+        aggregate.clear()
+        aggregate.update({
+            **state["aggregate"],
+            "unparsed_cards": dict(
+                state["aggregate"].get("unparsed_cards", {})),
+        })
+
+    def _ensure_stats_artifacts_written(self):
+        """Write terminal provenance once, while allowing failed I/O to retry."""
+        if getattr(self, '_game_logged', False):
+            return True
+        try:
+            self._write_stats_artifacts()
+            self._game_logged = True
+            self._game_artifact_write_failed = False
+            return True
+        except Exception as error:
+            self._game_artifact_write_failed = True
+            logging.error(
+                "Error writing game log/fidelity report: %s", error,
+                exc_info=True)
+            return False
+
     def _write_stats_artifacts(self):
         """Append this game to the per-game log and refresh the fidelity report.
 
@@ -1121,10 +1444,13 @@ class AlphaZeroMTGEnv(gym.Env):
         - fidelity_report.json: cumulative counts plus every card name whose text
           the engine could not fully parse -- stats for those cards are unreliable.
         """
-        import json as _json
         import time as _time
         gs = self.game_state
-        base = getattr(getattr(self, 'stats_tracker', None), 'base_path', None) or "./deck_stats"
+        base = (
+            getattr(getattr(self, 'stats_tracker', None), 'base_path', None)
+            or getattr(self, 'deck_stats_path', None)
+            or "./deck_stats")
+        base = os.path.abspath(os.fspath(base))
         os.makedirs(base, exist_ok=True)
 
         fc = getattr(gs, 'fidelity_counters', None) or {}
@@ -1155,67 +1481,129 @@ class AlphaZeroMTGEnv(gym.Env):
                     self, "current_matchup_episode_index", None),
             })
 
-        entry = {
-            "schema_version": 2,
-            "ts": _time.time(),
-            "result": getattr(self, '_game_result', None),
-            "terminal_reason": self._terminal_reason(
-                {"game_result": getattr(self, '_game_result', None)}),
-            "turn_count": getattr(gs, 'turn', None),
-            "p1_deck": getattr(self, 'current_deck_name_p1', "Unknown_P1"),
-            "p2_deck": getattr(self, 'current_deck_name_p2', "Unknown_P2"),
-            "agent_is_p1": getattr(gs, 'agent_is_p1', True),
-            "agent_version": getattr(self, 'agent_version', "unversioned"),
-            **episode_metadata,
-            "fidelity": per_game_fidelity,
-        }
-        with open(os.path.join(base, "game_log.jsonl"), "a", encoding="utf-8") as f:
-            f.write(_json.dumps(entry) + "\n")
+        pending = getattr(self, '_current_stats_artifact_entry', None)
+        if pending is None:
+            deck_attempted = getattr(
+                self, '_stats_result_record_attempted', False)
+            deck_accepted = getattr(
+                self, '_stats_result_record_accepted', False)
+            deck_flush = getattr(
+                self, '_stats_result_flush_succeeded', None)
+            memory_attempted = getattr(
+                self, '_card_memory_result_record_attempted', False)
+            memory_accepted = getattr(
+                self, '_card_memory_result_record_accepted', False)
+            entry = {
+                "schema_version": 2,
+                "game_id": uuid.uuid4().hex,
+                "ts": _time.time(),
+                "result": getattr(self, '_game_result', None),
+                "terminal_reason": self._terminal_reason(
+                    {"game_result": getattr(self, '_game_result', None)}),
+                "turn_count": getattr(gs, 'turn', None),
+                "p1_deck": getattr(
+                    self, 'current_deck_name_p1', "Unknown_P1"),
+                "p2_deck": getattr(
+                    self, 'current_deck_name_p2', "Unknown_P2"),
+                "agent_is_p1": getattr(gs, 'agent_is_p1', True),
+                "agent_version": getattr(
+                    self, 'agent_version', "unversioned"),
+                # Acceptance and durability are separate: batched reducers can
+                # accept a game even when a scheduled disk flush must retry.
+                "analytics_recording": {
+                    "deck_stats": (
+                        "disabled" if not deck_attempted
+                        else "accepted" if deck_accepted else "failed"),
+                    "card_memory": (
+                        "disabled" if not memory_attempted
+                        else "accepted" if memory_accepted else "failed"),
+                },
+                "analytics_persistence_at_record": {
+                    "deck_stats": (
+                        "disabled" if not deck_attempted
+                        else "not_recorded" if not deck_accepted
+                        else "persisted" if deck_flush is True
+                        else "flush_failed" if deck_flush is False
+                        else "deferred"),
+                    "card_memory": (
+                        "disabled" if not memory_attempted
+                        else "deferred" if memory_accepted
+                        else "not_recorded"),
+                },
+                **episode_metadata,
+                "fidelity": per_game_fidelity,
+            }
+            pending = {"base": base, "entry": entry}
+            self._current_stats_artifact_entry = pending
+        else:
+            base = pending["base"]
+            entry = pending["entry"]
+            os.makedirs(base, exist_ok=True)
 
-        agg = self._fidelity_agg
-        agg["games_recorded"] += 1
-        for key in ("unimplemented_action", "unparsed_mana", "unparsed_modal", "unparsed_effects"):
-            agg[key] += fc.get(key, 0)
-        for name in fc.get("unparsed_cards", ()):  # per-card unreliability counts
-            agg["unparsed_cards"][name] = agg["unparsed_cards"].get(name, 0) + 1
-        report = dict(agg)
-        report["agent_version"] = getattr(self, 'agent_version', "unversioned")
-        report["generated_at"] = _time.time()
-        with open(os.path.join(base, "fidelity_report.json"), "w", encoding="utf-8") as f:
-            _json.dump(report, f, indent=2, sort_keys=True)
+        with self._stats_artifact_lock(base):
+            self._commit_stats_artifact_entry(
+                base, entry, generated_at=_time.time())
 
     def close(self):
         """Persist all statistics before shutdown so no recorded game is lost."""
+        failures = []
+
+        def record_failure(message, error=None):
+            detail = f"{message}: {error}" if error is not None else message
+            failures.append(detail)
+            logging.error("close(): %s", detail)
+
         try:
             # Eval environments may be constructed and then closed when a
             # training worker fails before the evaluator's first reset.  That
             # is a normal shutdown state, not a missing-player game error.
-            if self.game_state.p1 is not None and self.game_state.p2 is not None:
+            gs = getattr(self, 'game_state', None)
+            if (gs is not None and gs.p1 is not None and gs.p2 is not None):
                 self.ensure_game_result_recorded()
-        except Exception:
-            pass  # best effort: closing mid-game may have no result to record
+        except Exception as error:
+            record_failure("terminal result recording failed", error)
         try:
-            if getattr(self, 'stats_tracker', None) and hasattr(self.stats_tracker, 'save_updates_sync'):
-                self.stats_tracker.save_updates_sync()
+            if (getattr(self, 'stats_tracker', None)
+                    and hasattr(self.stats_tracker, 'save_updates_sync')):
+                if self.stats_tracker.save_updates_sync() is False:
+                    record_failure("stats tracker reported an incomplete save")
                 try:
                     from .card_support import get_manifest
                     get_manifest().persist(getattr(self.stats_tracker, 'base_path', './deck_stats'))
-                except Exception as _mf_e:
-                    logging.error(f"Error persisting card support manifest: {_mf_e}")
-        except Exception as e:
-            logging.error(f"close(): stats tracker save failed: {e}")
+                except Exception as error:
+                    record_failure("card support manifest save failed", error)
+        except Exception as error:
+            record_failure("stats tracker save failed", error)
         try:
-            if getattr(self, 'card_memory', None) and hasattr(self.card_memory, 'save_all_card_data'):
-                self.card_memory.save_all_card_data()
-        except Exception as e:
-            logging.error(f"close(): card memory save failed: {e}")
+            if (getattr(self, 'card_memory', None)
+                    and hasattr(self.card_memory, 'save_all_card_data')):
+                if self.card_memory.save_all_card_data() is False:
+                    record_failure("card memory reported an incomplete save")
+        except Exception as error:
+            record_failure("card memory save failed", error)
         try:
             memory = getattr(self, 'strategy_memory', None)
             if memory is not None and getattr(memory, 'dirty', False):
-                memory.save_memory()
-        except Exception as e:
-            logging.error(f"close(): strategy memory save failed: {e}")
-        super().close()
+                if memory.save_memory() is False:
+                    record_failure("strategy memory reported an incomplete save")
+        except Exception as error:
+            record_failure("strategy memory save failed", error)
+
+        if getattr(self, '_game_result_recording_failed', False):
+            record_failure("terminal analytics were not fully accepted")
+        if (getattr(self, '_game_result_recorded', False)
+                and not getattr(self, '_game_logged', False)
+                and not self._ensure_stats_artifacts_written()):
+            record_failure("terminal provenance remains pending")
+
+        try:
+            super().close()
+        except Exception as error:
+            record_failure("base environment close failed", error)
+        if failures:
+            raise RuntimeError(
+                "Environment close could not persist all analytics: "
+                + "; ".join(failures))
 
     def _get_strategic_advice(self):
         """
@@ -1319,16 +1707,17 @@ class AlphaZeroMTGEnv(gym.Env):
         return False
     
     def _stats_archetype_label(self, deck):
-        """Return the canonical analytics archetype for a deck."""
+        """Return the one canonical analytics archetype for a deck."""
         identifier = getattr(
             getattr(self, 'stats_tracker', None), 'identify_archetype', None)
         if not callable(identifier):
-            return "unknown"
+            # CardMemory-only operation still needs a stable, queryable bucket.
+            return "midrange"
         try:
             label = identifier(list(deck or []))
         except Exception as error:
             logging.warning("Could not identify deck archetype: %s", error)
-            return "unknown"
+            return "midrange"
         label = getattr(label, 'value', label)
         return str(label or "unknown").strip().lower() or "unknown"
 
@@ -1394,27 +1783,35 @@ class AlphaZeroMTGEnv(gym.Env):
             },
         )
 
-    def _record_cards_to_memory(self, player_deck, opponent_deck, cards_played_data, turn_count,
-                            player_archetype, opponent_archetype, opening_hands_data,
-                            draw_history_data, play_history_data,
-                            is_draw=False, is_win=True, player_idx=0):
+    def _record_cards_to_memory(
+            self, player_deck, cards_played_data, player_archetype,
+            opening_hands_data, draw_history_data, play_history_data, *,
+            is_draw=False, is_win=True, player_idx=0):
         """Record detailed card performance data to the card memory system, handles draw."""
         try:
             # Check if CardMemory system exists AND if the flag is set
-            if not hasattr(self, 'has_card_memory') or not self.has_card_memory or not self.card_memory: return
+            if (not hasattr(self, 'has_card_memory')
+                    or not self.has_card_memory or not self.card_memory):
+                return False
 
             player_key = player_idx
-            opponent_key = 1 - player_key
             canonical = self.game_state.canonical_card_id
+            success = True
 
-            player_played = [canonical(card_id) for card_id in
-                              cards_played_data.get(player_key, [])]
-            player_opening = [canonical(card_id) for card_id in
-                               opening_hands_data.get(f'p{player_key+1}', [])]
-            player_draws = {
-                turn: [canonical(card_id) for card_id in cards]
-                for turn, cards in draw_history_data.get(
-                    f'p{player_key+1}', {}).items()
+            player_played = {
+                canonical(card_id)
+                for card_id in cards_played_data.get(player_key, [])
+            }
+            player_opening = {
+                canonical(card_id)
+                for card_id in opening_hands_data.get(
+                    f'p{player_key+1}', [])
+            }
+            player_drawn = {
+                canonical(card_id)
+                for cards in draw_history_data.get(
+                    f'p{player_key+1}', {}).values()
+                for card_id in cards
             }
             player_plays = play_history_data.get(player_key, {})
 
@@ -1424,43 +1821,50 @@ class AlphaZeroMTGEnv(gym.Env):
                 if player_turn <= 0:
                     continue
                 for card_id in cards:
-                    player_turn_played.setdefault(card_id, player_turn)
+                    player_turn_played.setdefault(
+                        canonical(card_id), player_turn)
+
+            synergy_partners = sorted(
+                player_played,
+                key=lambda card_id: (type(card_id).__name__, repr(card_id)))
 
             for card_id in set(canonical(card_id) for card_id in player_deck):
                 card = self.game_state._safe_get_card(card_id)
-                if not card or not hasattr(card, 'name'): continue
+                if not card or not hasattr(card, 'name'):
+                    success = False
+                    continue
 
                 # Registration must precede the first performance update;
                 # otherwise CardMemory drops the card's first observed game.
-                self.card_memory.register_card(card_id, card.name, {
+                if self.card_memory.register_card(card_id, card.name, {
                      'cmc': getattr(card, 'cmc', 0),
                      'types': getattr(card, 'card_types', []),
-                     'colors': getattr(card, 'colors', []) })
+                     'colors': getattr(card, 'colors', []) }) is False:
+                    success = False
+                    continue
                 perf_data = {
                     'is_win': bool(is_win) and not is_draw,
                     'is_draw': is_draw,
                     'was_played': card_id in player_played,
-                    'was_drawn': any(card_id in cards for turn, cards in player_draws.items()),
+                    'was_drawn': card_id in player_drawn,
                     'turn_played': player_turn_played.get(card_id, 0),
                     'in_opening_hand': card_id in player_opening,
-                    'game_duration': turn_count,
                     'deck_archetype': player_archetype,
-                    'opponent_archetype': opponent_archetype,
-                    'synergy_partners': [cid for cid in player_played if cid != card_id]
+                    'synergy_partners': [
+                        partner_id for partner_id in synergy_partners
+                        if partner_id != card_id
+                    ]
                 }
-                self.card_memory.update_card_performance(card_id, perf_data)
+                if self.card_memory.update_card_performance(
+                        card_id, perf_data) is False:
+                    success = False
 
-            for card_id in set(canonical(card_id) for card_id in opponent_deck):
-                 card = self.game_state._safe_get_card(card_id)
-                 if card and hasattr(card, 'name'):
-                     self.card_memory.register_card(card_id, card.name, {
-                          'cmc': getattr(card, 'cmc', 0),
-                          'types': getattr(card, 'card_types', []),
-                          'colors': getattr(card, 'colors', []) })
+            return success
 
         except Exception as e:
             logging.error(f"Error recording cards to memory: {str(e)}")
             import traceback; logging.error(traceback.format_exc())
+            return False
 
     def _force_phase_transition(self, current_phase):
         """
@@ -2011,9 +2415,6 @@ class AlphaZeroMTGEnv(gym.Env):
                     self.strategy_memory.update_strategy(
                         strategy_pattern, step_reward, action_idx=action_idx)
                     if done or truncated:
-                        self.strategy_memory.record_action_sequence(
-                            self.current_episode_actions,
-                            sum(self.episode_rewards), game_state=gs)
                         self.strategy_memory.save_memory()
                 except Exception as memory_error:
                     logging.error(
@@ -3437,107 +3838,6 @@ class AlphaZeroMTGEnv(gym.Env):
             logging.error(f"Invalid card ID {card_id} or missing attribute: {str(e)}")
             return np.zeros(feature_dim, dtype=np.float32)
         
-    def record_game_result(self, winner_is_p1: bool, turn_count: int, winner_life: int, is_draw: bool = False):
-        """
-        Centralized helper to consistently record game statistics with improved game stage handling.
-        """
-        logging.debug(f"record_game_result called: winner_is_p1={winner_is_p1}, turn_count={turn_count}, winner_life={winner_life}, is_draw={is_draw}")
-        
-        # Mark that the game result has been recorded to avoid duplicate recording
-        self._game_result_recorded = True
-        
-        if not self.has_stats_tracker:
-            return
-            
-        try:
-            gs = self.game_state
-            
-            # For draws, we don't have a winner, but we need to record both decks
-            if is_draw:
-                deck1 = getattr(self, 'original_p1_deck', gs.p1.get("library", []).copy())
-                deck2 = getattr(self, 'original_p2_deck', gs.p2.get("library", []).copy())
-                deck1_name = getattr(self, 'current_deck_name_p1', "Unknown Deck 1")
-                deck2_name = getattr(self, 'current_deck_name_p2', "Unknown Deck 2")
-                
-                # Draw: slot order arbitrary; map p1 to the winner slot
-                game_cards_played, game_play_history = self._stats_result_mapped(gs, True)
-                opening_hands, draw_history, mulligan_data = \
-                    self._stats_telemetry_mapped(gs, True)
-                
-                # Determine game stage based on turn count
-                game_stage = "early"
-                if turn_count >= 8:
-                    game_stage = "late"
-                elif turn_count >= 4:
-                    game_stage = "mid"
-                
-                # Pass the draw flag explicitly
-                self.stats_tracker.record_game(
-                    winner_deck=deck1,  # In a draw, we pass both decks
-                    loser_deck=deck2,   # but neither is really the winner/loser
-                    card_db=self.card_db,
-                    turn_count=turn_count,
-                    winner_life=winner_life,
-                    winner_deck_name=deck1_name,
-                    loser_deck_name=deck2_name,
-                    cards_played=game_cards_played,
-                    play_history=game_play_history,
-                    opening_hands=opening_hands,
-                    draw_history=draw_history,
-                    mulligan_data=mulligan_data,
-                    play_order={"first_player": "winner"},
-                    game_stage=game_stage,
-                    is_draw=True
-                )
-                
-                logging.info(f"Game recorded: Draw between {deck1_name} and {deck2_name} in {turn_count} turns with equal life totals ({winner_life})")
-            else:
-                # Original non-draw logic
-                winner_deck = getattr(self, 'original_p1_deck', gs.p1.get("library", []).copy()) if winner_is_p1 else getattr(self, 'original_p2_deck', gs.p2.get("library", []).copy())
-                loser_deck = getattr(self, 'original_p2_deck', gs.p2.get("library", []).copy()) if winner_is_p1 else getattr(self, 'original_p1_deck', gs.p1.get("library", []).copy())
-                winner_name = getattr(self, 'current_deck_name_p1', "Unknown Deck 1") if winner_is_p1 else getattr(self, 'current_deck_name_p2', "Unknown Deck 2")
-                loser_name = getattr(self, 'current_deck_name_p2', "Unknown Deck 2") if winner_is_p1 else getattr(self, 'current_deck_name_p1', "Unknown Deck 1")
-                
-                # Map play data into winner/loser order (see _stats_result_mapped)
-                game_cards_played, game_play_history = self._stats_result_mapped(gs, winner_is_p1)
-                opening_hands, draw_history, mulligan_data = \
-                    self._stats_telemetry_mapped(gs, winner_is_p1)
-                
-                # Determine game stage based on turn count
-                game_stage = "early"
-                if turn_count >= 8:
-                    game_stage = "late"
-                elif turn_count >= 4:
-                    game_stage = "mid"
-                
-                # Pass game stage and all available information
-                self.stats_tracker.record_game(
-                    winner_deck=winner_deck,
-                    loser_deck=loser_deck,
-                    card_db=self.card_db,
-                    turn_count=turn_count,
-                    winner_life=winner_life,
-                    winner_deck_name=winner_name,
-                    loser_deck_name=loser_name,
-                    cards_played=game_cards_played,
-                    play_history=game_play_history,
-                    opening_hands=opening_hands,
-                    draw_history=draw_history,
-                    mulligan_data=mulligan_data,
-                    play_order={
-                        "first_player": "winner"
-                        if winner_is_p1 else "loser"
-                    },
-                    game_stage=game_stage,
-                    is_draw=False
-                )
-                
-                logging.info(f"Game recorded: {winner_name} defeated {loser_name} in {turn_count} turns with {winner_life} life remaining")
-        except Exception as e:
-            logging.error(f"Error recording game statistics: {e}")
-            import traceback
-            logging.error(traceback.format_exc())
-
     def _get_obs(self):
         """Build the observation dictionary. Assumes helpers are implemented."""
         try:

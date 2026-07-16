@@ -8926,6 +8926,106 @@ class ReflexiveTriggerEffect(AbilityEffect):
         return True
 
 
+class ExileThenDelayedReturnEffect(AbilityEffect):
+    """Exile one permanent and return that exact object at a later phase."""
+
+    def __init__(self, target_type="permanent", counter_type=None,
+                 phase_key="end step", return_unless_context_key=None,
+                 effect_text=None):
+        self.target_type = str(target_type or "permanent").lower()
+        self.counter_type = counter_type
+        self.phase_key = str(phase_key or "end step").lower()
+        self.return_unless_context_key = return_unless_context_key
+        super().__init__(effect_text or (
+            f"Exile target {self.target_type}. Return that card to the "
+            f"battlefield at the beginning of the next {self.phase_key}."))
+        self.requires_target = True
+
+    @staticmethod
+    def _player_id(game_state, player):
+        if player is game_state.p1:
+            return "p1"
+        if player is game_state.p2:
+            return "p2"
+        return None
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        target_ids = []
+        if isinstance(targets, dict):
+            for values in targets.values():
+                if isinstance(values, (list, tuple, set)):
+                    target_ids.extend(values)
+        target_id = next((
+            candidate for candidate in dict.fromkeys(target_ids)
+            if candidate not in ("p1", "p2")), None)
+        if target_id is None:
+            return False
+
+        current_controller, current_zone = game_state.find_card_location(
+            target_id)
+        if (current_controller is None or current_zone != "battlefield"
+                or not _permanent_matches_criteria(
+                    game_state, target_id, self.target_type,
+                    controller=current_controller, source_id=source_id)):
+            return False
+
+        owner = game_state._find_card_owner_fallback(target_id) \
+            or current_controller
+        move_context = {"source_id": source_id}
+        if not game_state.move_card(
+                target_id, current_controller, "battlefield", owner, "exile",
+                cause="exile_effect", context=move_context):
+            return False
+
+        # A replacement can send the object elsewhere, and tokens cease to
+        # exist after leaving the battlefield. Neither creates a return.
+        exiled_ids = []
+        for card_id in (
+                target_id, move_context.get("_separated_meld_partner_id")):
+            if card_id is None:
+                continue
+            card_owner = game_state._find_card_owner_fallback(card_id) or owner
+            if card_id in card_owner.get("exile", []):
+                exiled_ids.append((card_id, card_owner))
+
+        resolution_context = getattr(self, "resolution_context", {}) or {}
+        if (self.return_unless_context_key
+                and resolution_context.get(self.return_unless_context_key,
+                                           False)):
+            return True
+        if not exiled_ids:
+            return True
+
+        phase_attr = DelayedTriggerEffect.PHASE_ATTR.get(self.phase_key)
+        phase = getattr(game_state, phase_attr, None) if phase_attr else None
+        if phase is None:
+            self._report_support_issue(
+                game_state, source_id,
+                f"delayed return with unknown phase: {self.phase_key}",
+                "unparsed")
+            return False
+
+        objects = []
+        for card_id, card_owner in exiled_ids:
+            card = game_state._safe_get_card(card_id)
+            objects.append({
+                "card_id": card_id,
+                "owner_id": self._player_id(game_state, card_owner),
+                "expected_zone_generation": getattr(
+                    card, "_zone_change_generation", None),
+            })
+        game_state.register_delayed_trigger(
+            phase=phase,
+            payload={
+                "kind": "delayed_blink_return",
+                "objects": objects,
+                "counter_type": self.counter_type,
+                "source_id": source_id,
+            },
+            description=f"delayed return: {self.effect_text[:80]}")
+        return True
+
+
 class DelayedTriggerEffect(AbilityEffect):
     """One-shot delayed triggered ability created from oracle text (CR 603.7).
 

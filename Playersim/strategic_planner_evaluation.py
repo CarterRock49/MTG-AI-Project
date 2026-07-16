@@ -689,6 +689,10 @@ class CardEvaluationMixin:
                 analysis = (
                     self.current_analysis
                     if isinstance(self.current_analysis, dict) else {})
+                player_idx = 0 if gs.agent_is_p1 else 1
+                analytics_archetype = getattr(
+                    gs, "deck_archetypes", {}).get(
+                        player_idx, self.strategy_type)
                 strategic_context = {
                     "game_stage": analysis.get(
                         "game_info", {}).get("game_stage", "mid"),
@@ -696,7 +700,10 @@ class CardEvaluationMixin:
                         "position", {}).get("overall", "even"),
                     "aggression_level": self.aggression_level,
                     "strategy_type": self.strategy_type,
-                    "deck_archetype": self.strategy_type,
+                    # Historical lookup uses the same episode label that owns
+                    # terminal CardMemory recording. strategy_type remains the
+                    # planner's independent tactical posture.
+                    "deck_archetype": analytics_archetype,
                     "turn": gs.turn,
                     "phase": gs.phase,
                 }

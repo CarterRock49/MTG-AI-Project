@@ -128,11 +128,18 @@ def _face_surfaces(raw_card: dict) -> list[dict]:
     }]
 
 
-def _probe_effect_text(text, source_name):
+def _probe_effect_text(text, source_name, _depth=0):
     text = (text or "").strip()
     if not text:
         return 0
-    return len(EffectFactory.create_effects(text, source_name=source_name))
+    effects = EffectFactory.create_effects(text, source_name=source_name)
+    if _depth < 4:
+        from .ability_types import DelayedTriggerEffect
+        for effect in effects:
+            if isinstance(effect, DelayedTriggerEffect):
+                _probe_effect_text(
+                    effect.inner_text, source_name, _depth=_depth + 1)
+    return len(effects)
 
 
 def _probe_registered_effects(abilities, source_name):

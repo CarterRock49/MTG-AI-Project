@@ -64,8 +64,9 @@ class EnhancedCardEvaluator:
             'unblockable': 0.4
         }
         
-        # Initialize memory of card synergies
-        self.synergy_memory = {}
+        # Live-board synergy cache. This is transient derived state, not the
+        # persisted empirical history owned by CardMemory.
+        self._board_synergy_cache = {}
         
         # Only static card-characteristic scores are cached. Full evaluations
         # depend on mutable board state, perspective, turn, memory, and stats.
@@ -132,48 +133,90 @@ class EnhancedCardEvaluator:
             if context in {"attack", "block"} and context_value <= -5.0:
                 return -5.0
             
-            # Add historical performance value from card memory and stats tracker
+            # CardMemory is the primary historical source. DeckStats tracks many
+            # of the same game outcomes, so it is used only when CardMemory has
+            # no entry or cannot be read rather than as an additive signal.
             history_value = 0.0
+            stats_value = 0.0
+            card_memory_used = False
             deck_archetype = str(
-                context_details.get("deck_archetype", "unknown") or "unknown")
-            
-            # Get value from CardMemory if available
+                context_details.get(
+                    "deck_archetype", "unknown") or "unknown"
+            ).strip().lower() or "unknown"
+
             if self.card_memory:
                 try:
-                    # Get effectiveness rating specific to this archetype
-                    effectiveness = _clamp(
-                        self.card_memory.get_effectiveness_for_archetype(
-                            analytics_card_id, deck_archetype),
-                        0.0, 1.0, 0.5)
-                    
-                    # Convert 0-1 effectiveness rating to a value boost between -0.5 and +0.5
-                    history_value += (effectiveness - 0.5) * 1.5
-                    
-                    # Get optimal turn data and adjust based on current turn
-                    optimal_turn = _clamp(
-                        self.card_memory.get_optimal_play_turn(
-                            analytics_card_id),
-                        0.0, 1000.0, 0.0)
-                    if optimal_turn > 0:
-                        current_turn = _clamp(
-                            context_details.get("turn", 0), 0.0, 1000.0, 0.0)
-                        # Bonus for playing near the optimal turn
-                        turn_proximity = 1.0 - min(abs(current_turn - optimal_turn) / 3.0, 1.0)
-                        history_value += turn_proximity * 0.3
+                    get_memory_stats = getattr(
+                        self.card_memory, "get_card_stats", None)
+                    memory_stats = (
+                        get_memory_stats(analytics_card_id)
+                        if callable(get_memory_stats) else None)
+                    has_reliable_memory = not callable(get_memory_stats)
+                    overall_effectiveness = None
+                    if isinstance(memory_stats, dict) and memory_stats:
+                        overall_games = _clamp(
+                            memory_stats.get("games_played", 0),
+                            0.0, 1e12, 0.0)
+                        archetypes = memory_stats.get(
+                            "archetype_performance", {})
+                        archetype_stats = (
+                            archetypes.get(deck_archetype)
+                            if isinstance(archetypes, dict) else None)
+                        archetype_games = (
+                            _clamp(
+                                archetype_stats.get("games", 0),
+                                0.0, 1e12, 0.0) >= 3
+                            if isinstance(archetype_stats, dict) else False)
+                        has_reliable_memory = bool(
+                            archetype_games or overall_games >= 5)
+                        if (not archetype_games and overall_games >= 5
+                                and "effectiveness_rating" in memory_stats):
+                            # A first sample in a new archetype must not make a
+                            # mature overall record less useful. The archetype
+                            # accessor intentionally returns neutral for sparse
+                            # buckets, so read the reliable overall value here.
+                            overall_effectiveness = _clamp(
+                                memory_stats.get("effectiveness_rating"),
+                                0.0, 1.0, 0.5)
+                    if has_reliable_memory:
+                        memory_history_value = 0.0
+                        effectiveness = (
+                            overall_effectiveness
+                            if overall_effectiveness is not None
+                            else _clamp(
+                                self.card_memory.get_effectiveness_for_archetype(
+                                    analytics_card_id, deck_archetype),
+                                0.0, 1.0, 0.5))
+                        memory_history_value += (effectiveness - 0.5) * 1.5
+
+                        optimal_turn = _clamp(
+                            self.card_memory.get_optimal_play_turn(
+                                analytics_card_id),
+                            0.0, 1000.0, 0.0)
+                        if optimal_turn > 0:
+                            current_turn = _clamp(
+                                context_details.get("turn", 0),
+                                0.0, 1000.0, 0.0)
+                            turn_proximity = 1.0 - min(
+                                abs(current_turn - optimal_turn) / 3.0, 1.0)
+                            memory_history_value += turn_proximity * 0.3
+
+                        history_value = memory_history_value
+                        card_memory_used = True
                 except Exception as e:
-                    logging.warning(f"Error getting card memory data: {e}")
-            
-            # Add stats value if available
-            stats_value = 0.0
-            if self.stats_tracker:
+                    logging.warning(
+                        "Error getting card memory data; falling back to "
+                        f"DeckStats: {e}")
+
+            if not card_memory_used and self.stats_tracker:
                 stats_value = self._get_stats_value(card_id)
             
             # Calculate total value with weighted components
             total_value = (
                 base_value * 0.6 +     # 60% weight to base card evaluation
                 context_value * 0.25 +  # 25% weight to context-specific evaluation
-                history_value * 0.1 +   # 10% weight to historical performance
-                stats_value * 0.05      # 5% weight to stats tracker data
+                history_value * 0.1 +   # 10% weight to primary card history
+                stats_value * 0.05      # 5% DeckStats fallback only
             )
             
             # Apply game stage multiplier
@@ -224,7 +267,11 @@ class EnhancedCardEvaluator:
     
     def record_card_performance(self, card_id: int, game_result: Dict) -> None:
         """
-        Record performance of a card to the card memory system.
+        Compatibility wrapper for recording card performance.
+
+        AlphaZeroMTGEnv is the production writer at game completion. Production
+        callers must not also invoke this wrapper for the same result because
+        CardMemory counters would be incremented twice.
         
         Args:
             card_id: ID of the card
@@ -1020,8 +1067,8 @@ class EnhancedCardEvaluator:
                 self._card_signature(board_card) if board_card else None))
         board_key = tuple(sorted(board_entries, key=lambda item: item[:2]))
         cache_key = (card_id, self._card_signature(card), board_key)
-        if cache_key in self.synergy_memory:
-            return self.synergy_memory[cache_key]
+        if cache_key in self._board_synergy_cache:
+            return self._board_synergy_cache[cache_key]
         
         synergy_value = 0.0
         
@@ -1108,9 +1155,10 @@ class EnhancedCardEvaluator:
             return 0.0
         
         # Cache the result
-        if len(self.synergy_memory) >= 1000:
-            self.synergy_memory.clear()
-        self.synergy_memory[cache_key] = _finite_number(synergy_value, 0.0)
+        if len(self._board_synergy_cache) >= 1000:
+            self._board_synergy_cache.clear()
+        self._board_synergy_cache[cache_key] = _finite_number(
+            synergy_value, 0.0)
         
         return _finite_number(synergy_value, 0.0)
     

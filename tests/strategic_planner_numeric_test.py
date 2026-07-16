@@ -412,6 +412,7 @@ class StrategicPlannerNumericSafetyTest(unittest.TestCase):
         }
         planner.strategy_type = "control"
         planner.aggression_level = 0.2
+        game_state.deck_archetypes = {0: "ramp", 1: "aggro"}
 
         value = planner.evaluate_play_card_action(
             card_id, context={"hand_idx": 0, "card_id": card_id})
@@ -423,7 +424,8 @@ class StrategicPlannerNumericSafetyTest(unittest.TestCase):
         self.assertEqual(captured["context"]["game_stage"], "late")
         self.assertEqual(captured["context"]["position"], "behind")
         self.assertEqual(captured["context"]["aggression_level"], 0.2)
-        self.assertEqual(captured["context"]["deck_archetype"], "control")
+        self.assertEqual(captured["context"]["strategy_type"], "control")
+        self.assertEqual(captured["context"]["deck_archetype"], "ramp")
 
     def test_action_indices_accept_binary_integer_masks(self):
         game_state = self._state()

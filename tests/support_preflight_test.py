@@ -39,6 +39,21 @@ def card(name, oracle_id, oracle_text="", type_line="Creature - Bear",
 
 
 class SupportPreflightTest(unittest.TestCase):
+    def test_delayed_trigger_bodies_are_probed(self):
+        delayed = card(
+            "Delayed Mystery", "delayed-mystery",
+            "Glimpse the uncharted at the beginning of the next end step.",
+            type_line="Instant")
+        registry = build_registry([delayed])
+
+        rows = audit_pool_cards([delayed], registry)
+
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["issues"])
+        self.assertTrue(any(
+            "unparsed effect text: Glimpse the uncharted" in issue["reason"]
+            for issue in rows[0]["issues"]))
+
     def test_ledger_distinguishes_evidence_and_ranks_corpus_gaps(self):
         clean = card("Clean Bear", "clean")
         unseen = card("Unseen Land", "unseen", type_line="Basic Land - Forest")
