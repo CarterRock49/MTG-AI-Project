@@ -146,8 +146,43 @@ class ActionSpaceMixin:
                     debug_log_valid_actions(self.game_state, valid_actions, self.action_reasons_with_context, self.get_action_info)
                     return valid_actions
 
-                current_turn_player = gs._get_active_player() 
-                
+                current_turn_player = gs._get_active_player()
+
+                # --- 1b. Orphaned-decision auto-correction ---
+                # Choice/targeting/sacrifice actions are routed by phase, so a
+                # pending context whose phase was overwritten by another
+                # transition (e.g. a combat step finishing around a trigger's
+                # as-enters choice) becomes unreachable and the episode decays
+                # into a non-progressing PASS loop.  Restore the decision
+                # phase; previous_priority_phase already records where play
+                # resumes once the decision completes.
+                pending_decision_phase = None
+                pending_decision_context = None
+                if getattr(gs, 'targeting_context', None):
+                    pending_decision_phase = gs.PHASE_TARGETING
+                    pending_decision_context = gs.targeting_context
+                elif getattr(gs, 'sacrifice_context', None):
+                    pending_decision_phase = gs.PHASE_SACRIFICE
+                    pending_decision_context = gs.sacrifice_context
+                elif getattr(gs, 'choice_context', None):
+                    pending_decision_phase = gs.PHASE_CHOOSE
+                    pending_decision_context = gs.choice_context
+                if (pending_decision_phase is not None
+                        and gs.phase not in (gs.PHASE_TARGETING,
+                                             gs.PHASE_SACRIFICE,
+                                             gs.PHASE_CHOOSE)):
+                    logging.warning(
+                        "Pending decision context found outside its decision "
+                        "phase (phase %s); restoring phase %s so the mask can "
+                        "reach it.", gs.phase, pending_decision_phase)
+                    if getattr(gs, 'previous_priority_phase', None) is None:
+                        gs.previous_priority_phase = gs.phase
+                    gs.phase = pending_decision_phase
+                    chooser = (pending_decision_context.get("controller")
+                               or pending_decision_context.get("player"))
+                    if chooser is not None:
+                        gs.priority_player = chooser
+
                 # --- 2. Mulligan Phase Logic ---
                 if getattr(gs, 'mulligan_in_progress', False):
                     mulligan_player = getattr(gs, 'mulligan_player', None)

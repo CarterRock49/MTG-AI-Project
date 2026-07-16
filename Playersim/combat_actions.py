@@ -528,9 +528,28 @@ class CombatActionHandler:
     def _finish_damage_step(self, damage_phase):
         """Validate resolver completion and enter the next combat step."""
         gs = self.game_state
+
+        def choice_pending():
+            # A damage trigger may have opened a decision mid-resolution (for
+            # example an as-enters choice for a land fetched by a combat
+            # trigger).  Overwriting gs.phase would orphan that context: the
+            # action mask routes choices by phase, so the choice would become
+            # unreachable and the episode a non-progressing PASS loop (the
+            # round-7.91 run died exactly this way at turn 18).  Route the
+            # combat transition through previous_priority_phase instead so
+            # completing the choice lands in the next combat step.
+            return (getattr(gs, "choice_context", None)
+                    or getattr(gs, "targeting_context", None)
+                    or getattr(gs, "sacrifice_context", None)) \
+                and gs.phase in (gs.PHASE_CHOOSE, gs.PHASE_TARGETING,
+                                 gs.PHASE_SACRIFICE)
+
         if damage_phase == gs.PHASE_FIRST_STRIKE_DAMAGE:
             if not getattr(gs, "first_strike_damage_dealt", False):
                 return False
+            if choice_pending():
+                gs.previous_priority_phase = gs.PHASE_COMBAT_DAMAGE
+                return True
             # This is the actual between-damage-steps priority window.
             gs._advance_phase()
             return gs.phase == gs.PHASE_COMBAT_DAMAGE
@@ -538,6 +557,9 @@ class CombatActionHandler:
         if not getattr(gs, "combat_damage_dealt", False):
             return False
         gs._empty_mana_pools()
+        if choice_pending():
+            gs.previous_priority_phase = gs.PHASE_END_OF_COMBAT
+            return True
         gs.phase = gs.PHASE_END_OF_COMBAT
         gs.priority_player = gs._get_active_player()
         gs.priority_pass_count = 0

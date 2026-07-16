@@ -133,6 +133,30 @@ reproducibility. Fixed evaluation is unchanged (full-strength scripted
 opponents, engine-default turn limit) so qualification scores stay comparable
 across rounds.
 
+### Run 1 result (`round-7.91-annealed-ramp-v1`) and the choice-phase fix
+
+The first v4 run validated the ramp design and died on a pre-existing engine
+defect at ~223k steps. Goldfish fell to its 75k deadline (the 20-turn limit
+converted the fresh policy's slow kills into ~71% timeouts — a stage-tuning
+miss to revisit), but race then ratcheted 0.75 → 0 on demonstrated win rate
+and **advanced via mastery at 169,332** — the first earned transition past
+goldfish in any round, with ≥20% decisive wins against full-strength novices
+(previous rounds plateaued near 5%). The 100k evaluation scored 0.188
+(12-45), beating 7.88 (0.094), 7.89/7.90 (0.141), and matching 7.88's 300k
+checkpoint. Bridge climbed 0.60 → 0.20 before the crash.
+
+The crash: a combat-damage trigger fetched Multiversal Passage, its
+as-enters choice opened mid-resolution, and `_finish_damage_step` overwrote
+the CHOOSE phase with END_OF_COMBAT. Choice actions are phase-routed, so the
+pending `as_enters_pay_life` decision became unreachable and strict training
+correctly aborted on a period-1 PASS cycle. Fixed at both layers
+(`tests/choice_phase_integrity_test.py`): the damage step now defers its
+transition through `previous_priority_phase` when a decision context is
+pending, and mask generation self-heals any future orphaned decision context
+by restoring its phase and chooser instead of letting an episode brick. The
+handicapped scripted opponents block far more than earlier rounds, which is
+why this dormant path finally fired.
+
 ---
 
 ## Latest run finding — `round-7.87-curriculum-v5` is diagnostic-only; Round 7.88 repaired
