@@ -1,7 +1,8 @@
+import copy
 import re
 import logging
 from collections import Counter
-from collections import defaultdict
+from collections import defaultdict, deque
 
 class EnhancedManaSystem:
     """Advanced mana handling system that properly implements MTG mana rules."""
@@ -40,8 +41,38 @@ class EnhancedManaSystem:
                 continue
             pool[normalized] = pool.get(normalized, 0) + max(0, int(amount or 0))
         return True
-        
-    def track_snow_sources(self, player):
+
+    def _reserved_payment_permanent_ids(self, player, context=None):
+        """Return permanents committed to a different component of a cost."""
+        context = context or {}
+        reserved = set(context.get("_payment_exclude_tap_ids", ()) or ())
+        for key in ("convoke_creatures", "improvise_artifacts"):
+            choices = context.get(key, ()) or ()
+            if not isinstance(choices, (list, tuple)):
+                continue
+            for identifier in choices:
+                permanent_id = self.game_state._find_permanent_id(
+                    player, identifier)
+                if permanent_id is not None:
+                    reserved.add(permanent_id)
+        return reserved
+
+    @staticmethod
+    def _is_snow_mana_permanent(card):
+        """Return whether a snow permanent has a recognizable mana ability."""
+        if card is None:
+            return False
+        type_line = str(getattr(card, "type_line", "") or "")
+        if "snow" not in type_line.lower():
+            return False
+        if "land" in type_line.lower():
+            return True
+        oracle_text = str(getattr(card, "oracle_text", "") or "")
+        return bool(re.search(
+            r"\badd\s+(?:\{[WUBRGC]\}|(?:one|two|three|four|five)\s+mana)",
+            oracle_text, re.IGNORECASE))
+
+    def track_snow_sources(self, player, exclude_ids=None):
         """
         Track snow permanents that can produce snow mana.
         
@@ -56,22 +87,18 @@ class EnhancedManaSystem:
         # Count snow permanents that can produce mana
         snow_sources = 0
         
+        excluded = set(exclude_ids or ())
         for card_id in player["battlefield"]:
+            if card_id in excluded:
+                continue
             card = gs._safe_get_card(card_id)
             
             # Skip if card doesn't exist or is tapped
             if not card or card_id in player["tapped_permanents"]:
                 continue
                 
-            # Check if it's a snow permanent that can produce mana
-            if hasattr(card, 'type_line') and 'snow' in card.type_line.lower():
-                # Check if it's a land or has a mana ability
-                if 'land' in card.type_line.lower():
-                    snow_sources += 1
-                elif hasattr(card, 'oracle_text') and ('add' in card.oracle_text.lower() and 
-                                                    any(f"{{{c}}}" in card.oracle_text.lower() 
-                                                        for c in ['w', 'u', 'b', 'r', 'g', 'c'])):
-                    snow_sources += 1
+            if self._is_snow_mana_permanent(card):
+                snow_sources += 1
         
         return snow_sources
 
@@ -112,7 +139,10 @@ class EnhancedManaSystem:
                 max(0, min(int(amount or 0), int(
                     restricted_pool.get(color, 0) or 0)))
                 for color, amount in provenance.items())
-        available_snow += self.track_snow_sources(player)
+        available_snow += self.track_snow_sources(
+            player,
+            exclude_ids=self._reserved_payment_permanent_ids(
+                player, context))
         
         # Check if player has enough snow mana sources
         return available_snow >= snow_cost
@@ -120,7 +150,8 @@ class EnhancedManaSystem:
     def pay_snow_cost(self, player, snow_cost, mana_pool=None,
                       snow_pool=None, payment=None, phase_pool=None,
                       conditional_pool=None, phase_snow_pool=None,
-                      conditional_snow_pool=None, context=None):
+                       conditional_snow_pool=None, context=None,
+                       exclude_ids=None, defer_source_taps=False):
         """
         Pay a snow mana cost.
         
@@ -211,9 +242,12 @@ class EnhancedManaSystem:
         gs = self.game_state
         snow_sources_tapped = 0
         
+        excluded = set(exclude_ids or ())
         for card_id in player["battlefield"]:
             if snow_sources_tapped >= remaining:
                 break
+            if card_id in excluded:
+                continue
                 
             card = gs._safe_get_card(card_id)
             
@@ -221,15 +255,14 @@ class EnhancedManaSystem:
             if not card or card_id in player["tapped_permanents"]:
                 continue
                 
-            # Check if it's a snow permanent that can produce mana
-            if hasattr(card, 'type_line') and 'snow' in card.type_line.lower():
-                # Check if it's a land or has a mana ability
-                if 'land' in card.type_line.lower() or (hasattr(card, 'oracle_text') and 
-                                                    'add' in card.oracle_text.lower()):
-                    if not gs.tap_permanent(card_id, player):
-                        continue
-                    snow_sources_tapped += 1
-                    payment["snow_tapped_sources"].append(card_id)
+            if self._is_snow_mana_permanent(card):
+                if (not defer_source_taps
+                        and not gs.tap_permanent(card_id, player)):
+                    continue
+                snow_sources_tapped += 1
+                payment["snow_tapped_sources"].append(card_id)
+                if defer_source_taps:
+                    payment["_snow_source_taps_deferred"] = True
 
         return snow_sources_tapped >= remaining
     
@@ -1461,127 +1494,36 @@ class EnhancedManaSystem:
             if card_id is not None:
                 parsed_cost = self.apply_cost_modifiers(player, parsed_cost, card_id, context)
 
-            # Use pool_override if provided; otherwise use the player's mana pool
+            probe_player = player
             if pool_override is not None:
-                available_mana = pool_override.copy()
-                conditional_mana = {}  # No conditional mana in override
-            else:
-                available_mana = player["mana_pool"].copy()
-                conditional_mana = player.get("conditional_mana", {})
-                
-                # Include phase-restricted mana
-                if "phase_restricted_mana" in player:
-                    for color, amount in player["phase_restricted_mana"].items():
-                        if color in available_mana:
-                            available_mana[color] += amount
-                        else:
-                            available_mana[color] = amount
+                # Preserve the historical override semantics: it replaces the
+                # ordinary pool and suppresses restricted pools, while snow
+                # permanents remain available just as they did before.
+                probe_player = dict(player)
+                probe_player["mana_pool"] = dict(pool_override)
+                probe_player["phase_restricted_mana"] = {}
+                probe_player["conditional_mana"] = {}
+                probe_player["snow_mana_pool"] = {}
+                probe_player["phase_restricted_snow_mana"] = {}
+                probe_player["conditional_snow_mana"] = {}
 
-            # Check if this cost can use conditional mana
-            usable_conditional_mana = self._get_usable_conditional_mana(conditional_mana, context)
-
-            # Add usable conditional mana to available mana (just for checking)
-            for color, amount in usable_conditional_mana.items():
-                if color in available_mana:
-                    available_mana[color] += amount
-                else:
-                    available_mana[color] = amount
-
-            # Check colored mana requirements first
-            for color in ['W', 'U', 'B', 'R', 'G', 'C']:
-                if parsed_cost[color] > available_mana.get(color, 0):
-                    return False
-                available_mana[color] -= parsed_cost[color]
-
-            # Handle standard hybrid mana with one global assignment. Greedy
-            # per-pip choice can reject a payable overlap such as
-            # {U/R}{U/W} with U+R, while availability-only checks let one unit
-            # also pay a later generic pip. The plan both reserves every unit
-            # and backtracks across overlapping options.
-            hybrid_pairs = parsed_cost['hybrid']
-            standard_hybrid = all(
-                all(color in self.mana_symbols for color in pair)
-                for pair in hybrid_pairs)
-            if standard_hybrid:
-                hybrid_plan = self._plan_standard_hybrid_colors(
-                    hybrid_pairs, available_mana)
-                if hybrid_plan is None:
-                    return False
-                for chosen_color in hybrid_plan:
-                    available_mana[chosen_color] -= 1
-            else:
-                # Legacy two-hybrid handling currently supports only its
-                # colored alternative. Still reserve that unit so it cannot
-                # be counted again as generic mana.
-                for hybrid_pair in hybrid_pairs:
-                    chosen_color = next(
-                        (color for color in hybrid_pair
-                         if color in self.mana_symbols
-                         and available_mana.get(color, 0) > 0), None)
-                    if chosen_color is None:
-                        return False
-                    available_mana[chosen_color] -= 1
-
-            # Handle Phyrexian mana. Mana is reserved per pip and life is
-            # checked in aggregate; testing each pip against the same life
-            # total let three life cover any number of {C/P} symbols.
-            phyrexian_life_required = 0
-            for phyrexian_color in parsed_cost['phyrexian']:
-                if available_mana.get(phyrexian_color, 0) > 0:
-                    available_mana[phyrexian_color] -= 1
-                else:
-                    phyrexian_life_required += 2
-            if player["life"] < phyrexian_life_required:
-                return False
-                    
-            # Handle snow mana
-            if parsed_cost['snow'] > 0:
-                remaining_snow = int(parsed_cost['snow'])
-                snow_by_color = {
-                    color: min(
-                        available_mana.get(color, 0),
-                        int(player.get("snow_mana_pool", {}).get(
-                            color, 0) or 0)
-                        + int(player.get(
-                            "phase_restricted_snow_mana", {}).get(
-                                color, 0) or 0)
-                        + sum(
-                            int(provenance.get(color, 0) or 0)
-                            for restriction_key, provenance in player.get(
-                                "conditional_snow_mana", {}).items()
-                            if self._can_use_conditional_mana(
-                                restriction_key, context or {})))
-                    for color in ('C', 'W', 'U', 'B', 'R', 'G')
-                }
-                # Reserve already-floated snow mana so generic payment cannot
-                # count the same unit again. Non-snow costs above have already
-                # reduced available_mana, so provenance is capped to what is
-                # left in the transaction.
-                for color in ('C', 'W', 'U', 'B', 'R', 'G'):
-                    spend = min(remaining_snow, snow_by_color[color])
-                    available_mana[color] -= spend
-                    remaining_snow -= spend
-                    if remaining_snow <= 0:
-                        break
-                if remaining_snow > self.track_snow_sources(player):
-                    return False
-
-            # Calculate generic mana requirement
-            generic_requirement = parsed_cost['generic']
-
-            # Handle X costs if X value is provided in context
-            if parsed_cost['X'] > 0 and context and 'X' in context:
-                x_value = context['X']
-                generic_requirement += x_value * parsed_cost['X']
-
-            # Calculate total available mana for generic costs
-            total_available = sum(available_mana.values())
-
-            # Check if enough mana for generic cost
-            if total_available < generic_requirement:
-                return False
-
-            return True
+            # Affordability uses the same global, distinct-source assignment
+            # as auto-tap and live payment.  Excluding lands here preserves
+            # this method's pool-only contract while still allowing an
+            # untapped nonland snow mana permanent to pay {S} directly.
+            excluded_sources = {
+                permanent_id
+                for permanent_id in probe_player.get("battlefield", [])
+                if (pool_override is not None
+                    or "land" in str(getattr(
+                        self.game_state._safe_get_card(permanent_id),
+                        "type_line", "") or "").lower())
+            }
+            return self._plan_mana_payment(
+                probe_player, parsed_cost, context,
+                exclude_ids=excluded_sources,
+                include_lands=False,
+            ) is not None
         except Exception as e:
             logging.error(f"Error checking mana payment: {str(e)}")
             import traceback
@@ -1598,13 +1540,15 @@ class EnhancedManaSystem:
         battlefield permanents from the land scan — used to test whether a
         cost stays payable after an additional cost returns one of them.
         """
-        if self.can_pay_mana_cost(player, cost, context):
-            return True
         if (context and context.get('use_alt_cost')
                 and not isinstance(cost, dict)):
-            return False
-        return self._plan_auto_tap(
-            player, cost, context, exclude_ids=exclude_ids) is not None
+            return self.can_pay_mana_cost(player, cost, context)
+        combined_excludes = set(exclude_ids or ())
+        combined_excludes.update(
+            self._reserved_payment_permanent_ids(player, context))
+        return self._plan_mana_payment(
+            player, cost, context, exclude_ids=combined_excludes,
+            include_lands=True) is not None
 
     def can_pay_replacing_cost_with_lands(self, player, card_id, cost,
                                           alt_cost_type, context=None):
@@ -1624,121 +1568,318 @@ class EnhancedManaSystem:
         return self.can_pay_mana_cost_with_lands(
             player, final_cost, probe_context)
 
-    def _plan_auto_tap(self, player, cost, context=None, exclude_ids=None):
-        """Plan land taps that, with the current pool, cover ``cost``.
+    def _plan_mana_payment(self, player, cost, context=None,
+                           exclude_ids=None, include_lands=True):
+        """Assign every mana/life pip to one distinct usable source.
 
-        Returns a list of (card_id, option) taps, or None when the cost stays
-        unpayable. Colored and hybrid pips are matched exactly (augmenting-
-        path matching over pool units and land outputs); leftover units cover
-        generic. Restricted outputs ("spend this mana only ...") are skipped;
-        pain-land options are used only when nothing damage-free fits.
+        Pool provenance, lands, direct snow-permanent taps, Phyrexian life,
+        hybrid choices, and generic pips all participate in one augmenting-
+        path match.  This is the shared feasibility contract for masks,
+        auto-tap, and live payment.
         """
         try:
             context = context or {}
             parsed = (self._normalize_mana_cost(cost)
                       if isinstance(cost, dict)
                       else self.parse_mana_cost(cost))
+            colors = ('W', 'U', 'B', 'R', 'G', 'C')
+            sources = []
 
-            # Every already-produced unit is a distinct source. Preserve pool
-            # provenance by including phase mana separately and only including
-            # conditional mana whose restriction accepts this exact context.
-            # The returned plan still contains land taps only; live payment
-            # consumes these pools in its regular -> phase -> conditional order.
-            pool_units = []
-            for mana_pool in (
-                    player.get("mana_pool", {}),
-                    player.get("phase_restricted_mana", {}),
-                    self._get_usable_conditional_mana(
-                        player.get("conditional_mana", {}), context)):
-                for color in ('W', 'U', 'B', 'R', 'G', 'C'):
-                    pool_units.extend(
-                        [color] * max(0, int(mana_pool.get(color, 0) or 0)))
+            def add_pool_sources(kind, mana_pool, snow_provenance,
+                                 restriction_key=None):
+                mana_pool = mana_pool or {}
+                snow_provenance = snow_provenance or {}
+                for color in colors:
+                    total = max(0, int(mana_pool.get(color, 0) or 0))
+                    snow_count = min(
+                        total, max(0, int(
+                            snow_provenance.get(color, 0) or 0)))
+                    # Put non-snow units first as a useful deterministic
+                    # preference; matching can still reassign either unit.
+                    for is_snow in (
+                            [False] * (total - snow_count)
+                            + [True] * snow_count):
+                        sources.append({
+                            "kind": kind,
+                            "color": color,
+                            "symbols": {color},
+                            "is_snow": is_snow,
+                            "restriction_key": restriction_key,
+                        })
 
-            lands = []
-            seen_land_ids = set(exclude_ids or ())
+            add_pool_sources(
+                "regular", player.get("mana_pool", {}),
+                player.get("snow_mana_pool", {}))
+            add_pool_sources(
+                "phase", player.get("phase_restricted_mana", {}),
+                player.get("phase_restricted_snow_mana", {}))
+            for restriction_key, restricted_pool in player.get(
+                    "conditional_mana", {}).items():
+                if not self._can_use_conditional_mana(
+                        restriction_key, context):
+                    continue
+                add_pool_sources(
+                    "conditional", restricted_pool,
+                    player.get("conditional_snow_mana", {}).get(
+                        restriction_key, {}),
+                    restriction_key=restriction_key)
+
+            excluded = set(exclude_ids or ())
+            excluded.update(
+                self._reserved_payment_permanent_ids(player, context))
+            seen_permanent_ids = set(excluded)
+            if include_lands:
+                land_source_start = len(sources)
+                for card_id in player.get("battlefield", []):
+                    if (card_id in player.get("tapped_permanents", set())
+                            or card_id in seen_permanent_ids):
+                        continue
+                    card = self.game_state._safe_get_card(card_id)
+                    type_line = str(
+                        getattr(card, "type_line", "") or "")
+                    if card is None or "land" not in type_line.lower():
+                        continue
+                    options = []
+                    for option in self._land_mana_options(player, card):
+                        restriction = str(
+                            option.get("restriction", "") or "")
+                        if restriction:
+                            parsed_restriction = \
+                                self._parse_mana_restrictions(
+                                    restriction.lower())
+                            if not parsed_restriction:
+                                continue
+                            restriction_key = self._get_restriction_key(
+                                parsed_restriction)
+                            if not self._can_use_conditional_mana(
+                                    restriction_key, context):
+                                continue
+                        options.append(option)
+                    if not options:
+                        continue
+                    options.sort(key=lambda option: int(
+                        option.get("damage", 0) or 0))
+                    sources.append({
+                        "kind": "land", "card_id": card_id,
+                        "options": options,
+                        "symbols": {
+                            option["symbol"] for option in options},
+                        "is_snow": "snow" in type_line.lower(),
+                    })
+                    seen_permanent_ids.add(card_id)
+                # Source iteration is the matcher's deterministic preference.
+                # Prefer a globally damage-free land before a pain land even
+                # when battlefield order lists the pain source first; this
+                # preserves life for Phyrexian alternatives.
+                sources[land_source_start:] = sorted(
+                    sources[land_source_start:],
+                    key=lambda source: min(
+                        int(option.get("damage", 0) or 0)
+                        for option in source["options"]))
+
+            # Nonland snow mana permanents pay {S} directly; they are not
+            # general mana sources in this auto-tap/payment surface.
             for card_id in player.get("battlefield", []):
-                # tapped_permanents is a set of ids, so duplicate-id copies
-                # (fixture decks) can only ever tap once; plan them as one.
                 if (card_id in player.get("tapped_permanents", set())
-                        or card_id in seen_land_ids):
+                        or card_id in seen_permanent_ids):
                     continue
                 card = self.game_state._safe_get_card(card_id)
-                if (not card or 'land' not in
-                        (getattr(card, 'type_line', '') or '').lower()):
+                type_line = str(getattr(card, "type_line", "") or "")
+                if (not self._is_snow_mana_permanent(card)
+                        or "land" in type_line.lower()):
                     continue
-                options = []
-                for option in self._land_mana_options(player, card):
-                    restriction = str(option.get("restriction", "") or "")
-                    if restriction:
-                        parsed_restriction = self._parse_mana_restrictions(
-                            restriction.lower())
-                        if not parsed_restriction:
-                            # Fail closed for a restriction the mana system
-                            # cannot represent faithfully.
-                            continue
-                        restriction_key = self._get_restriction_key(
-                            parsed_restriction)
-                        if not self._can_use_conditional_mana(
-                                restriction_key, context):
-                            continue
-                    options.append(option)
-                if options:
-                    options.sort(key=lambda o: int(o.get("damage", 0) or 0))
-                    lands.append((card_id, options))
-                    seen_land_ids.add(card_id)
+                sources.append({
+                    "kind": "snow_permanent", "card_id": card_id,
+                    "symbols": set(colors), "is_snow": True,
+                })
+                seen_permanent_ids.add(card_id)
+
+            for _ in range(max(
+                    0, int(player.get("life", 0) or 0) // 2)):
+                sources.append({
+                    "kind": "phyrexian_life",
+                    "symbols": set(colors), "is_snow": False,
+                })
 
             needs = []
-            for color in ('W', 'U', 'B', 'R', 'G', 'C'):
-                needs.extend([{color}] * parsed.get(color, 0))
-            for pair in parsed.get('hybrid', []):
-                needs.append({str(c).upper() for c in pair})
-            # Phyrexian pips fall back to life during payment; don't demand
-            # mana for them here (can_pay_mana_cost still verifies life).
-            generic_needed = parsed.get('generic', 0)
-            if parsed.get('X', 0) and 'X' in context:
-                generic_needed += parsed['X'] * int(context.get('X', 0) or 0)
-
-            sources = [{unit} for unit in pool_units] + [
-                {option['symbol'] for option in options}
-                for _, options in lands]
-            match_of_source = [None] * len(sources)
-
-            def assign(need_idx, seen):
-                for s_idx, symbols in enumerate(sources):
-                    if s_idx in seen or not (needs[need_idx] & symbols):
-                        continue
-                    seen.add(s_idx)
-                    if (match_of_source[s_idx] is None
-                            or assign(match_of_source[s_idx], seen)):
-                        match_of_source[s_idx] = need_idx
-                        return True
-                return False
-
-            for need_idx in range(len(needs)):
-                if not assign(need_idx, set()):
+            for color in colors:
+                for _ in range(max(0, int(parsed.get(color, 0) or 0))):
+                    needs.append({"kind": "colored", "symbols": {color}})
+            for pair in parsed.get("hybrid", []):
+                symbols = {
+                    str(symbol).upper() for symbol in pair
+                    if str(symbol).upper() in self.mana_symbols}
+                if not symbols:
                     return None
-            free_sources = [i for i, m in enumerate(match_of_source) if m is None]
-            if len(free_sources) < generic_needed:
+                needs.append({"kind": "hybrid", "symbols": symbols})
+            for phy_color in parsed.get("phyrexian", []):
+                needs.append({
+                    "kind": "phyrexian",
+                    "symbols": {str(phy_color).upper()},
+                })
+            for _ in range(max(0, int(parsed.get("snow", 0) or 0))):
+                needs.append({"kind": "snow", "symbols": set(colors)})
+            generic_needed = max(0, int(parsed.get("generic", 0) or 0))
+            if parsed.get("X", 0) and "X" in context:
+                generic_needed += (
+                    max(0, int(parsed.get("X", 0) or 0))
+                    * max(0, int(context.get("X", 0) or 0)))
+            for _ in range(generic_needed):
+                needs.append({"kind": "generic", "symbols": set(colors)})
+
+            def source_can_pay(source, need):
+                if (source["kind"] == "snow_permanent"
+                        and need["kind"] != "snow"):
+                    return False
+                if (source["kind"] == "phyrexian_life"
+                        and need["kind"] != "phyrexian"):
+                    return False
+                if need["kind"] == "snow" and not source["is_snow"]:
+                    return False
+                return bool(source["symbols"].intersection(
+                    need["symbols"]))
+
+            # Min-cost maximum matching.  Ordinary mana costs zero life,
+            # Phyrexian-life sources cost two, and a land edge costs the
+            # damage of its cheapest compatible output.  Residual edges let a
+            # later generic/snow/phy pip globally reassign earlier hybrid
+            # choices while also finding a payment within the life budget.
+            source_node = 0
+            source_offset = 1
+            need_offset = source_offset + len(sources)
+            sink_node = need_offset + len(needs)
+            graph = [[] for _ in range(sink_node + 1)]
+
+            def add_edge(start, end, capacity, edge_cost, metadata=None):
+                forward = [end, len(graph[end]), capacity,
+                           edge_cost, metadata]
+                reverse = [start, len(graph[start]), 0,
+                           -edge_cost, None]
+                graph[start].append(forward)
+                graph[end].append(reverse)
+
+            for source_index in range(len(sources)):
+                add_edge(source_node, source_offset + source_index, 1, 0)
+            for need_index in range(len(needs)):
+                add_edge(need_offset + need_index, sink_node, 1, 0)
+            for source_index, source in enumerate(sources):
+                for need_index, need in enumerate(needs):
+                    if not source_can_pay(source, need):
+                        continue
+                    option = None
+                    edge_cost = 0
+                    if source["kind"] == "phyrexian_life":
+                        edge_cost = 2
+                    elif source["kind"] == "land":
+                        compatible_options = [
+                            candidate for candidate in source["options"]
+                            if candidate["symbol"] in need["symbols"]]
+                        if not compatible_options:
+                            continue
+                        option = min(
+                            compatible_options,
+                            key=lambda candidate: int(
+                                candidate.get("damage", 0) or 0))
+                        edge_cost = int(option.get("damage", 0) or 0)
+                    add_edge(
+                        source_offset + source_index,
+                        need_offset + need_index, 1, edge_cost,
+                        ("assignment", need_index, option))
+
+            flow = 0
+            total_life_cost = 0
+            while flow < len(needs):
+                infinity = 10 ** 18
+                distance = [infinity] * len(graph)
+                previous = [None] * len(graph)
+                in_queue = [False] * len(graph)
+                distance[source_node] = 0
+                queue = deque([source_node])
+                in_queue[source_node] = True
+                while queue:
+                    node = queue.popleft()
+                    in_queue[node] = False
+                    for edge_index, edge in enumerate(graph[node]):
+                        target, _, capacity, edge_cost, _ = edge
+                        if (capacity <= 0
+                                or distance[target]
+                                <= distance[node] + edge_cost):
+                            continue
+                        distance[target] = distance[node] + edge_cost
+                        previous[target] = (node, edge_index)
+                        if not in_queue[target]:
+                            queue.append(target)
+                            in_queue[target] = True
+                if previous[sink_node] is None:
+                    return None
+                node = sink_node
+                while node != source_node:
+                    previous_node, edge_index = previous[node]
+                    edge = graph[previous_node][edge_index]
+                    edge[2] -= 1
+                    graph[node][edge[1]][2] += 1
+                    node = previous_node
+                flow += 1
+                total_life_cost += distance[sink_node]
+
+            if total_life_cost > int(player.get("life", 0) or 0):
                 return None
 
-            taps = []
-            for s_idx, need_idx in enumerate(match_of_source):
-                if need_idx is None or s_idx < len(pool_units):
-                    continue
-                card_id, options = lands[s_idx - len(pool_units)]
-                option = next(o for o in options
-                              if o['symbol'] in needs[need_idx])
-                taps.append((card_id, option))
-            # Free pool units cover generic first; tap lands for the rest.
-            free_pool = sum(1 for i in free_sources if i < len(pool_units))
-            free_lands = [i for i in free_sources if i >= len(pool_units)]
-            for s_idx in free_lands[:max(0, generic_needed - free_pool)]:
-                card_id, options = lands[s_idx - len(pool_units)]
-                taps.append((card_id, options[0]))
-            return taps
-        except Exception as e:
-            logging.warning(f"Auto-tap planning failed: {e}")
+            assignments = []
+            land_taps = []
+            for source_index, source_data in enumerate(sources):
+                source_graph_node = source_offset + source_index
+                for edge in graph[source_graph_node]:
+                    metadata = edge[4]
+                    if (not metadata or metadata[0] != "assignment"
+                            or edge[2] != 0):
+                        continue
+                    _, need_index, option = metadata
+                    source = dict(source_data)
+                    need = dict(needs[need_index])
+                    if source["kind"] == "land":
+                        source["option"] = option
+                        land_taps.append((source["card_id"], option))
+                    assignments.append({"source": source, "need": need})
+                    break
+            pool_spends = Counter()
+            snow_provenance_spends = Counter()
+            snow_tap_ids = []
+            life_paid = 0
+            for assignment in assignments:
+                source = assignment["source"]
+                if source["kind"] in (
+                        "regular", "phase", "conditional"):
+                    locator = (
+                        source["kind"], source.get("restriction_key"),
+                        source["color"])
+                    pool_spends[locator] += 1
+                    if source.get("is_snow"):
+                        snow_provenance_spends[locator] += 1
+                elif source["kind"] == "snow_permanent":
+                    snow_tap_ids.append(source["card_id"])
+                elif source["kind"] == "phyrexian_life":
+                    life_paid += 2
+            return {
+                "parsed_cost": parsed,
+                "assignments": assignments,
+                "land_taps": land_taps,
+                "pool_spends": dict(pool_spends),
+                "snow_provenance_spends": dict(
+                    snow_provenance_spends),
+                "snow_tap_ids": snow_tap_ids,
+                "life_paid": life_paid,
+            }
+        except Exception as error:
+            logging.warning("Mana-source planning failed: %s", error)
             return None
+
+    def _plan_auto_tap(self, player, cost, context=None, exclude_ids=None):
+        """Return the land portion of the shared global payment plan."""
+        plan = self._plan_mana_payment(
+            player, cost, context, exclude_ids=exclude_ids,
+            include_lands=True)
+        return None if plan is None else plan["land_taps"]
 
     def calculate_cost_reduction(self, player, cost, card_id, context=None):
         """
@@ -2206,9 +2347,441 @@ class EnhancedManaSystem:
         
         return False
     
-    def _refund_payment(self, player, payment):
+    def _prepare_non_mana_payment(self, player, context):
+        """Resolve and validate every non-mana cost without mutating state.
+
+        Composite costs used to validate each component immediately before
+        paying it.  A later bad discard/sacrifice index therefore failed only
+        after earlier permanents had left the battlefield and their zone-change
+        triggers and cleanup had already run.  The subsequent list-based
+        "refund" could not recreate that battlefield object.  Keep a concrete
+        immutable-by-convention plan so all ordinary validation failures happen
+        before the first tap or zone move.
         """
-        Refund all costs (mana, life, tapped permanents, etc.) from a failed payment.
+        context = context or {}
+        gs = self.game_state
+
+        def cost_list(key, label):
+            value = context.get(key, [])
+            if value is None:
+                return []
+            if not isinstance(value, (list, tuple)):
+                raise ValueError(f"{label} payment failed: Expected a list of choices.")
+            return list(value)
+
+        tap_ids = []
+        seen_tap_ids = set()
+        for choice_key, label, required_type in (
+                ("convoke_creatures", "Convoke", "creature"),
+                ("improvise_artifacts", "Improvise", "artifact")):
+            for identifier in cost_list(choice_key, label):
+                perm_id = gs._find_permanent_id(player, identifier)
+                if (perm_id is None
+                        or perm_id not in player.get("battlefield", [])):
+                    raise ValueError(
+                        f"{label} payment failed: {identifier} "
+                        "(invalid identifier).")
+                permanent = gs._safe_get_card(perm_id)
+                permanent_types = {
+                    str(card_type).lower() for card_type in
+                    (getattr(permanent, "card_types", []) or [])}
+                if required_type not in permanent_types:
+                    raise ValueError(
+                        f"{label} payment failed: {perm_id} is not a "
+                        f"{required_type}.")
+                if perm_id in player.get("tapped_permanents", set()):
+                    raise ValueError(
+                        f"{label} payment failed: {perm_id} "
+                        "(already tapped).")
+                if perm_id in seen_tap_ids:
+                    raise ValueError(
+                        f"{label} payment failed: {perm_id} was selected "
+                        "more than once.")
+                seen_tap_ids.add(perm_id)
+                tap_ids.append(perm_id)
+
+        graveyard = player.get("graveyard", [])
+        grave_indices = (
+            cost_list("delve_cards", "Delve")
+            + cost_list("escape_cards", "Escape")
+        )
+        if any(not isinstance(idx, int) for idx in grave_indices):
+            raise ValueError(
+                "Delve/Escape payment failed: Graveyard choices must be indices.")
+        if len(set(grave_indices)) != len(grave_indices):
+            raise ValueError(
+                "Delve/Escape payment failed: A graveyard card was selected "
+                "more than once.")
+        if any(idx < 0 or idx >= len(graveyard) for idx in grave_indices):
+            raise ValueError(
+                "Delve/Escape payment failed: Invalid GY indices provided.")
+        source_zone = context.get("_payment_source_zone")
+        source_index = context.get("_payment_source_index")
+        if (source_zone == "graveyard" and isinstance(source_index, int)
+                and source_index in grave_indices):
+            raise ValueError(
+                "Delve/Escape payment cannot exile the spell being cast.")
+        exile_choices = [
+            (idx, graveyard[idx]) for idx in sorted(grave_indices, reverse=True)
+        ]
+
+        sacrifice_ids = []
+        seen_sacrifice_choices = set()
+        for identifier in cost_list(
+                "sacrifice_additional", "Additional Sacrifice"):
+            sac_id = gs._find_permanent_id(player, identifier)
+            if sac_id is None or sac_id not in player.get("battlefield", []):
+                raise ValueError(
+                    "Additional Sacrifice payment failed: Invalid/missing "
+                    f"permanent {identifier}.")
+            # Integer choices are battlefield occurrences, so two different
+            # indices may legally represent two physical copies that still
+            # share a legacy card ID.  Reject only the same occurrence twice.
+            choice_key = (type(identifier), identifier)
+            if choice_key in seen_sacrifice_choices:
+                raise ValueError(
+                    "Additional Sacrifice payment failed: Choice "
+                    f"{identifier} was selected more than once.")
+            seen_sacrifice_choices.add(choice_key)
+            sacrifice_ids.append(sac_id)
+
+        bargain_sacrifice_ids = []
+        if context.get("bargained"):
+            bargain_id = context.get("bargain_sacrifice_id")
+            bargain_card = gs._safe_get_card(bargain_id)
+            bargain_types = set(getattr(bargain_card, "card_types", []) or [])
+            if (bargain_id is None
+                    or bargain_id not in player.get("battlefield", [])
+                    or not (bargain_types.intersection(
+                        {"artifact", "enchantment"})
+                        or bool(getattr(bargain_card, "is_token", False)))):
+                raise ValueError(
+                    "Bargain payment failed: invalid sacrifice selection.")
+            if (Counter(sacrifice_ids)[bargain_id]
+                    >= Counter(player.get("battlefield", []))[bargain_id]):
+                raise ValueError(
+                    "Bargain payment selected a permanent already used for "
+                    "another cost.")
+            bargain_sacrifice_ids.append(bargain_id)
+
+        return_choices = []
+        returned_id = context.get("returned_for_additional_cost")
+        if returned_id is not None:
+            returned_index = context.get(
+                "_returned_for_additional_cost_index")
+            if not isinstance(returned_index, int):
+                try:
+                    returned_index = player.get("battlefield", []).index(
+                        returned_id)
+                except ValueError:
+                    returned_index = None
+            if (returned_index is None or returned_index < 0
+                    or returned_index >= len(player.get("battlefield", []))
+                    or player["battlefield"][returned_index] != returned_id):
+                raise ValueError(
+                    "Additional Return payment failed: selected permanent "
+                    "is no longer on the battlefield.")
+            if (returned_id in sacrifice_ids
+                    or returned_id in bargain_sacrifice_ids):
+                raise ValueError(
+                    "Additional Return payment selected a permanent already "
+                    "used for another cost.")
+            return_choices.append((returned_index, returned_id))
+
+        evidence_choices = []
+        if context.get("evidence_collected"):
+            evidence_cards = cost_list(
+                "evidence_cards", "Collect Evidence")
+            raw_evidence_choices = context.get("_evidence_choices", []) or []
+            if raw_evidence_choices:
+                if (not isinstance(raw_evidence_choices, (list, tuple))
+                        or any(
+                            not isinstance(choice, (list, tuple))
+                            or len(choice) != 2
+                            or not isinstance(choice[0], int)
+                            for choice in raw_evidence_choices)):
+                    raise ValueError(
+                        "Collect Evidence payment has malformed choices.")
+                evidence_choices = [tuple(choice)
+                                    for choice in raw_evidence_choices]
+            else:
+                # Compatibility for an older staged context: resolve each ID
+                # to one unused graveyard occurrence without guessing across
+                # the spell source or another graveyard cost.
+                used = set(grave_indices)
+                if source_zone == "graveyard" and isinstance(source_index, int):
+                    used.add(source_index)
+                for evidence_id in evidence_cards:
+                    evidence_index = next((
+                        index for index, card_id in enumerate(graveyard)
+                        if index not in used and card_id == evidence_id), None)
+                    if evidence_index is None:
+                        raise ValueError(
+                            "Collect Evidence payment could not resolve an "
+                            "exact graveyard occurrence.")
+                    used.add(evidence_index)
+                    evidence_choices.append((evidence_index, evidence_id))
+            evidence_indices = [choice[0] for choice in evidence_choices]
+            if (len(set(evidence_indices)) != len(evidence_indices)
+                    or set(evidence_indices).intersection(grave_indices)
+                    or any(
+                        index < 0 or index >= len(graveyard)
+                        or graveyard[index] != card_id
+                        for index, card_id in evidence_choices)
+                    or (source_zone == "graveyard"
+                        and isinstance(source_index, int)
+                        and source_index in evidence_indices)):
+                raise ValueError(
+                    "Collect Evidence payment overlaps or no longer matches "
+                    "the graveyard.")
+            if evidence_cards != [card_id for _, card_id in evidence_choices]:
+                raise ValueError(
+                    "Collect Evidence card identities diverged from choices.")
+            threshold = int(context.get("_evidence_threshold", 0) or 0)
+            evidence_value = sum(
+                max(0, int(getattr(gs._safe_get_card(card_id), "cmc", 0) or 0))
+                for _, card_id in evidence_choices)
+            if not evidence_choices or evidence_value < threshold:
+                raise ValueError(
+                    "Collect Evidence payment does not meet its threshold.")
+
+        hand = player.get("hand", [])
+
+        discard_indices = cost_list(
+            "discard_additional", "Additional Discard")
+        if any(not isinstance(idx, int) for idx in discard_indices):
+            raise ValueError(
+                "Additional Discard payment failed: Hand choices must be indices.")
+        if len(set(discard_indices)) != len(discard_indices):
+            raise ValueError(
+                "Additional Discard payment failed: A hand card was selected "
+                "more than once.")
+        if any(idx < 0 or idx >= len(hand) for idx in discard_indices):
+            raise ValueError(
+                "Additional Discard payment failed: Invalid hand indices "
+                f"{discard_indices}.")
+        if (source_zone == "hand" and isinstance(source_index, int)
+                and source_index in discard_indices):
+            raise ValueError(
+                "Additional Discard payment cannot discard the spell being cast.")
+        discard_choices = [
+            (idx, hand[idx]) for idx in sorted(discard_indices, reverse=True)
+        ]
+
+        return {
+            "tap_ids": tap_ids,
+            "exile_choices": exile_choices,
+            "sacrifice_ids": sacrifice_ids,
+            "bargain_sacrifice_ids": bargain_sacrifice_ids,
+            "return_choices": return_choices,
+            "evidence_choices": sorted(
+                evidence_choices, key=lambda choice: choice[0], reverse=True),
+            "evidence_threshold": int(
+                context.get("_evidence_threshold", 0) or 0),
+            "discard_choices": discard_choices,
+            "source_card_id": context.get("_payment_source_card_id"),
+            # Legacy callers could report an Emerge sacrifice that they had
+            # already moved before entering the mana system.  Preserve that
+            # successful-payment accounting without ever trying to revive it
+            # on a failed mana transaction.
+            "prepaid_sacrifice_ids": (
+                [context["emerge_sacrificed_id"]]
+                if context.get("emerge_sacrificed_id") else []),
+        }
+
+    def _preflight_non_mana_payment(
+            self, checkpoint, player, plan, payment):
+        """Run the exact commit on an isolated branch before touching live state."""
+        # Clone the *current* branch, after any mana abilities have completed,
+        # so one-shot mana replacements and TAPPED-trigger queues match the
+        # state the live cost commit will see.  ``checkpoint`` remains the
+        # untouched pre-activation rollback donor.
+        trial = self.game_state.create_transaction_checkpoint().get("state")
+        if trial is None:
+            raise RuntimeError("Unable to create payment preflight branch.")
+
+        # GameState clones intentionally share analytics services.  They are
+        # not part of rules evaluation and must not observe speculative zone
+        # moves or triggers from this branch.
+        trial.strategy_memory = None
+        trial.stats_tracker = None
+        trial.card_memory = None
+        if trial.card_evaluator:
+            trial.card_evaluator.stats_tracker = None
+            trial.card_evaluator.card_memory = None
+        if trial.strategic_planner and hasattr(
+                trial.strategic_planner, "strategy_memory"):
+            trial.strategic_planner.strategy_memory = None
+
+        trial_player = trial.p1 if player is self.game_state.p1 else trial.p2
+        trial_payment = copy.deepcopy(payment)
+        trial.mana_system._commit_non_mana_payment(
+            trial_player, copy.deepcopy(plan), trial_payment)
+        return True
+
+    def _commit_non_mana_payment(self, player, plan, payment):
+        """Commit a fully validated non-mana payment plan.
+
+        This is deliberately called only after the mana-pool transaction has
+        proved it can pay the complete mana cost.  Recheck the resolved plan
+        before the first mutation so no ordinary failure remains after a cost
+        card changes zones.
+        """
+        gs = self.game_state
+        battlefield = player.get("battlefield", [])
+        graveyard = player.get("graveyard", [])
+        hand = player.get("hand", [])
+
+        snow_tap_ids = list(payment.get("snow_tapped_sources", []))
+        if (len(set(snow_tap_ids)) != len(snow_tap_ids)
+                or set(snow_tap_ids).intersection(plan["tap_ids"])
+                or any(
+                    source_id not in battlefield
+                    or source_id in player.get("tapped_permanents", set())
+                    for source_id in snow_tap_ids)):
+            raise ValueError(
+                "Snow-source payment state changed after validation.")
+
+        if any(
+                perm_id not in battlefield
+                or perm_id in player.get("tapped_permanents", set())
+                for perm_id in plan["tap_ids"]):
+            raise ValueError(
+                "Convoke/Improvise payment state changed after validation.")
+        battlefield_counts = Counter(battlefield)
+        sacrifice_counts = Counter(
+            plan["sacrifice_ids"] + plan.get("bargain_sacrifice_ids", []))
+        if any(
+                battlefield_counts[sac_id] < count
+                for sac_id, count in sacrifice_counts.items()):
+            raise ValueError(
+                "Additional Sacrifice payment state changed after validation.")
+        if any(
+                idx < 0 or idx >= len(graveyard)
+                or graveyard[idx] != expected_id
+                for idx, expected_id in (
+                    plan["exile_choices"]
+                    + plan.get("evidence_choices", []))):
+            raise ValueError(
+                "Graveyard-exile payment state changed after validation.")
+        if any(
+                idx < 0 or idx >= len(battlefield)
+                or battlefield[idx] != expected_id
+                for idx, expected_id in plan.get("return_choices", [])):
+            raise ValueError(
+                "Additional Return payment state changed after validation.")
+        if any(
+                idx < 0 or idx >= len(hand) or hand[idx] != expected_id
+                for idx, expected_id in plan["discard_choices"]):
+            raise ValueError(
+                "Additional Discard payment state changed after validation.")
+
+        tapped_for_cost = []
+        for source_id in snow_tap_ids:
+            if not hasattr(gs, "tap_permanent") \
+                    or not gs.tap_permanent(source_id, player):
+                raise RuntimeError(
+                    f"Snow commit could not tap {source_id}.")
+        for perm_id in plan["tap_ids"]:
+            if not hasattr(gs, "tap_permanent") \
+                    or not gs.tap_permanent(perm_id, player):
+                raise RuntimeError(
+                    f"Convoke/Improvise commit could not tap {perm_id}.")
+            tapped_for_cost.append(perm_id)
+        payment["tapped_creatures"] = tapped_for_cost
+
+        exiled_this_step = []
+        grave_exile_operations = [
+            (idx, card_id, "cost_exile")
+            for idx, card_id in plan["exile_choices"]
+        ] + [
+            (idx, card_id, "collect_evidence")
+            for idx, card_id in plan.get("evidence_choices", [])
+        ]
+        grave_exile_operations.sort(key=lambda operation: operation[0],
+                                    reverse=True)
+        for idx, expected_exile_id, exile_cause in grave_exile_operations:
+            exile_id = player["graveyard"].pop(idx)
+            if exile_id != expected_exile_id:
+                raise RuntimeError(
+                    "Graveyard-exile commit diverged from its validated plan.")
+            exile_context = {"source_id": plan.get("source_card_id")}
+            if exile_cause == "collect_evidence":
+                exile_context["evidence_threshold"] = plan.get(
+                    "evidence_threshold", 0)
+            if not gs.move_card(
+                    exile_id, player, "graveyard_implicit", player, "exile",
+                    cause=exile_cause, context=exile_context):
+                raise RuntimeError(
+                    f"Graveyard-exile commit could not move {exile_id}.")
+            exiled_this_step.append(exile_id)
+        if exiled_this_step:
+            payment["exiled_cards"] = exiled_this_step
+
+        for return_index, return_id in plan.get("return_choices", []):
+            # Mirror fixtures can reuse one numeric ID for both seats.  The
+            # selected controller occurrence is authoritative when both
+            # original decks contain it; runtime owner metadata handles normal
+            # materialized cards.
+            owner_key = getattr(gs, "card_instance_owners", {}).get(return_id)
+            if owner_key == "p1":
+                owner = gs.p1
+            elif owner_key == "p2":
+                owner = gs.p2
+            elif (return_id in getattr(gs, "original_p1_deck", [])
+                    and return_id in getattr(gs, "original_p2_deck", [])):
+                owner = player
+            else:
+                owner = (gs._find_card_owner_fallback(return_id)
+                         if hasattr(gs, "_find_card_owner_fallback") else None)
+                owner = owner or player
+            if not gs.move_card(
+                    return_id, player, "battlefield", owner, "hand",
+                    cause="additional_cost",
+                    context={
+                        "source_id": plan.get("source_card_id"),
+                        "casting_additional_cost": "return_permanent",
+                    }):
+                raise RuntimeError(
+                    f"Additional Return commit could not move {return_id}.")
+            payment.setdefault("returned_permanents", []).append(return_id)
+
+        for sac_id in plan["sacrifice_ids"]:
+            if not gs.move_card(
+                    sac_id, player, "battlefield", player, "graveyard",
+                    cause="additional_cost_sacrifice"):
+                raise RuntimeError(
+                    f"Additional Sacrifice commit could not move {sac_id}.")
+            payment["sacrificed_perms"].append(sac_id)
+
+        for bargain_id in plan.get("bargain_sacrifice_ids", []):
+            if not gs.move_card(
+                    bargain_id, player, "battlefield", player, "graveyard",
+                    cause="bargain",
+                    context={"source_id": plan.get("source_card_id")}):
+                raise RuntimeError(
+                    f"Bargain commit could not move {bargain_id}.")
+            payment["sacrificed_perms"].append(bargain_id)
+
+        payment["sacrificed_perms"].extend(
+            plan.get("prepaid_sacrifice_ids", []))
+
+        for idx, expected_discard_id in plan["discard_choices"]:
+            discard_id = player["hand"].pop(idx)
+            if discard_id != expected_discard_id:
+                player["hand"].insert(idx, discard_id)
+                raise RuntimeError(
+                    "Additional Discard commit diverged from its validated plan.")
+            if not gs.move_card(
+                    discard_id, player, "hand_implicit", player, "graveyard",
+                    cause="additional_cost_discard"):
+                player["hand"].insert(idx, discard_id)
+                raise RuntimeError(
+                    f"Additional Discard commit could not move {discard_id}.")
+            payment["discarded_cards"].append(discard_id)
+
+    def _refund_payment(self, player, payment):
+        """Undo early tap attempts from a failed staged payment.
 
         Args:
             player: The player dictionary
@@ -2216,23 +2789,25 @@ class EnhancedManaSystem:
         """
         logging.debug(f"Refunding payment: {payment}")
 
-        # Mana payment operates on copies of every pool and commits those
-        # copies only after the full transaction succeeds. On failure the
-        # live pools were never debited, so adding tracked spends here mints
-        # mana (a failed {1}{S} payment turned one snow U into two U). Only
-        # costs mutated live below -- life, tapped permanents and moved cards
-        # -- require an explicit rollback.
+        # Mana pools and Phyrexian life are calculated on transaction-local
+        # state and committed only after non-mana costs succeed.  Zone changes
+        # are also committed only after the last recoverable failure and are
+        # intentionally never "refunded": moving a card back cannot undo
+        # triggers, replacement effects, attachment cleanup, counters, or the
+        # permanent's zone-change generation.  Only early tap attempts can
+        # need an explicit rollback here.
 
+        auto_tap_snapshot = payment.pop("_auto_tap_snapshot", None)
+        if auto_tap_snapshot:
+            for key, value in auto_tap_snapshot["player_fields"].items():
+                player[key] = copy.deepcopy(value)
 
-        # Refund life paid for Phyrexian mana
-        if payment['life'] > 0:
-            player["life"] += payment['life']
-
-        for source_id in payment.get('snow_tapped_sources', []):
-            if hasattr(self.game_state, 'untap_permanent'):
-                self.game_state.untap_permanent(source_id, player)
-            else:
-                player.get('tapped_permanents', set()).discard(source_id)
+        if not payment.get("_snow_source_taps_deferred"):
+            for source_id in payment.get('snow_tapped_sources', []):
+                if hasattr(self.game_state, 'untap_permanent'):
+                    self.game_state.untap_permanent(source_id, player)
+                else:
+                    player.get('tapped_permanents', set()).discard(source_id)
 
         # Untap creatures tapped for Convoke
         if payment['tapped_creatures']:
@@ -2242,29 +2817,6 @@ class EnhancedManaSystem:
                      self.game_state.untap_permanent(creature_id, player)
                  elif creature_id in player.get("tapped_permanents", set()): # Fallback
                      player["tapped_permanents"].remove(creature_id)
-
-        # Return exiled cards for Delve (to Graveyard)
-        if payment['exiled_cards']:
-            for card_id in payment['exiled_cards']:
-                if card_id in player.get("exile", []):
-                    player["exile"].remove(card_id)
-                    player.setdefault("graveyard", []).append(card_id)
-
-        # Return sacrificed permanents for Additional Costs (to Battlefield - complex state reset needed)
-        # Basic rollback: Just put back on battlefield, needs state reset (tapped, counters etc.)
-        if payment['sacrificed_perms']:
-            for card_id in payment['sacrificed_perms']:
-                if card_id in player.get("graveyard", []): # Assuming it went to GY
-                     player["graveyard"].remove(card_id)
-                     player.setdefault("battlefield", []).append(card_id)
-                     # TODO: Full state reset for the returned permanent is needed here
-
-        # Return discarded cards for Additional Costs (to Hand)
-        if payment['discarded_cards']:
-            for card_id in payment['discarded_cards']:
-                 if card_id in player.get("graveyard", []): # Assuming it went to GY
-                     player["graveyard"].remove(card_id)
-                     player.setdefault("hand", []).append(card_id)
 
         logging.debug("Payment refund completed.")
         # No need to clean up empty conditional mana here, done after successful payment
@@ -2319,7 +2871,6 @@ class EnhancedManaSystem:
         Now handles non-mana costs first and includes rollback. (Complete Implementation)
         """
         if context is None: context = {}
-        cost_is_precomputed = isinstance(cost, dict)
         gs = self.game_state
 
         # Track payment details - EXPANDED
@@ -2331,6 +2882,7 @@ class EnhancedManaSystem:
             'snow_tapped_sources': [],
             'tapped_creatures': [], 'exiled_cards': [],
             'sacrificed_perms': [], 'discarded_cards': [],
+            'returned_permanents': [],
         }
         card_id = context.get('card_id') # Optional: ID of card being cast/activated
 
@@ -2356,121 +2908,75 @@ class EnhancedManaSystem:
              logging.error(f"Error calculating final cost: {cost_calc_e}", exc_info=True)
              return False
 
+        # Resolve every non-mana choice before auto-tapping lands or moving a
+        # card.  The plan contains exact card IDs/indices from this unchanged
+        # state, so a malformed later component cannot force a lossy rollback
+        # of an earlier sacrifice, discard, or exile.
+        try:
+            non_mana_plan = self._prepare_non_mana_payment(player, context)
+        except ValueError as non_mana_error:
+            logging.warning(f"Failed to validate non-mana costs: {non_mana_error}")
+            return False
+        except Exception as non_mana_e:
+            logging.error(
+                f"Error validating non-mana costs: {non_mana_e}",
+                exc_info=True)
+            return False
+
+        context = dict(context)
+        transaction_checkpoint = context.get("_payment_transaction_checkpoint")
+
+        def ensure_transaction_checkpoint():
+            nonlocal transaction_checkpoint
+            if transaction_checkpoint is None:
+                transaction_checkpoint = gs.create_transaction_checkpoint()
+            return transaction_checkpoint
+
+        def abort_transaction():
+            if transaction_checkpoint is not None:
+                gs.restore_transaction_checkpoint(transaction_checkpoint)
+            else:
+                self._refund_payment(player, payment)
+
+        reserved_permanents = set(non_mana_plan["tap_ids"])
+        context["_payment_exclude_tap_ids"] = reserved_permanents
+
         # --- Affordability Check (Before Paying Anything) ---
         # ``final_cost`` already includes context reductions. Reapplying
         # Convoke/Delve/Improvise here underprices the spell a second time.
         cost_for_check = final_cost.copy()
 
-        if (not self.can_pay_mana_cost(player, cost_for_check, context)
-                and (cost_is_precomputed
-                     or not context.get('use_alt_cost'))):
-            # The pool alone is short: tap lands planned by the same check the
-            # action mask uses, so mask-legal casts pay without a manual
-            # tap-then-cast sequence.
-            auto_taps = self._plan_auto_tap(player, cost_for_check, context)
-            if auto_taps:
-                for land_id, option in auto_taps:
-                    self._produce_land_mana_option(player, land_id, option)
-
-        if not self.can_pay_mana_cost(player, cost_for_check, context):
+        # One global assignment chooses exact land options together with every
+        # pool/life/snow source.  A valid plan may contain zero land taps; None
+        # alone means the cost is unpayable.
+        initial_allocation = self._plan_mana_payment(
+            player, cost_for_check, context,
+            exclude_ids=reserved_permanents, include_lands=True)
+        if initial_allocation is None:
             cost_str = self._format_mana_cost_for_logging(final_cost, context.get('X', 0) if 'X' in final_cost else 0)
             card_name_log = getattr(gs._safe_get_card(card_id), 'name', 'spell/ability') if card_id else 'spell/ability'
             logging.warning(f"Cannot afford final cost {cost_str} for {card_name_log}")
+            abort_transaction()
             return False
-
-        # --- Execute Non-Mana Costs specified in context FIRST ---
-        non_mana_costs_paid_successfully = True
-        try:
-            # Convoke/Improvise: Tap creatures/artifacts provided in context
-            tapped_for_cost = []
-            convoke_list = context.get("convoke_creatures", [])
-            improvise_list = context.get("improvise_artifacts", [])
-            for identifier in convoke_list + improvise_list:
-                perm_id = gs._find_permanent_id(player, identifier)
-                if perm_id is None or perm_id in player.get("tapped_permanents", set()): # Cannot tap invalid or already tapped
-                     reason = "already tapped" if perm_id is not None and perm_id in player.get("tapped_permanents", set()) else "invalid identifier"
-                     raise ValueError(f"Convoke/Improvise payment failed: {perm_id} ({reason}).")
-                if hasattr(gs, 'tap_permanent') and gs.tap_permanent(perm_id, player):
-                    tapped_for_cost.append(perm_id)
-                else:
-                    raise ValueError(f"Convoke/Improvise payment failed: Could not tap {perm_id}.")
-            if tapped_for_cost: payment['tapped_creatures'] = tapped_for_cost # Record successful taps
-
-
-            # Delve/Escape: Exile cards from GY provided in context
-            exiled_for_cost = []
-            delve_indices = context.get("delve_cards", []) # Expect list of GY indices
-            escape_indices = context.get("escape_cards", []) # Expect list of GY indices
-            all_indices_to_exile = sorted(list(set(delve_indices + escape_indices)), reverse=True) # Unique indices, descending
-
-            valid_indices = [idx for idx in all_indices_to_exile if isinstance(idx, int) and 0 <= idx < len(player["graveyard"])]
-            if len(valid_indices) != len(all_indices_to_exile):
-                raise ValueError("Delve/Escape payment failed: Invalid GY indices provided.")
-
-            # Check if enough cards *remain* in GY if indices overlap (unlikely but possible)
-            if len(valid_indices) > len(player.get("graveyard",[])):
-                raise ValueError("Delve/Escape payment failed: Not enough cards in graveyard after index validation.")
-
-            gy_cards_to_exile_ids = [player["graveyard"][idx] for idx in valid_indices]
-            temp_gy = player["graveyard"][:] # Operate on a copy temporarily
-            exiled_this_step = []
-
-            for idx in valid_indices:
-                try:
-                     exile_id = temp_gy.pop(idx) # Remove from copy based on original index
-                     # Use move_card for robustness (e.g., Leyline of the Void)
-                     if not gs.move_card(exile_id, player, "graveyard_implicit", player, "exile", cause="cost_exile"):
-                          raise ValueError(f"Delve/Escape payment failed: Could not exile {exile_id}.")
-                     exiled_this_step.append(exile_id) # Track successfully exiled
-                except IndexError:
-                     # This might happen if indices weren't unique or GY changed unexpectedly
-                     raise ValueError(f"Delve/Escape payment failed: Index {idx} became invalid during removal.")
-
-            if exiled_this_step:
-                 payment['exiled_cards'] = exiled_this_step
-                 player["graveyard"] = temp_gy # Commit removal from actual GY list
-
-            # Emerge Sacrifice (Check context for ID already sacrificed by game logic)
-            if context.get("emerge_sacrificed_id"):
-                 payment['sacrificed_perms'].append(context["emerge_sacrificed_id"]) # Record
-
-            # Additional Costs (Sacrifice, Discard) from context
-            # Assume these lists contain identifiers (indices or card IDs)
-            sac_additional = context.get("sacrifice_additional", [])
-            discard_additional = context.get("discard_additional", [])
-
-            for identifier in sac_additional:
-                 sac_id = gs._find_permanent_id(player, identifier)
-                 if sac_id is None or sac_id not in player.get("battlefield",[]):
-                      raise ValueError(f"Additional Sacrifice payment failed: Invalid/missing permanent {identifier}.")
-                 # Use move_card; if it fails, raise error
-                 if not gs.move_card(sac_id, player, "battlefield", player, "graveyard", cause="additional_cost_sacrifice"):
-                      raise ValueError(f"Additional Sacrifice payment failed: move_card failed for {sac_id}.")
-                 payment['sacrificed_perms'].append(sac_id)
-
-            # Process discard indices descending to avoid index issues
-            discard_ids_to_discard = []
-            valid_discard_indices = [idx for idx in sorted(discard_additional, reverse=True) if isinstance(idx, int) and 0 <= idx < len(player.get("hand",[]))]
-            if len(valid_discard_indices) != len(discard_additional):
-                 raise ValueError(f"Additional Discard payment failed: Invalid hand indices {discard_additional}.")
-
-            for idx in valid_discard_indices:
-                 discard_id = player["hand"].pop(idx) # Remove from hand
-                 # Use move_card to put into graveyard
-                 if not gs.move_card(discard_id, player, "hand_implicit", player, "graveyard", cause="additional_cost_discard"):
-                      # If move fails, try to put card back in hand - difficult state
-                      player["hand"].insert(idx, discard_id) # Put back at original index? Risky.
-                      raise ValueError(f"Additional Discard payment failed: move_card failed for {discard_id}.")
-                 payment['discarded_cards'].append(discard_id)
-
-        except ValueError as non_mana_error:
-             logging.warning(f"Failed to pay non-mana costs: {non_mana_error}")
-             self._refund_payment(player, payment) # Rollback costs paid so far
-             return False
-        except Exception as non_mana_e:
-             logging.error(f"Error paying non-mana costs: {non_mana_e}", exc_info=True)
-             self._refund_payment(player, payment)
-             return False
+        auto_taps = initial_allocation["land_taps"]
+        if auto_taps:
+            ensure_transaction_checkpoint()
+            snapshot_keys = (
+                "mana_pool", "snow_mana_pool", "conditional_mana",
+                "conditional_snow_mana", "phase_restricted_mana",
+                "phase_restricted_snow_mana", "tapped_permanents",
+                "life", "lost_life_this_turn")
+            payment["_auto_tap_snapshot"] = {
+                "player_fields": {
+                    key: copy.deepcopy(player.get(key))
+                    for key in snapshot_keys if key in player
+                }
+            }
+            for land_id, option in auto_taps:
+                if not self._produce_land_mana_option(
+                        player, land_id, option):
+                    abort_transaction()
+                    return False
 
         # --- Pay Mana Costs ---
         mana_payment_successful = False
@@ -2486,90 +2992,106 @@ class EnhancedManaSystem:
             "phase_restricted_snow_mana", {}).copy()
 
         try:
-            usable_conditional = self._get_usable_conditional_mana(conditional_pool, context)
+            # Re-plan after exact land activations, using only the now-floated
+            # pools plus direct nonland snow sources.  Mana abilities and their
+            # replacements may have produced a different quantity/scope than
+            # the initial land source advertised.
+            execution_allocation = self._plan_mana_payment(
+                player, cost_for_check, context,
+                exclude_ids=reserved_permanents, include_lands=False)
+            if execution_allocation is None:
+                raise ValueError(
+                    "Post-activation mana allocation no longer pays cost")
 
-            # Pay colored mana first (WUBRGC)
-            for color in ['W', 'U', 'B', 'R', 'G', 'C']:
-                required = final_cost.get(color, 0)
-                if required <= 0: continue
-                paid_count = 0
-                # Priority: Regular -> Phase -> Conditional
-                paid_reg = min(required, current_pool.get(color, 0))
-                if paid_reg > 0: current_pool[color] -= paid_reg; payment['colors'][color] += paid_reg; paid_count += paid_reg;
-                if paid_count < required:
-                    paid_phase = min(required - paid_count, phase_pool.get(color, 0))
-                    if paid_phase > 0: phase_pool[color] -= paid_phase; payment['phase_restricted'][color] += paid_phase; paid_count += paid_phase;
-                if paid_count < required:
-                    for r_key, pool_part in conditional_pool.items():
-                        if paid_count >= required: break
-                        if self._can_use_conditional_mana(r_key, context) and pool_part.get(color, 0) > 0:
-                            paid_cond = min(required - paid_count, pool_part[color])
-                            pool_part[color] -= paid_cond; payment['conditional'][r_key][color] += paid_cond; paid_count += paid_cond;
+            for assignment in execution_allocation["assignments"]:
+                source = assignment["source"]
+                need = assignment["need"]
+                kind = source["kind"]
+                if kind == "phyrexian_life":
+                    payment["life"] += 2
+                    continue
+                if kind == "snow_permanent":
+                    payment["snow_tapped_sources"].append(
+                        source["card_id"])
+                    payment["_snow_source_taps_deferred"] = True
+                    continue
+                if kind not in ("regular", "phase", "conditional"):
+                    raise ValueError(
+                        f"Unexpected live allocation source {kind}")
 
-                if paid_count < required:
-                    raise ValueError(f"Insufficient {color} mana during payment (Needed {required}, Found {paid_count} usable)")
+                color = source["color"]
+                restriction_key = source.get("restriction_key")
+                if kind == "regular":
+                    target_pool = current_pool
+                    target_snow = snow_pool
+                    payment_bucket = payment["colors"]
+                elif kind == "phase":
+                    target_pool = phase_pool
+                    target_snow = phase_snow_pool
+                    payment_bucket = payment["phase_restricted"]
+                else:
+                    target_pool = conditional_pool.get(
+                        restriction_key, {})
+                    target_snow = conditional_snow_pool.setdefault(
+                        restriction_key, {})
+                    payment_bucket = payment["conditional"][
+                        restriction_key]
+                if int(target_pool.get(color, 0) or 0) <= 0:
+                    raise ValueError(
+                        "Allocated mana unit disappeared before commit")
+                target_pool[color] -= 1
+                payment_bucket[color] += 1
+                if source.get("is_snow"):
+                    if int(target_snow.get(color, 0) or 0) <= 0:
+                        raise ValueError(
+                            "Allocated snow provenance disappeared before commit")
+                    target_snow[color] -= 1
+                if need["kind"] == "snow":
+                    payment["snow_spent_colors"][color] += 1
 
-            # Pay hybrid mana (including 2-brid)
-            if not self._pay_hybrid_mana_with_all_pools(player, final_cost.get('hybrid', []), payment, current_pool, phase_pool, conditional_pool, usable_conditional, context):
-                 raise ValueError("Failed to pay hybrid mana")
-
-            # Pay Phyrexian mana
-            phy_colors_to_pay = list(final_cost.get('phyrexian', []))
-            paid_phy_life = 0
-            phy_success = True
-            # Try mana first from all pools
-            remaining_phy_to_pay_life = []
-            for color in phy_colors_to_pay:
-                 paid_with_mana = False
-                 if current_pool.get(color, 0) > 0: current_pool[color] -= 1; payment['colors'][color] += 1; paid_with_mana = True; continue;
-                 if phase_pool.get(color, 0) > 0: phase_pool[color] -= 1; payment['phase_restricted'][color] += 1; paid_with_mana = True; continue;
-                 for r_key, pool_part in conditional_pool.items():
-                     if self._can_use_conditional_mana(r_key, context) and pool_part.get(color, 0) > 0:
-                         pool_part[color] -= 1; payment['conditional'][r_key][color] += 1; paid_with_mana = True; break;
-                 if not paid_with_mana: remaining_phy_to_pay_life.append(color)
-
-            # Pay remaining with life
-            life_needed = len(remaining_phy_to_pay_life) * 2
-            if player['life'] >= life_needed:
-                 paid_phy_life = life_needed
-                 payment['life'] += paid_phy_life
-                 # COMMIT LIFE PAYMENT HERE
-                 player['life'] -= paid_phy_life
-                 if paid_phy_life > 0: logging.debug(f"Paid {paid_phy_life} life for Phyrexian mana.")
-            else:
-                phy_success = False
-                raise ValueError(f"Cannot pay Phyrexian mana with life (Need {life_needed}, Have {player['life']})")
-
-            # Pay snow mana
-            if final_cost.get('snow', 0) > 0:
-                if not self.pay_snow_cost(
-                        player, final_cost['snow'], current_pool,
-                        snow_pool, payment, phase_pool, conditional_pool,
-                        phase_snow_pool, conditional_snow_pool, context):
-                    raise ValueError("Failed to pay Snow mana cost")
-                payment['snow'] += final_cost['snow'] # Track that snow was paid
-
-
-            # Pay generic mana (and X cost)
-            generic_required = final_cost.get('generic', 0)
-            x_value = context.get('X', 0) if final_cost.get('X',0) > 0 else 0
-            generic_required += x_value * final_cost.get('X',0)
-
-            if generic_required > 0:
-                remaining_generic = self._pay_generic_mana_with_all_pools(player, generic_required, payment, current_pool, phase_pool, conditional_pool, usable_conditional, context)
-                if remaining_generic > 0:
-                    raise ValueError(f"Failed to pay generic mana cost. Required={generic_required}, Paid={generic_required-remaining_generic}, Short={remaining_generic}")
-
-            mana_payment_successful = True # If no error thrown
+            payment["snow"] = max(
+                0, int(final_cost.get("snow", 0) or 0))
+            mana_payment_successful = True
 
         except ValueError as mana_error:
             logging.error(f"Failed to pay mana costs: {mana_error}")
-            self._refund_payment(player, payment) # *** ROLLBACK EVERYTHING ***
+            abort_transaction()
             return False
         except Exception as mana_e:
              logging.error(f"Error paying mana costs: {mana_e}", exc_info=True)
-             self._refund_payment(player, payment) # *** ROLLBACK EVERYTHING ***
+             abort_transaction()
              return False
+
+        # Mana was paid only against transaction-local pool copies.  Commit
+        # the already-validated zone/tap costs now, so a mana calculation
+        # failure can never require reconstructing a sacrificed permanent or
+        # reversing discard/exile triggers.
+        has_live_non_mana_commit = bool(
+            non_mana_plan["tap_ids"]
+            or non_mana_plan["exile_choices"]
+            or non_mana_plan["sacrifice_ids"]
+            or non_mana_plan.get("bargain_sacrifice_ids")
+            or non_mana_plan.get("return_choices")
+            or non_mana_plan.get("evidence_choices")
+            or non_mana_plan["discard_choices"]
+            or payment.get("snow_tapped_sources"))
+        try:
+            if has_live_non_mana_commit:
+                ensure_transaction_checkpoint()
+                self._preflight_non_mana_payment(
+                    transaction_checkpoint, player, non_mana_plan, payment)
+            self._commit_non_mana_payment(player, non_mana_plan, payment)
+        except ValueError as non_mana_error:
+            logging.warning(f"Failed to commit non-mana costs: {non_mana_error}")
+            abort_transaction()
+            return False
+        except Exception as non_mana_e:
+            logging.critical(
+                f"Invariant failure committing validated non-mana costs: "
+                f"{non_mana_e}",
+                exc_info=True)
+            abort_transaction()
+            return False
 
 
         # --- Finalize Payment ---
@@ -2595,7 +3117,10 @@ class EnhancedManaSystem:
                         max(0, int(provenance.get(color, 0) or 0)),
                         max(0, int(restricted_pool.get(color, 0) or 0)))
             player["conditional_snow_mana"] = conditional_snow_pool
-            # Life already deducted during phyrexian check
+            if payment['life'] > 0:
+                player['life'] -= payment['life']
+                logging.debug(
+                    f"Paid {payment['life']} life for Phyrexian mana.")
 
             # Log payment
             cost_str = self._format_mana_cost_for_logging(final_cost, context.get('X', 0) if 'X' in final_cost else 0)
@@ -2603,15 +3128,18 @@ class EnhancedManaSystem:
             card_name_log = getattr(gs._safe_get_card(card_id), 'name', 'spell/ability') if card_id else 'spell/ability'
             logging.debug(f"Paid cost {cost_str} for {card_name_log} with {payment_str}")
             self._cleanup_empty_conditional_mana(player)
+            payment.pop("_auto_tap_snapshot", None)
+            payment.pop("_snow_source_taps_deferred", None)
             self._last_payment = payment  # exposed via pay_mana_cost_get_details
-            # Cavern of Souls rider: spending its restricted mana on the cast
-            # makes the spell uncounterable. Recorded on the cast context so
-            # the stack item carries it to CounterSpellEffect.
-            if context is not None and any(
+            # Cavern of Souls rider: stage the result in payment details.  A
+            # cast transaction still has to remove the exact spell occurrence
+            # from its source zone; mutating the caller's context here leaked
+            # ``cant_be_countered`` into a failed retry.
+            if any(
                     "can't be countered" in str(key).lower()
                     and any(colors.values())
                     for key, colors in payment.get('conditional', {}).items()):
-                context['cant_be_countered'] = True
+                payment['grants_cant_be_countered'] = True
             return True
         else:
              # This path might be reached if non-mana costs failed. Rollback handled there.

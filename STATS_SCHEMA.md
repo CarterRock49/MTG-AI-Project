@@ -18,6 +18,8 @@ deck_stats/
   meta/*.gz               # tracker metadata (archetype fingerprints, mappings)
 card_memory/
   all_cards.json.gz       # CardMemory: per-card lifetime performance records
+  strategy_memory.pkl     # Optional runtime-only StrategyMemory store
+  strategy_memory.json.gz # Safe, bounded StrategyMemory viewer diagnostics
 ```
 
 Tracker/memory files are gzip-compressed JSON (`use_compression=True` default);
@@ -101,6 +103,55 @@ Draw/opening/play telemetry is sourced directly from GameState as of Round
 use the turn on which the card was actually played. Outputs produced before
 Round 7.37 have zero or inferred values in these fields and must not be mixed
 with current card-performance aggregates.
+
+## CardMemory and StrategyMemory diagnostics
+
+`card_memory/all_cards.json.gz` is a versioned, cumulative snapshot owned by
+one environment worker. Its `cards` mapping is keyed by canonical card ID and
+records W/L/D totals, drawn/played/opening-hand counts, player-relative play
+turns, curve buckets, archetype splits, synergy-partner counters,
+effectiveness, a bounded recent outcome trend, and optional meta position.
+Consumers must join it to tracker aggregates by canonical ID, never by card
+name. Worker snapshots and run lineages remain separate; the snapshot is not a
+checkpoint-time reconstruction of what an evaluator knew during an older game.
+
+CardMemory is recorded in normal production runs even when
+`adaptive_decision_history_enabled` is false. A viewer must distinguish
+"recorded analytics" from "used as a decision input" and preserve the
+independent DeckStats and CardMemory persistence/freshness indicators. The
+DeckStats Viewer derives the provenance labels `adaptive_input`,
+`recorded_only`, or `unknown` from the selected run manifest; the presence of a
+memory file alone is not evidence that the policy consumed it. Unsupported or
+malformed CardMemory contracts are exposed only as raw diagnostics and must
+not be interpreted or joined.
+
+StrategyMemory is optional and disabled for standard training/evaluation. Its
+runtime source of truth remains `strategy_memory.pkl`; consumers and web
+viewers must treat that file as opaque and never unpickle it. Every successful
+enabled-memory save makes a best-effort, deterministic, atomic gzip-JSON export
+to adjacent `strategy_memory.json.gz` with:
+
+- `kind: playersim.strategy_memory.diagnostics`, diagnostics schema version 1,
+  and the source memory schema version;
+- `source_pickle.size_bytes` and `source_pickle.sha256`, identifying the exact
+  raw pickle generation summarized by the export without deserializing it;
+- logical update and pattern/action/action-sequence counts;
+- evidence-weighted mean shaped reward and positive-shaped-reward rate;
+- fixed limits, explicit truncation metadata, and at most 100 top-pattern and
+  250 top-action records.
+
+The positive-reward rate means the fraction of recorded learned-agent shaped
+transition rewards greater than zero. It is not a game win rate. The safe JSON
+is diagnostics only and never participates in runtime action selection.
+Exported patterns contain at most 64 fields; every value must be finite and
+within `[-1e6, 1e6]`, and action IDs must be integers in `[0, 4095]`. A safe
+export failure does not fail the runtime pickle save, but it does invalidate
+any older adjacent safe JSON so a viewer cannot mistake stale diagnostics for
+the just-saved memory. A viewer must also compare both `source_pickle` fields
+with the opaque file's raw bytes; a mismatch catches a process interruption
+between the pickle and JSON atomic replacements and makes the diagnostics
+stale/raw-only. Viewers interpret only the supported diagnostics kind and
+schema version 1; unsupported or malformed JSON remains available raw-only.
 
 ## Caveats the deck-builder MUST respect
 
@@ -220,6 +271,84 @@ Every run-level manifest (`training_run.json`, `harvest_run.json`,
 identity or on what the policy observed. A run with `lineage: null` (or
 missing) predates this contract; a lineage without `observation_schema`
 predates Observation v2 and is checkpoint/statistics-incompatible with it.
+
+## Fixed evaluation history and game debugging
+
+Periodic evaluation history is written to
+`logs/<run>/evaluation/evaluations.json`. Schema version 3 retains the immutable
+schedule, checkpoint identity, qualification rule, every checkpoint summary,
+and every individual case. Each `episodes[]` record includes its case index,
+requested and resolved case, raw and canonical result, terminal reason, reward,
+length, timeout/decisive flags, and (for newly generated evaluations) a
+`debug_path` reference plus `debug_sha256`, compressed size, trace-event count,
+and replay-action count.
+
+The referenced debug schema version 1 payload is captured only in an environment
+stamped with both an evaluation timestep and checkpoint SHA-256. Ordinary
+training episodes pay none of its state-snapshot cost. The callback writes each
+payload atomically as deterministic gzip JSON at
+`logs/<run>/evaluation/games/<timestep>/case_NNN.json.gz`; the compact history is
+not published if any required sidecar fails. A payload contains:
+
+- `replay`: deterministic replay version 3, including the seed, physical deck
+  seats, learned-policy seat/profile metadata, and every learned action/context.
+  Extra human-readable action fields are ignored by the replay reader. Capture
+  retains at most 4,096 events and 2 MiB of compact JSON, with a 64 KiB limit
+  per entry.
+- `trace`: one contiguous sequence of both learned and opponent atomic actions.
+  Each event records sequence number, actor/seat, action index/type/parameter,
+  concise label, selected context, and compact pre/post states. State snapshots
+  include turn, phase, priority, life, poison, public and omniscient changing
+  zones, stack summary, and library counts. Learned actions additionally carry
+  the resulting reward components and diagnostics. Trace capture retains at
+  most 8,192 events and 8 MiB of compact JSON, with a 512 KiB limit per entry.
+  Newly captured events may also carry `evaluator` schema version 1: a bounded,
+  explicitly non-causal window of EnhancedCardEvaluator activity observed
+  before/during that atomic action. Each evaluator record preserves
+  runtime/canonical card identity, context and perspective,
+  base/context/history/DeckStats components, history source and evidence,
+  multipliers, pre-clamp/final scores, repeat counts, and
+  invalid/fallback/exception flags. Evaluator capture retains at most 256
+  records per action window, 4,096 records per game, 64 KiB per record, and
+  2 MiB of emitted compact JSON per game.
+- `terminal`: result/reason, final reward, reward contract/components, policy
+  diagnostic, fidelity counters, and final compact state. The debug root also
+  summarizes per-game evaluator calls, captured/deduplicated/dropped events,
+  fallbacks/exceptions, event budget, and cache-hit/miss deltas, plus any final
+  unattached evaluator window.
+
+The complete debug payload is limited to 12 MiB. Replay, trace, evaluator, and
+terminal values pass through depth, node, container, key, and string bounds;
+oversized or unserializable values cannot change the game result. Each bounded
+section publishes limits, byte/event counts, omissions or drops, and capture
+errors so consumers can distinguish complete diagnostics from degraded
+telemetry.
+
+The terminal case remains the strength-evidence row; replay and trace are debug
+artifacts and must not alter qualification scoring. Histories written before
+this contract contain complete terminal episode summaries but no successful-game
+action trace. Consumers must report these as `trace unavailable` and must never
+fabricate a timeline from the terminal row. Failure-only `failure_replay.json`
+artifacts remain valid but are not successful evaluation traces.
+
+Evaluator activity is explanatory telemetry, not proof that the PPO policy
+selected an action because of a heuristic score. It can describe observation
+features, legality/search helpers, or automatic subchoices. Historical
+sidecars written before evaluator diagnostics cannot reconstruct those values,
+and a viewer must not recompute them with newer evaluator code.
+
+The dependency-free viewer in `DeckStats_Viewer/` joins evaluation episodes to
+their authoritative evaluation `game_log.jsonl` records using run, evaluation
+timestep, checkpoint SHA-256, and case/matchup index. It preserves each raw
+episode alongside normalized seat, pair, and semantic deck fields. Game lists
+remain summary-only over HTTP. A stable record ID plus checkpoint SHA-256
+disambiguates repeated cases, and ambiguous legacy selections are rejected.
+The selected sidecar is loaded on demand only after its compressed size and
+SHA-256 match the evaluation-history reference. Replay, action-trace, and
+terminal-debug availability are reported independently. Unsupported or
+malformed CardMemory/StrategyMemory is raw-only, while large evaluator event
+lists and raw payloads use paginated or lazy detail rendering so the complete
+captured information remains inspectable without blocking initial page load.
 
 ## Fixture harvest protocol
 

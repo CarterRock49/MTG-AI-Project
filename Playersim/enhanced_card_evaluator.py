@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 import numpy as np
@@ -17,6 +18,17 @@ def _clamp(value, lower, upper, default=0.0):
 
 class EnhancedCardEvaluator:
     """Advanced card evaluation system for Magic: The Gathering."""
+
+    DIAGNOSTIC_SCHEMA_VERSION = 1
+    DEFAULT_DIAGNOSTIC_MAX_EVENTS = 256
+    DEFAULT_DIAGNOSTIC_MAX_TOTAL_EVENTS = 4096
+    DEFAULT_DIAGNOSTIC_MAX_TOTAL_BYTES = 2 * 1024 * 1024
+    DIAGNOSTIC_MAX_EVENT_BYTES = 64 * 1024
+    DIAGNOSTIC_MAX_DEPTH = 6
+    DIAGNOSTIC_MAX_NODES = 4096
+    DIAGNOSTIC_MAX_CONTAINER_ITEMS = 64
+    DIAGNOSTIC_MAX_STRING_LENGTH = 512
+    DIAGNOSTIC_MAX_KEY_LENGTH = 256
     
     def __init__(self, game_state, stats_tracker=None, card_memory=None):
         """
@@ -73,6 +85,551 @@ class EnhancedCardEvaluator:
         self.evaluation_cache = {}
         self.cache_hits = 0
         self.cache_misses = 0
+
+        # Evaluation explainability is deliberately opt-in.  Normal training
+        # calls only pay one boolean check and retain the historical scalar-only
+        # behavior.  Attributable fixed evaluations enable this recorder and
+        # drain it at atomic action boundaries into the debug sidecar trace.
+        self._diagnostics_enabled = False
+        self._diagnostic_max_events = self.DEFAULT_DIAGNOSTIC_MAX_EVENTS
+        self._diagnostic_max_total_events = \
+            self.DEFAULT_DIAGNOSTIC_MAX_TOTAL_EVENTS
+        self._diagnostic_max_total_bytes = \
+            self.DEFAULT_DIAGNOSTIC_MAX_TOTAL_BYTES
+        self._diagnostic_serialized_bytes = 0
+        self._diagnostic_events = []
+        self._diagnostic_event_keys = {}
+        self._diagnostic_sequence = 0
+        self._diagnostic_cache_hits_baseline = 0
+        self._diagnostic_cache_misses_baseline = 0
+        self._diagnostic_window_deduplicated = 0
+        self._diagnostic_window_dropped = 0
+        self._diagnostic_totals = {
+            "calls": 0,
+            "recorded": 0,
+            "deduplicated": 0,
+            "dropped": 0,
+            "exceptions": 0,
+            "fallbacks": 0,
+            "sanitization_omissions": 0,
+            "serialization_errors": 0,
+        }
+
+    def set_diagnostics_enabled(
+            self, enabled: bool, *, max_events: int = None,
+            max_total_events: int = None, max_total_bytes: int = None,
+            reset: bool = True) -> None:
+        """Enable bounded evaluation-call capture for attributed eval games.
+
+        This is an instrumentation boundary, not a scoring mode: enabling it
+        must never change the scalar returned by :meth:`evaluate_card`.
+        """
+        if max_events is not None:
+            try:
+                resolved_limit = int(max_events)
+            except (TypeError, ValueError) as error:
+                raise ValueError("max_events must be a positive integer") from error
+            if resolved_limit <= 0:
+                raise ValueError("max_events must be a positive integer")
+            self._diagnostic_max_events = resolved_limit
+        if max_total_events is not None:
+            try:
+                resolved_total_limit = int(max_total_events)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "max_total_events must be a positive integer") from error
+            if resolved_total_limit <= 0:
+                raise ValueError(
+                    "max_total_events must be a positive integer")
+            self._diagnostic_max_total_events = resolved_total_limit
+        if max_total_bytes is not None:
+            try:
+                resolved_byte_limit = int(max_total_bytes)
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    "max_total_bytes must be a positive integer") from error
+            if resolved_byte_limit <= 0:
+                raise ValueError(
+                    "max_total_bytes must be a positive integer")
+            self._diagnostic_max_total_bytes = resolved_byte_limit
+        self._diagnostics_enabled = bool(enabled)
+        if reset:
+            self._diagnostic_events = []
+            self._diagnostic_event_keys = {}
+            self._diagnostic_sequence = 0
+            self._diagnostic_cache_hits_baseline = int(self.cache_hits)
+            self._diagnostic_cache_misses_baseline = int(self.cache_misses)
+            self._diagnostic_window_deduplicated = 0
+            self._diagnostic_window_dropped = 0
+            self._diagnostic_serialized_bytes = 0
+            self._diagnostic_totals = {
+                "calls": 0,
+                "recorded": 0,
+                "deduplicated": 0,
+                "dropped": 0,
+                "exceptions": 0,
+                "fallbacks": 0,
+                "sanitization_omissions": 0,
+                "serialization_errors": 0,
+            }
+        elif not self._diagnostics_enabled:
+            self._diagnostic_events = []
+            self._diagnostic_event_keys = {}
+            self._diagnostic_window_deduplicated = 0
+            self._diagnostic_window_dropped = 0
+
+    @classmethod
+    def _diagnostic_sanitize(cls, value, *, initial_depth=0,
+                             max_bytes=None):
+        """Return strict deterministic JSON plus bounded-sanitizer metadata."""
+        state = {"nodes": 0, "omissions": 0, "errors": 0, "active": set()}
+
+        def type_name(item):
+            item_type = type(item)
+            return f"{item_type.__module__}.{item_type.__qualname__}"
+
+        def omission(reason, item=None, **details):
+            state["omissions"] += 1
+            payload = {"reason": reason}
+            if item is not None:
+                payload["type"] = type_name(item)
+            payload.update(details)
+            return {"__diagnostic_omitted__": payload}
+
+        def safe_key(key):
+            try:
+                if key is None:
+                    text = "null"
+                elif isinstance(key, (bool, str, int, np.integer)):
+                    if isinstance(key, (int, np.integer)) \
+                            and int(key).bit_length() > 256:
+                        text = f"<int:{int(key).bit_length()}-bits>"
+                    else:
+                        text = str(key)
+                elif isinstance(key, (float, np.floating)):
+                    number = float(key)
+                    text = repr(number) if math.isfinite(number) \
+                        else "nonfinite"
+                else:
+                    text = f"<{type_name(key)}>"
+            except Exception:
+                state["errors"] += 1
+                text = "<unprintable-key>"
+            if len(text) > cls.DIAGNOSTIC_MAX_KEY_LENGTH:
+                state["omissions"] += 1
+                text = text[:cls.DIAGNOSTIC_MAX_KEY_LENGTH - 3] + "..."
+            return text
+
+        def walk(item, depth):
+            state["nodes"] += 1
+            if state["nodes"] > cls.DIAGNOSTIC_MAX_NODES:
+                return omission("node_budget", item)
+            if item is None or isinstance(item, bool):
+                return item
+            if isinstance(item, str):
+                if len(item) > cls.DIAGNOSTIC_MAX_STRING_LENGTH:
+                    state["omissions"] += 1
+                    return item[:cls.DIAGNOSTIC_MAX_STRING_LENGTH - 3] + "..."
+                return item
+            if isinstance(item, (int, np.integer)):
+                number = int(item)
+                if number.bit_length() > 256:
+                    return omission(
+                        "integer_bit_budget", item,
+                        bit_length=number.bit_length())
+                return number
+            if isinstance(item, (float, np.floating)):
+                number = float(item)
+                return number if math.isfinite(number) else None
+            if depth >= cls.DIAGNOSTIC_MAX_DEPTH:
+                return omission("depth_budget", item, depth=depth)
+
+            track_identity = isinstance(
+                item, (dict, list, tuple, set, frozenset, np.ndarray))
+            identity = id(item)
+            if track_identity and identity in state["active"]:
+                return omission("cycle", item)
+            if track_identity:
+                state["active"].add(identity)
+            try:
+                if isinstance(item, np.ndarray):
+                    flat = item.reshape(-1)
+                    limit = cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS
+                    result = [walk(value, depth + 1)
+                              for value in flat[:limit].tolist()]
+                    if flat.size > limit:
+                        result.append(omission(
+                            "container_items", item,
+                            omitted_items=int(flat.size - limit),
+                            shape=list(item.shape)))
+                    return result
+                if isinstance(item, dict):
+                    result = {}
+                    omitted_items = max(
+                        0, len(item) - cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS)
+                    for index, (key, child) in enumerate(item.items()):
+                        if index >= cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS:
+                            break
+                        output_key = safe_key(key)
+                        base_key = output_key
+                        suffix = 2
+                        while output_key in result:
+                            suffix_text = f"#{suffix}"
+                            output_key = base_key[
+                                :cls.DIAGNOSTIC_MAX_KEY_LENGTH
+                                - len(suffix_text)] + suffix_text
+                            suffix += 1
+                        result[output_key] = walk(child, depth + 1)
+                    if omitted_items:
+                        result["__omitted_items__"] = omitted_items
+                        state["omissions"] += 1
+                    return result
+                if isinstance(item, (list, tuple)):
+                    result = [walk(child, depth + 1) for child in
+                              item[:cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS]]
+                    if len(item) > cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS:
+                        result.append(omission(
+                            "container_items", item,
+                            omitted_items=len(item)
+                            - cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS))
+                    return result
+                if isinstance(item, (set, frozenset)):
+                    if len(item) > cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS:
+                        return omission(
+                            "set_items", item, item_count=len(item))
+                    sanitized = [walk(child, depth + 1) for child in item]
+                    sanitized.sort(key=lambda child: json.dumps(
+                        child, sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=False, allow_nan=False))
+                    return sanitized
+                scalar = getattr(item, "item", None)
+                if callable(scalar):
+                    try:
+                        resolved = scalar()
+                    except Exception:
+                        state["errors"] += 1
+                    else:
+                        if resolved is not item:
+                            return walk(resolved, depth + 1)
+                summary = {"type": type_name(item)}
+                for attribute in ("card_id", "id", "name"):
+                    try:
+                        attribute_value = getattr(item, attribute, None)
+                    except Exception:
+                        state["errors"] += 1
+                        continue
+                    if isinstance(attribute_value, (
+                            str, int, float, bool, np.generic)):
+                        summary[attribute] = walk(
+                            attribute_value, depth + 1)
+                return summary
+            except Exception:
+                state["errors"] += 1
+                return omission("sanitization_error", item)
+            finally:
+                if track_identity:
+                    state["active"].discard(identity)
+
+        safe = walk(value, initial_depth)
+        byte_limit = int(max_bytes or cls.DIAGNOSTIC_MAX_EVENT_BYTES)
+        try:
+            encoded = json.dumps(
+                safe, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except Exception:
+            state["errors"] += 1
+            safe = omission("json_encoding_error", value)
+            encoded = json.dumps(
+                safe, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if len(encoded) > byte_limit:
+            original_bytes = len(encoded)
+            safe = omission(
+                "serialized_byte_budget", value,
+                byte_budget=byte_limit, original_bytes=original_bytes)
+            encoded = json.dumps(
+                safe, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8")
+        return safe, {
+            "nodes": state["nodes"],
+            "omissions": state["omissions"],
+            "errors": state["errors"],
+            "serialized_bytes": len(encoded),
+        }
+
+    @classmethod
+    def _diagnostic_json_safe(cls, value, depth=0):
+        try:
+            safe, _metadata = cls._diagnostic_sanitize(
+                value, initial_depth=depth)
+            return safe
+        except Exception:
+            value_type = type(value)
+            return {"__diagnostic_omitted__": {
+                "reason": "sanitizer_failure",
+                "type": f"{value_type.__module__}.{value_type.__qualname__}",
+            }}
+
+    def _diagnostic_perspective_label(self, perspective):
+        gs = self.game_state
+        if perspective is getattr(gs, "p1", None):
+            return "p1"
+        if perspective is getattr(gs, "p2", None):
+            return "p2"
+        if isinstance(perspective, str):
+            return perspective
+        if isinstance(perspective, dict) and perspective.get("name"):
+            return str(perspective["name"])
+        return None
+
+    def _start_evaluation_diagnostic(
+            self, card_id, context, supplied_details):
+        """Allocate a diagnostic event only on the explicit eval boundary."""
+        self._diagnostic_totals["calls"] += 1
+        return {
+            "runtime_card_id": self._diagnostic_json_safe(card_id),
+            # The scoring path resolves the canonical ID exactly once and
+            # replaces this placeholder. Instrumentation must not duplicate a
+            # potentially user-supplied canonicalizer call.
+            "canonical_card_id": self._diagnostic_json_safe(card_id),
+            "card_name": None,
+            "context": str(context or "general").strip().lower(),
+            "context_details": self._diagnostic_json_safe(
+                dict(supplied_details or {})),
+            "perspective": None,
+            "components": {
+                "base": 0.0,
+                "context": 0.0,
+                "history": 0.0,
+                "stats": 0.0,
+            },
+            "history": {
+                "source": "none",
+                "overall_games": 0.0,
+                "archetype": "unknown",
+                "archetype_games": 0.0,
+                "reliable": False,
+                "fallback_reason": None,
+            },
+            "adjustments": {
+                "weighted_score": 0.0,
+                "game_stage": "mid",
+                "stage_multiplier": 1.0,
+                "position": "even",
+                "position_multiplier": 1.0,
+                "aggression_level": 0.5,
+                "aggression_multiplier": 1.0,
+                "pre_clamp": 0.0,
+            },
+            "final_score": 0.0,
+            "flags": {
+                "invalid": False,
+                "invalid_reason": None,
+                "fallback": False,
+                "exception": False,
+                "clamped": False,
+            },
+        }
+
+    def _record_diagnostic(self, event) -> None:
+        if not self._diagnostics_enabled or event is None:
+            return
+        try:
+            raw_flags = event.get("flags", {}) \
+                if isinstance(event, dict) else {}
+            if raw_flags.get("exception"):
+                self._diagnostic_totals["exceptions"] += 1
+            if raw_flags.get("fallback"):
+                self._diagnostic_totals["fallbacks"] += 1
+
+            safe_event, sanitization = self._diagnostic_sanitize(
+                event, max_bytes=self.DIAGNOSTIC_MAX_EVENT_BYTES)
+            self._diagnostic_totals["sanitization_omissions"] += int(
+                sanitization.get("omissions", 0))
+            self._diagnostic_totals["serialization_errors"] += int(
+                sanitization.get("errors", 0))
+            if not isinstance(safe_event, dict) \
+                    or "__diagnostic_omitted__" in safe_event:
+                safe_event = {
+                    "runtime_card_id": self._diagnostic_json_safe(
+                        event.get("runtime_card_id")
+                        if isinstance(event, dict) else None),
+                    "canonical_card_id": self._diagnostic_json_safe(
+                        event.get("canonical_card_id")
+                        if isinstance(event, dict) else None),
+                    "context": self._diagnostic_json_safe(
+                        event.get("context")
+                        if isinstance(event, dict) else None),
+                    "final_score": self._diagnostic_json_safe(
+                        event.get("final_score")
+                        if isinstance(event, dict) else None),
+                    "flags": self._diagnostic_json_safe(raw_flags),
+                    "serialization": {
+                        "omitted": True,
+                        "reason": "event_serialized_byte_budget",
+                        **sanitization,
+                    },
+                }
+            elif sanitization.get("omissions") \
+                    or sanitization.get("errors"):
+                safe_event["serialization"] = {
+                    "omitted": False,
+                    **sanitization,
+                }
+            encoded_event = json.dumps(
+                safe_event, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8")
+            if len(encoded_event) > self.DIAGNOSTIC_MAX_EVENT_BYTES:
+                self._diagnostic_totals["sanitization_omissions"] += 1
+                safe_event = {
+                    "runtime_card_id": self._diagnostic_json_safe(
+                        event.get("runtime_card_id")
+                        if isinstance(event, dict) else None),
+                    "canonical_card_id": self._diagnostic_json_safe(
+                        event.get("canonical_card_id")
+                        if isinstance(event, dict) else None),
+                    "context": self._diagnostic_json_safe(
+                        event.get("context")
+                        if isinstance(event, dict) else None),
+                    "final_score": self._diagnostic_json_safe(
+                        event.get("final_score")
+                        if isinstance(event, dict) else None),
+                    "flags": self._diagnostic_json_safe(raw_flags),
+                    "serialization": {
+                        "omitted": True,
+                        "reason": "event_serialized_byte_budget",
+                        "original_bytes": len(encoded_event),
+                        "byte_budget": self.DIAGNOSTIC_MAX_EVENT_BYTES,
+                    },
+                }
+            key = json.dumps(
+                safe_event, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False)
+            existing_index = self._diagnostic_event_keys.get(key)
+            if existing_index is not None:
+                existing = self._diagnostic_events[existing_index]
+                previous_count = existing["repeat_count"]
+                existing["repeat_count"] = previous_count + 1
+                self._diagnostic_window_deduplicated += 1
+                self._diagnostic_totals["deduplicated"] += 1
+                return
+            if (self._diagnostic_totals["recorded"] >=
+                    self._diagnostic_max_total_events):
+                self._diagnostic_window_dropped += 1
+                self._diagnostic_totals["dropped"] += 1
+                return
+            if len(self._diagnostic_events) >= self._diagnostic_max_events:
+                self._diagnostic_window_dropped += 1
+                self._diagnostic_totals["dropped"] += 1
+                return
+            safe_event["sequence"] = self._diagnostic_sequence
+            safe_event["repeat_count"] = 1
+            self._diagnostic_sequence += 1
+            self._diagnostic_event_keys[key] = len(self._diagnostic_events)
+            self._diagnostic_events.append(safe_event)
+            self._diagnostic_totals["recorded"] += 1
+        except Exception as error:
+            # Instrumentation must never perturb action selection or rewards.
+            self._diagnostic_window_dropped += 1
+            self._diagnostic_totals["dropped"] += 1
+            self._diagnostic_totals["serialization_errors"] += 1
+            logging.warning(
+                "Could not record EnhancedCardEvaluator diagnostic: %s", error)
+
+    def drain_diagnostics(self):
+        """Drain one bounded window for attachment to an atomic action."""
+        if not self._diagnostics_enabled:
+            return None
+        if (not self._diagnostic_events
+                and not self._diagnostic_window_deduplicated
+                and not self._diagnostic_window_dropped):
+            return None
+        events = list(self._diagnostic_events)
+        dropped_events = self._diagnostic_window_dropped
+        payload = None
+        while True:
+            candidate = {
+                "schema_version": self.DIAGNOSTIC_SCHEMA_VERSION,
+                "capture_scope": "pre-and-during-atomic-action",
+                "causal_attribution": False,
+                "events": events,
+                "deduplicated_events":
+                    self._diagnostic_window_deduplicated,
+                "dropped_events": dropped_events,
+            }
+            try:
+                encoded = json.dumps(
+                    candidate, sort_keys=True, separators=(",", ":"),
+                    ensure_ascii=False, allow_nan=False).encode("utf-8")
+            except Exception:
+                self._diagnostic_totals["serialization_errors"] += 1
+                encoded = b""
+            remaining = max(
+                0, self._diagnostic_max_total_bytes
+                - self._diagnostic_serialized_bytes)
+            if encoded and len(encoded) <= remaining:
+                payload = candidate
+                self._diagnostic_serialized_bytes += len(encoded)
+                break
+            if events:
+                removed = events.pop()
+                removed_calls = max(
+                    1, int(removed.get("repeat_count", 1) or 1)) \
+                    if isinstance(removed, dict) else 1
+                dropped_events += removed_calls
+                self._diagnostic_totals["dropped"] += removed_calls
+                self._diagnostic_totals["recorded"] = max(
+                    0, self._diagnostic_totals["recorded"] - 1)
+                self._diagnostic_totals["sanitization_omissions"] += 1
+                continue
+            # Even an empty dropped-only envelope no longer fits. The game
+            # summary still reports the exact omission and byte exhaustion.
+            self._diagnostic_totals["serialization_errors"] += \
+                int(not encoded)
+            break
+        self._diagnostic_events = []
+        self._diagnostic_event_keys = {}
+        self._diagnostic_window_deduplicated = 0
+        self._diagnostic_window_dropped = 0
+        return payload
+
+    def diagnostic_totals(self):
+        """Return game-level evaluator instrumentation and cache telemetry."""
+        return {
+            "schema_version": self.DIAGNOSTIC_SCHEMA_VERSION,
+            **dict(self._diagnostic_totals),
+            "event_budget": int(self._diagnostic_max_total_events),
+            "serialized_bytes": int(self._diagnostic_serialized_bytes),
+            "serialized_byte_budget": int(
+                self._diagnostic_max_total_bytes),
+            "event_byte_budget": int(self.DIAGNOSTIC_MAX_EVENT_BYTES),
+            "sanitizer_limits": {
+                "max_depth": int(self.DIAGNOSTIC_MAX_DEPTH),
+                "max_nodes": int(self.DIAGNOSTIC_MAX_NODES),
+                "max_container_items": int(
+                    self.DIAGNOSTIC_MAX_CONTAINER_ITEMS),
+                "max_string_length": int(
+                    self.DIAGNOSTIC_MAX_STRING_LENGTH),
+                "max_key_length": int(self.DIAGNOSTIC_MAX_KEY_LENGTH),
+            },
+            "cache_hits": max(
+                0, int(self.cache_hits)
+                - int(self._diagnostic_cache_hits_baseline)),
+            "cache_misses": max(
+                0, int(self.cache_misses)
+                - int(self._diagnostic_cache_misses_baseline)),
+            "pending": len(self._diagnostic_events),
+        }
+
+    def _abandon_diagnostic(self, stage, error):
+        """Disable one explanation without changing the scalar scoring path."""
+        self._diagnostic_totals["serialization_errors"] += 1
+        self._diagnostic_totals["dropped"] += 1
+        self._diagnostic_window_dropped += 1
+        logging.warning(
+            "EnhancedCardEvaluator diagnostic stage %s was omitted: %s",
+            stage, error)
+        return None
     
     def evaluate_card(self, card_id: int, context: str = "general", context_details: Dict[str, Any] = None) -> float:
         """
@@ -86,10 +643,32 @@ class EnhancedCardEvaluator:
         Returns:
             float: The card's evaluation score
         """
+        capture_diagnostic = bool(self._diagnostics_enabled)
+        diagnostic = None
+        if capture_diagnostic:
+            try:
+                diagnostic = self._start_evaluation_diagnostic(
+                    card_id, context,
+                    context_details
+                    if isinstance(context_details, dict) else {})
+            except Exception as error:
+                # Explainability can fail closed without changing the score.
+                self._diagnostic_totals["serialization_errors"] += 1
+                self._diagnostic_totals["dropped"] += 1
+                self._diagnostic_window_dropped += 1
+                logging.warning(
+                    "Could not start EnhancedCardEvaluator diagnostic: %s",
+                    error)
         try:
             gs = self.game_state
             card = gs._safe_get_card(card_id)
             if not card:
+                if diagnostic is not None:
+                    diagnostic["flags"].update({
+                        "invalid": True,
+                        "invalid_reason": "card_not_found",
+                    })
+                    self._record_diagnostic(diagnostic)
                 return 0.0
 
             supplied_details = dict(context_details or {})
@@ -113,9 +692,26 @@ class EnhancedCardEvaluator:
             if not context_details.get("turn_is_player_relative", False):
                 context_details["turn"] = self._player_turn_number(
                     perspective, context_details.get("turn", 0))
+
+            if diagnostic is not None:
+                try:
+                    diagnostic["canonical_card_id"] = \
+                        self._diagnostic_json_safe(analytics_card_id)
+                    diagnostic["card_name"] = str(
+                        getattr(card, "name", "") or "") or None
+                    diagnostic["context"] = context
+                    diagnostic["context_details"] = \
+                        self._diagnostic_json_safe(context_details)
+                    diagnostic["perspective"] = \
+                        self._diagnostic_perspective_label(perspective)
+                except Exception as error:
+                    diagnostic = self._abandon_diagnostic(
+                        "resolved_context", error)
             
             # Calculate base value (static card evaluation)
             base_value = self._get_cached_base_value(card_id, card)
+            if diagnostic is not None:
+                diagnostic["components"]["base"] = base_value
             
             # Add context-specific value
             context_value = 0.0
@@ -127,10 +723,24 @@ class EnhancedCardEvaluator:
                 context_value = self._evaluate_for_block(card_id, perspective)
             elif context == "discard":
                 context_value = self._evaluate_for_discard(card_id, perspective)
+            if diagnostic is not None:
+                diagnostic["components"]["context"] = context_value
 
             # Invalid combat choices must remain invalid after components are
             # combined; a large static score must not turn them positive.
             if context in {"attack", "block"} and context_value <= -5.0:
+                if diagnostic is not None:
+                    diagnostic["adjustments"].update({
+                        "weighted_score": base_value * 0.6
+                        + context_value * 0.25,
+                        "pre_clamp": -5.0,
+                    })
+                    diagnostic["final_score"] = -5.0
+                    diagnostic["flags"].update({
+                        "invalid": True,
+                        "invalid_reason": f"illegal_{context}",
+                    })
+                    self._record_diagnostic(diagnostic)
                 return -5.0
             
             # CardMemory is the primary historical source. DeckStats tracks many
@@ -143,6 +753,8 @@ class EnhancedCardEvaluator:
                 context_details.get(
                     "deck_archetype", "unknown") or "unknown"
             ).strip().lower() or "unknown"
+            if diagnostic is not None:
+                diagnostic["history"]["archetype"] = deck_archetype
 
             if self.card_memory:
                 try:
@@ -162,10 +774,13 @@ class EnhancedCardEvaluator:
                         archetype_stats = (
                             archetypes.get(deck_archetype)
                             if isinstance(archetypes, dict) else None)
-                        archetype_games = (
+                        archetype_game_count = (
                             _clamp(
                                 archetype_stats.get("games", 0),
-                                0.0, 1e12, 0.0) >= 3
+                                0.0, 1e12, 0.0)
+                            if isinstance(archetype_stats, dict) else 0.0)
+                        archetype_games = (
+                            archetype_game_count >= 3
                             if isinstance(archetype_stats, dict) else False)
                         has_reliable_memory = bool(
                             archetype_games or overall_games >= 5)
@@ -178,6 +793,15 @@ class EnhancedCardEvaluator:
                             overall_effectiveness = _clamp(
                                 memory_stats.get("effectiveness_rating"),
                                 0.0, 1.0, 0.5)
+                        if diagnostic is not None:
+                            diagnostic["history"].update({
+                                "overall_games": overall_games,
+                                "archetype_games": archetype_game_count,
+                                "reliable": has_reliable_memory,
+                            })
+                    elif diagnostic is not None:
+                        diagnostic["history"]["fallback_reason"] = \
+                            "card_memory_missing"
                     if has_reliable_memory:
                         memory_history_value = 0.0
                         effectiveness = (
@@ -203,21 +827,61 @@ class EnhancedCardEvaluator:
 
                         history_value = memory_history_value
                         card_memory_used = True
+                        if diagnostic is not None:
+                            diagnostic["history"].update({
+                                "source": "card_memory",
+                                "reliable": True,
+                                "effectiveness": effectiveness,
+                                "optimal_play_turn": optimal_turn,
+                                "fallback_reason": None,
+                            })
+                    elif diagnostic is not None and diagnostic[
+                            "history"].get("fallback_reason") is None:
+                        diagnostic["history"]["fallback_reason"] = \
+                            "card_memory_sparse"
                 except Exception as e:
                     logging.warning(
                         "Error getting card memory data; falling back to "
                         f"DeckStats: {e}")
+                    if diagnostic is not None:
+                        diagnostic["history"].update({
+                            "reliable": False,
+                            "fallback_reason": "card_memory_error",
+                            "card_memory_error":
+                                f"{type(e).__name__}: {e}",
+                        })
+            elif diagnostic is not None:
+                diagnostic["history"]["fallback_reason"] = \
+                    "card_memory_unavailable"
 
             if not card_memory_used and self.stats_tracker:
-                stats_value = self._get_stats_value(card_id)
+                if diagnostic is not None:
+                    stats_value, stats_evidence = self._get_stats_value(
+                        card_id, include_evidence=True)
+                    diagnostic["history"].update({
+                        "source": "deck_stats",
+                        "deck_stats_games": stats_evidence.get(
+                            "games_played", 0.0),
+                        "deck_stats_wins": stats_evidence.get("wins", 0.0),
+                        "deck_stats_draws": stats_evidence.get("draws", 0.0),
+                    })
+                    diagnostic["flags"]["fallback"] = True
+                else:
+                    stats_value = self._get_stats_value(card_id)
+            if diagnostic is not None:
+                diagnostic["components"].update({
+                    "history": history_value,
+                    "stats": stats_value,
+                })
             
             # Calculate total value with weighted components
-            total_value = (
+            weighted_score = (
                 base_value * 0.6 +     # 60% weight to base card evaluation
                 context_value * 0.25 +  # 25% weight to context-specific evaluation
                 history_value * 0.1 +   # 10% weight to primary card history
                 stats_value * 0.05      # 5% DeckStats fallback only
             )
+            total_value = weighted_score
             
             # Apply game stage multiplier
             stage_multipliers = {
@@ -227,7 +891,8 @@ class EnhancedCardEvaluator:
             }
             game_stage = str(
                 context_details.get("game_stage", "mid") or "mid").lower()
-            total_value *= stage_multipliers.get(game_stage, 1.0)
+            stage_multiplier = stage_multipliers.get(game_stage, 1.0)
+            total_value *= stage_multiplier
             
             # Apply position adjustment
             position_adjustments = {
@@ -239,30 +904,58 @@ class EnhancedCardEvaluator:
             }
             position = str(
                 context_details.get("position", "even") or "even").lower()
-            total_value *= position_adjustments.get(position, 1.0)
+            position_multiplier = position_adjustments.get(position, 1.0)
+            total_value *= position_multiplier
             
             # Apply aggression adjustment
             aggression_level = _clamp(
                 context_details.get("aggression_level", 0.5), 0.0, 1.0, 0.5)
+            aggression_multiplier = 1.0
             if self._is_type(card, "creature") and hasattr(card, 'power'):
                 card_power = _finite_number(card.power)
                 card_toughness = _finite_number(
                     getattr(card, 'toughness', 0))
                 # More aggressive strategy values offensive creatures higher
                 if card_power > 2:
-                    total_value *= 1.0 + (aggression_level - 0.5) * 0.4
+                    aggression_multiplier = \
+                        1.0 + (aggression_level - 0.5) * 0.4
+                    total_value *= aggression_multiplier
                 # Less aggressive strategy values defensive creatures higher
                 elif card_toughness > card_power + 1:
-                    total_value *= 1.0 - (aggression_level - 0.5) * 0.2
+                    aggression_multiplier = \
+                        1.0 - (aggression_level - 0.5) * 0.2
+                    total_value *= aggression_multiplier
             
             # Evaluator values feed both observation features and reward
             # shaping. Keep malformed/extreme card data from producing NaN or
             # unbounded rewards while preserving ordinary card ordering.
-            return _clamp(total_value, -5.0, 10.0, 0.0)
+            final_score = _clamp(total_value, -5.0, 10.0, 0.0)
+            if diagnostic is not None:
+                diagnostic["adjustments"].update({
+                    "weighted_score": weighted_score,
+                    "game_stage": game_stage,
+                    "stage_multiplier": stage_multiplier,
+                    "position": position,
+                    "position_multiplier": position_multiplier,
+                    "aggression_level": aggression_level,
+                    "aggression_multiplier": aggression_multiplier,
+                    "pre_clamp": total_value,
+                })
+                diagnostic["final_score"] = final_score
+                diagnostic["flags"]["clamped"] = (
+                    not math.isfinite(_finite_number(total_value, float("nan")))
+                    or final_score != total_value)
+                self._record_diagnostic(diagnostic)
+            return final_score
         except Exception as e:
             logging.error(f"Error evaluating card {card_id}: {str(e)}")
             import traceback
             logging.error(traceback.format_exc())
+            if diagnostic is not None:
+                diagnostic["final_score"] = 0.0
+                diagnostic["flags"]["exception"] = True
+                diagnostic["error"] = f"{type(e).__name__}: {e}"
+                self._record_diagnostic(diagnostic)
             return 0.0  # Default to neutral value on error
     
     def record_card_performance(self, card_id: int, game_result: Dict) -> None:
@@ -1162,26 +1855,33 @@ class EnhancedCardEvaluator:
         
         return _finite_number(synergy_value, 0.0)
     
-    def _get_stats_value(self, card_id: int) -> float:
+    def _get_stats_value(
+            self, card_id: int, *, include_evidence: bool = False):
         """Get value based on statistical performance."""
+        evidence = ({"games_played": 0.0, "wins": 0.0, "draws": 0.0}
+                    if include_evidence else None)
         if not self.stats_tracker:
-            return 0.0
+            return (0.0, evidence) if include_evidence else 0.0
         
         # Get card stats
         card_stats = self.stats_tracker.get_card_stats(
             self._analytics_card_id(card_id))
         if not card_stats:
-            return 0.0
+            return (0.0, evidence) if include_evidence else 0.0
         
         # Calculate win rate
         games_played = _clamp(
             card_stats.get("games_played", 0), 0.0, 1e12, 0.0)
+        if include_evidence:
+            evidence["games_played"] = games_played
         if games_played < 5:  # Need enough data
-            return 0.0
+            return (0.0, evidence) if include_evidence else 0.0
             
         wins = _clamp(card_stats.get("wins", 0), 0.0, games_played, 0.0)
         draws = _clamp(
             card_stats.get("draws", 0), 0.0, games_played - wins, 0.0)
+        if include_evidence:
+            evidence.update({"wins": wins, "draws": draws})
         win_rate = (
             wins + 0.5 * draws
         ) / games_played if games_played > 0 else 0.0
@@ -1189,7 +1889,8 @@ class EnhancedCardEvaluator:
         # Convert win rate to value (centered around 0.5 win rate)
         stats_value = (win_rate - 0.5) * 1.5
         
-        return _clamp(stats_value, -0.75, 0.75, 0.0)
+        result = _clamp(stats_value, -0.75, 0.75, 0.0)
+        return (result, evidence) if include_evidence else result
     
     def get_card_rankings(self, card_ids: List[int], context: str = "general") -> List[Tuple[int, float]]:
         """

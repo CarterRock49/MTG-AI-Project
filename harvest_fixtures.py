@@ -40,6 +40,7 @@ HARVEST_VERSION = "fixture-harvest-v2"
 VALID_RESULTS = {"win", "loss", "draw", "draw_both_loss"}
 FIDELITY_COUNTERS = (
     "unimplemented_action", "unparsed_mana", "unparsed_modal", "unparsed_effects",
+    "effect_continuation_failures", "lost_spell_recoveries",
 )
 REQUIRED_GAME_FIELDS = {
     "schema_version", "ts", "result", "turn_count", "p1_deck", "p2_deck",
@@ -783,9 +784,17 @@ def _validate_artifacts(
         turn_count = record.get("turn_count")
         if isinstance(turn_count, bool) or not isinstance(turn_count, int) or turn_count < 1:
             raise RuntimeError(f"Game record {record_index} has an invalid turn_count")
+        missing_fidelity_counters = sorted(
+            set(FIDELITY_COUNTERS) - set(record["fidelity"])
+        )
+        if missing_fidelity_counters:
+            raise RuntimeError(
+                f"Game record {record_index} is missing fidelity counters: "
+                + ", ".join(missing_fidelity_counters)
+            )
         for counter_name in FIDELITY_COUNTERS:
             _nonnegative_int(
-                record["fidelity"].get(counter_name, 0),
+                record["fidelity"][counter_name],
                 f"Game record {record_index}.fidelity.{counter_name}")
         unparsed_cards = record["fidelity"].get("unparsed_cards", [])
         if (not isinstance(unparsed_cards, list)
@@ -803,14 +812,22 @@ def _validate_artifacts(
 
     with required["fidelity report"].open(encoding="utf-8") as handle:
         fidelity = json.load(handle)
+    if not isinstance(fidelity, dict):
+        raise RuntimeError("Fidelity report is not an object")
+    missing_report_counters = sorted(set(FIDELITY_COUNTERS) - set(fidelity))
+    if missing_report_counters:
+        raise RuntimeError(
+            "Fidelity report is missing counters: "
+            + ", ".join(missing_report_counters)
+        )
     if fidelity.get("games_recorded") != games:
         raise RuntimeError("Fidelity report count does not match the game log")
     if fidelity.get("agent_version") != agent_version:
         raise RuntimeError("Fidelity report has the wrong agent_version")
     for counter_name in FIDELITY_COUNTERS:
         expected_total = sum(
-            int(record["fidelity"].get(counter_name, 0)) for record in records)
-        if int(fidelity.get(counter_name, 0)) != expected_total:
+            int(record["fidelity"][counter_name]) for record in records)
+        if int(fidelity[counter_name]) != expected_total:
             raise RuntimeError(
                 f"Fidelity total for {counter_name} does not match game records")
     expected_unparsed_cards = Counter()
@@ -843,7 +860,7 @@ def print_summary(
     result_text = ", ".join(f"{name}={count}" for name, count in sorted(results.items()))
     issue_total = sum(
         int(fidelity.get(key, 0))
-        for key in ("unimplemented_action", "unparsed_mana", "unparsed_modal", "unparsed_effects")
+        for key in FIDELITY_COUNTERS
     )
     print(
         f"Harvest complete: games={len(records)} seed={seed} "

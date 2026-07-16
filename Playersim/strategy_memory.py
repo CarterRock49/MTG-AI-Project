@@ -8,6 +8,10 @@ wall-clock weighting, background writer, or cross-environment shared file.
 
 from __future__ import annotations
 
+import gzip
+import hashlib
+import heapq
+import json
 import logging
 import math
 import os
@@ -19,12 +23,20 @@ import numpy as np
 
 
 STRATEGY_MEMORY_SCHEMA_VERSION = 2
+STRATEGY_MEMORY_DIAGNOSTICS_SCHEMA_VERSION = 1
+STRATEGY_MEMORY_DIAGNOSTICS_KIND = \
+    "playersim.strategy_memory.diagnostics"
+STRATEGY_MEMORY_TOP_PATTERN_LIMIT = 100
+STRATEGY_MEMORY_TOP_ACTION_LIMIT = 250
+STRATEGY_MEMORY_MAX_PATTERN_FIELDS = 64
+STRATEGY_MEMORY_MAX_ABS_PATTERN_VALUE = 1_000_000
+STRATEGY_MEMORY_MAX_ACTION_INDEX = 4_095
 
 
 def _finite_number(value, default=0.0):
     try:
         number = float(value)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return float(default)
     return number if math.isfinite(number) else float(default)
 
@@ -86,15 +98,27 @@ class StrategyMemory:
             pattern = pattern.tolist()
         if not isinstance(pattern, (tuple, list)):
             raise TypeError("strategy pattern must be a tuple or list")
+        if len(pattern) > STRATEGY_MEMORY_MAX_PATTERN_FIELDS:
+            raise ValueError(
+                "strategy pattern exceeds the supported field limit of "
+                f"{STRATEGY_MEMORY_MAX_PATTERN_FIELDS}")
         normalized = []
         for value in pattern:
             if isinstance(value, (np.integer, int, bool)):
-                normalized.append(int(value))
+                normalized_value = int(value)
             elif isinstance(value, (np.floating, float)):
-                normalized.append(_finite_number(value))
+                normalized_value = float(value)
+                if not math.isfinite(normalized_value):
+                    raise ValueError(
+                        "strategy-pattern values must be finite")
             else:
                 raise TypeError(
                     f"unsupported strategy-pattern value {value!r}")
+            if abs(normalized_value) > STRATEGY_MEMORY_MAX_ABS_PATTERN_VALUE:
+                raise ValueError(
+                    "strategy-pattern value exceeds the supported absolute "
+                    f"limit of {STRATEGY_MEMORY_MAX_ABS_PATTERN_VALUE}")
+            normalized.append(normalized_value)
         return tuple(normalized)
 
     @classmethod
@@ -119,7 +143,7 @@ class StrategyMemory:
                     action_index = int(action)
                 except (TypeError, ValueError):
                     continue
-                if action_index < 0:
+                if not 0 <= action_index <= STRATEGY_MEMORY_MAX_ACTION_INDEX:
                     continue
                 stats = cls._normalize_stats(action_raw)
                 stats.pop("actions", None)
@@ -193,6 +217,255 @@ class StrategyMemory:
             "action_sequences": self.action_sequences,
         }
 
+    def _diagnostics_path(self):
+        """Return the adjacent safe diagnostics path for one pickle store."""
+        if not self.memory_file:
+            return None
+        stem, _suffix = os.path.splitext(self.memory_file)
+        return f"{stem}.json.gz"
+
+    @staticmethod
+    def _weighted_metrics(records):
+        """Summarize count-weighted finite reward and positive-reward rates."""
+        evidence = 0
+        reward_total = 0.0
+        positive_total = 0.0
+        for stats in records:
+            count = max(0, int(stats.get("count", 0) or 0))
+            if not count:
+                continue
+            evidence += count
+            reward_total += count * _finite_number(stats.get("reward", 0.0))
+            positive_total += count * min(
+                1.0, max(0.0, _finite_number(
+                    stats.get("success_rate", 0.0))))
+        if not evidence:
+            return 0, 0.0, 0.0
+        return (
+            evidence,
+            reward_total / evidence,
+            positive_total / evidence,
+        )
+
+    @staticmethod
+    def _diagnostic_pattern_sort_key(item):
+        pattern, entry = item
+        action_evidence = sum(
+            max(0, int(stats.get("count", 0) or 0))
+            for stats in entry.get("actions", {}).values())
+        return (
+            -action_evidence,
+            -max(0, int(entry.get("count", 0) or 0)),
+            -min(1.0, max(0.0, _finite_number(
+                entry.get("success_rate", 0.0)))),
+            -_finite_number(entry.get("reward", 0.0)),
+            -max(0, int(entry.get("last_update", 0) or 0)),
+            repr(pattern),
+        )
+
+    @staticmethod
+    def _diagnostic_action_sort_key(item):
+        pattern, action_index, stats = item
+        return (
+            -max(0, int(stats.get("count", 0) or 0)),
+            -min(1.0, max(0.0, _finite_number(
+                stats.get("success_rate", 0.0)))),
+            -_finite_number(stats.get("reward", 0.0)),
+            -max(0, int(stats.get("last_update", 0) or 0)),
+            repr(pattern),
+            int(action_index),
+        )
+
+    def _diagnostics_snapshot(self, *, source_pickle):
+        """Build a bounded JSON-safe view of the current memory snapshot."""
+        pattern_count = len(self.strategies)
+        pattern_items = heapq.nsmallest(
+            STRATEGY_MEMORY_TOP_PATTERN_LIMIT,
+            self.strategies.items(),
+            key=self._diagnostic_pattern_sort_key)
+
+        def iter_action_items():
+            for pattern, entry in self.strategies.items():
+                for action_index, stats in entry.get("actions", {}).items():
+                    yield pattern, int(action_index), stats
+
+        action_count = sum(1 for _ in iter_action_items())
+        action_items = heapq.nsmallest(
+            STRATEGY_MEMORY_TOP_ACTION_LIMIT,
+            iter_action_items(),
+            key=self._diagnostic_action_sort_key)
+
+        pattern_evidence, pattern_reward, pattern_positive = \
+            self._weighted_metrics(self.strategies.values())
+        action_evidence, action_reward, action_positive = \
+            self._weighted_metrics(
+                stats for _, _, stats in iter_action_items())
+
+        top_patterns = []
+        for pattern, entry in pattern_items:
+            actions = entry.get("actions", {})
+            top_patterns.append({
+                "pattern": list(pattern),
+                "count": max(0, int(entry.get("count", 0) or 0)),
+                "mean_reward": _finite_number(entry.get("reward", 0.0)),
+                "positive_reward_rate": min(
+                    1.0, max(0.0, _finite_number(
+                        entry.get("success_rate", 0.0)))),
+                "last_update": max(
+                    0, int(entry.get("last_update", 0) or 0)),
+                "distinct_actions": len(actions),
+                "action_evidence": sum(
+                    max(0, int(stats.get("count", 0) or 0))
+                    for stats in actions.values()),
+            })
+
+        top_actions = []
+        for pattern, action_index, stats in \
+                action_items:
+            top_actions.append({
+                "pattern": list(pattern),
+                "action_index": action_index,
+                "count": max(0, int(stats.get("count", 0) or 0)),
+                "mean_reward": _finite_number(stats.get("reward", 0.0)),
+                "positive_reward_rate": min(
+                    1.0, max(0.0, _finite_number(
+                        stats.get("success_rate", 0.0)))),
+                "last_update": max(
+                    0, int(stats.get("last_update", 0) or 0)),
+            })
+
+        return {
+            "kind": STRATEGY_MEMORY_DIAGNOSTICS_KIND,
+            "schema_version": STRATEGY_MEMORY_DIAGNOSTICS_SCHEMA_VERSION,
+            "source_memory_schema_version": STRATEGY_MEMORY_SCHEMA_VERSION,
+            "source_pickle": {
+                "size_bytes": max(
+                    0, int(source_pickle["size_bytes"])),
+                "sha256": str(source_pickle["sha256"]),
+            },
+            "logical_update": max(0, int(self.logical_update)),
+            "semantics": {
+                "reward": (
+                    "arithmetic mean of complete learned-agent shaped "
+                    "transition rewards recorded by update_strategy"),
+                "positive_reward_rate": (
+                    "fraction of recorded shaped transition rewards greater "
+                    "than zero; this is not a game win rate"),
+                "pattern_bounds": (
+                    "inputs exceeding the declared field/value bounds are "
+                    "rejected rather than truncated"),
+            },
+            "counts": {
+                "patterns": pattern_count,
+                "pattern_evidence": pattern_evidence,
+                "pattern_actions": action_count,
+                "action_evidence": action_evidence,
+                "action_sequences": len(self.action_sequences),
+            },
+            "aggregates": {
+                "pattern_evidence_weighted_mean_reward": pattern_reward,
+                "pattern_evidence_weighted_positive_reward_rate":
+                    pattern_positive,
+                "action_evidence_weighted_mean_reward": action_reward,
+                "action_evidence_weighted_positive_reward_rate":
+                    action_positive,
+            },
+            "limits": {
+                "top_patterns": STRATEGY_MEMORY_TOP_PATTERN_LIMIT,
+                "top_actions": STRATEGY_MEMORY_TOP_ACTION_LIMIT,
+                "max_pattern_fields": STRATEGY_MEMORY_MAX_PATTERN_FIELDS,
+                "max_abs_pattern_value":
+                    STRATEGY_MEMORY_MAX_ABS_PATTERN_VALUE,
+                "max_action_index": STRATEGY_MEMORY_MAX_ACTION_INDEX,
+            },
+            "truncation": {
+                "top_patterns": {
+                    "total": pattern_count,
+                    "returned": len(top_patterns),
+                    "truncated": len(top_patterns) < pattern_count,
+                },
+                "top_actions": {
+                    "total": action_count,
+                    "returned": len(top_actions),
+                    "truncated": len(top_actions) < action_count,
+                },
+            },
+            "top_patterns": top_patterns,
+            "top_actions": top_actions,
+        }
+
+    @staticmethod
+    def _write_diagnostics_export(path, payload):
+        """Atomically write deterministic gzip-compressed diagnostics JSON."""
+        directory = os.path.dirname(os.path.abspath(path))
+        os.makedirs(directory, exist_ok=True)
+        temp_path = None
+        try:
+            encoded = json.dumps(
+                payload, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=True, allow_nan=False).encode("utf-8")
+            with tempfile.NamedTemporaryFile(
+                    mode="w+b", delete=False, dir=directory,
+                    prefix="strategy_memory_",
+                    suffix=".json.gz.tmp") as handle:
+                temp_path = handle.name
+                with gzip.GzipFile(
+                        filename="", mode="wb", fileobj=handle,
+                        mtime=0) as compressed:
+                    compressed.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+            temp_path = None
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
+
+    @staticmethod
+    def _source_pickle_marker(path):
+        """Identify exact persisted bytes without deserializing the pickle."""
+        digest = hashlib.sha256()
+        size_bytes = 0
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                size_bytes += len(chunk)
+                digest.update(chunk)
+        return {
+            "size_bytes": size_bytes,
+            "sha256": digest.hexdigest(),
+        }
+
+    @staticmethod
+    def _invalidate_diagnostics_export(path):
+        """Make a previously published viewer export undiscoverable.
+
+        The pickle is the runtime source of truth.  If publishing its matching
+        safe JSON generation fails, leaving an older JSON file in place would
+        make the viewer silently report stale evidence.  Rename first so the
+        well-known path disappears atomically, then best-effort remove the
+        tombstone.
+        """
+        if not path or not os.path.exists(path):
+            return True
+        stale_path = f"{path}.stale"
+        try:
+            os.replace(path, stale_path)
+        except OSError as error:
+            logging.error(
+                "Could not invalidate stale strategy-memory diagnostics %s: %s",
+                path, error)
+            return False
+        try:
+            os.remove(stale_path)
+        except OSError:
+            # The discoverable .json.gz path is already gone. A tombstone is
+            # harmless and can be cleaned up by a later successful save.
+            pass
+        return True
+
     def save_memory(self):
         """Atomically persist a deterministic snapshot."""
         if not self.memory_file:
@@ -213,9 +486,24 @@ class StrategyMemory:
                         protocol=pickle.HIGHEST_PROTOCOL)
                     handle.flush()
                     os.fsync(handle.fileno())
+                source_pickle = self._source_pickle_marker(temp_path)
                 os.replace(temp_path, self.memory_file)
                 temp_path = None
                 self.dirty = False
+                try:
+                    diagnostics_path = self._diagnostics_path()
+                    self._write_diagnostics_export(
+                        diagnostics_path,
+                        self._diagnostics_snapshot(
+                            source_pickle=source_pickle))
+                except Exception as error:
+                    # The pickle remains the runtime source of truth.  A safe
+                    # viewer export must never invalidate a completed save.
+                    logging.error(
+                        "Could not export strategy-memory diagnostics %s: %s",
+                        self._diagnostics_path(), error)
+                    self._invalidate_diagnostics_export(
+                        self._diagnostics_path())
             logging.info(
                 "Saved %s strategy patterns to %s",
                 len(self.strategies), self.memory_file)
@@ -270,7 +558,7 @@ class StrategyMemory:
             except (TypeError, ValueError):
                 logging.error("Ignoring invalid strategy action %r", action_idx)
                 return False
-            if action < 0:
+            if not 0 <= action <= STRATEGY_MEMORY_MAX_ACTION_INDEX:
                 return False
 
         should_save = False
@@ -307,12 +595,18 @@ class StrategyMemory:
                         copied["action_idx"] = int(copied["action_idx"])
                     except (TypeError, ValueError):
                         continue
+                    if not 0 <= copied["action_idx"] \
+                            <= STRATEGY_MEMORY_MAX_ACTION_INDEX:
+                        continue
                 result.append(copied)
             else:
                 try:
-                    result.append({"action_idx": int(item)})
+                    action_index = int(item)
                 except (TypeError, ValueError):
                     continue
+                if not 0 <= action_index <= STRATEGY_MEMORY_MAX_ACTION_INDEX:
+                    continue
+                result.append({"action_idx": action_index})
         return result
 
     def record_action_sequence(self, action_sequence, reward, game_state=None):

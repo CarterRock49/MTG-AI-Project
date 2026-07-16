@@ -222,7 +222,7 @@ def check_mask_aware_evaluation():
 
     args = SimpleNamespace(
         eval_freq=10,
-        eval_episodes=3,
+        eval_episodes=4,
         checkpoint_freq=20,
         record_network=True,
         record_freq=30,
@@ -282,6 +282,126 @@ def check_mask_aware_evaluation():
             changed_case[0]["seed"] += 1
             assert schedule_hash != m.evaluation_schedule_sha256(changed_case)
 
+            def evaluation_rows(outcomes):
+                return [{
+                    "case_index": index,
+                    "case": dict(full_schedule[index]),
+                    "game_result": result,
+                    "terminal_reason": "life_total",
+                    "reward": 1.0 if result == "win" else 0.0,
+                    "length": 40,
+                } for index, result in enumerate(outcomes)]
+
+            # Qualification uncertainty is persisted and treats each
+            # seat-swapped matchup as one clustered unit. Real draws retain
+            # their half point, while the gate uses the conservative lower
+            # bound rather than the raw point estimate.
+            _, strong_summary, _ = m.summarize_evaluation_episodes(
+                evaluation_rows(["win"] * 32 + ["draw"] * 32))
+            strong_interval = strong_summary["qualification_interval"]
+            assert strong_summary["qualification_score"] == 0.75
+            assert strong_interval["paired_units"] == 32
+            assert strong_interval["method"] == \
+                "wilson-score+paired-t-envelope"
+            assert strong_interval["lower_bound"] > 0.55
+            _, one_pair_summary, _ = m.summarize_evaluation_episodes(
+                evaluation_rows(["win", "loss"]))
+            assert one_pair_summary["qualification_interval"][
+                "paired_units"] == 1
+            _, noisy_summary, _ = m.summarize_evaluation_episodes(
+                evaluation_rows(["win"] * 40 + ["loss"] * 24))
+            assert noisy_summary["qualification_score"] == 0.625
+            assert noisy_summary["qualification_interval"][
+                "lower_bound"] < 0.55
+
+            canary_args = SimpleNamespace(
+                **m.ROUND_7_92_CANARY["cli"],
+                canary_config="round-7.92", resume=None,
+                optimize_hp=False)
+            canary = m.validate_canary_cli(canary_args)
+            assert canary is not m.ROUND_7_92_CANARY
+            canary_decks = [{"name": name} for name in (
+                "Selesnya Ouroboroid", "Jeskai Lessons", "Izzet Prowess",
+                "4c Control", "Izzet Spellementals", "Dimir Excruciator",
+                "Mono-Green Landfall", "Azorius Momo",
+            )]
+            canary_curriculum = m.resolve_curriculum(
+                "combat-v5", canary_decks)
+            m.validate_canary_runtime(
+                canary,
+                lineage={
+                    "card_registry": {"sha256": canary["lineage"][
+                        "card_registry_sha256"]},
+                    "feature_schema": {"sha256": canary["lineage"][
+                        "feature_schema_sha256"]},
+                    "corpus": {"sha256": canary["lineage"][
+                        "corpus_sha256"]},
+                },
+                training_config=canary["training_config"],
+                curriculum=canary_curriculum,
+                schedule_sha256=canary["lineage"][
+                    "evaluation_schedule_sha256"],
+                num_envs=8,
+                selected_device="cuda",
+            )
+            drifted_curriculum = json.loads(json.dumps(canary_curriculum))
+            drifted_curriculum["stages"][-1]["handicap"]["start"] = 0.99
+            try:
+                m.validate_canary_runtime(
+                    canary,
+                    lineage={
+                        "card_registry": {"sha256": canary["lineage"][
+                            "card_registry_sha256"]},
+                        "feature_schema": {"sha256": canary["lineage"][
+                            "feature_schema_sha256"]},
+                        "corpus": {"sha256": canary["lineage"][
+                            "corpus_sha256"]},
+                    },
+                    training_config=canary["training_config"],
+                    curriculum=drifted_curriculum,
+                    schedule_sha256=canary["lineage"][
+                        "evaluation_schedule_sha256"],
+                    num_envs=8,
+                    selected_device="cuda",
+                )
+            except RuntimeError as error:
+                assert "curriculum_sha256" in str(error)
+            else:
+                raise AssertionError(
+                    "named canary accepted resolved curriculum drift")
+            drifted_training = dict(canary["training_config"])
+            drifted_training["future_training_knob"] = 1
+            try:
+                m.validate_canary_runtime(
+                    canary,
+                    lineage={
+                        "card_registry": {"sha256": canary["lineage"][
+                            "card_registry_sha256"]},
+                        "feature_schema": {"sha256": canary["lineage"][
+                            "feature_schema_sha256"]},
+                        "corpus": {"sha256": canary["lineage"][
+                            "corpus_sha256"]},
+                    },
+                    training_config=drifted_training,
+                    curriculum=canary_curriculum,
+                    schedule_sha256=canary["lineage"][
+                        "evaluation_schedule_sha256"],
+                    num_envs=8,
+                    selected_device="cuda",
+                )
+            except RuntimeError as error:
+                assert "future_training_knob" in str(error)
+            else:
+                raise AssertionError(
+                    "named canary accepted an unknown training setting")
+            canary_args.n_envs = 6
+            try:
+                m.validate_canary_cli(canary_args)
+            except ValueError as error:
+                assert "n_envs=6" in str(error)
+            else:
+                raise AssertionError("named canary accepted configuration drift")
+
             # When the pair count is not divisible by the deck count, both
             # learned-deck and opponent exposure are still optimally balanced.
             ten_decks = [
@@ -339,7 +459,7 @@ def check_mask_aware_evaluation():
             # callback compares against num_timesteps, never n_calls, so it
             # must not be divided by the environment count.
             assert callbacks[0].eval_freq == 10
-            assert callbacks[0].n_eval_episodes == 3
+            assert callbacks[0].n_eval_episodes == 4
             assert callbacks[0].fixed_evaluation_schedule == fixed_schedule
             assert callbacks[0].schedule_sha256 == \
                 m.evaluation_schedule_sha256(fixed_schedule)
@@ -541,6 +661,10 @@ def check_mask_aware_evaluation():
             # not shaped mean reward, promotes the exact evaluated snapshot.
             # Every per-case result and checkpoint hash remains attributable.
             async_eval = callbacks[0]
+            # Four episodes are intentionally tiny for this smoke. Lower the
+            # threshold so the Wilson lower-bound promotion path is reachable;
+            # production retains the callback's 0.55 default over 64 cases.
+            async_eval.minimum_qualification_score = 0.30
             metrics = {}
             fake_logger = SimpleNamespace(
                 record=lambda key, value: metrics.__setitem__(key, value))
@@ -573,8 +697,9 @@ def check_mask_aware_evaluation():
             async_eval._handle_result(result_for(
                 snapshot, 10,
                 [("win", "life_total"), ("loss", "life_total"),
-                 ("win_turn_limit", "turn_limit")],
-                [1.0, -1.0, 10.0]))
+                 ("win_turn_limit", "turn_limit"),
+                 ("loss", "life_total")],
+                [1.0, -1.0, 10.0, -1.0]))
             best_path = os.path.join(
                 async_eval.best_model_save_path, "best_model.zip")
             assert not os.path.isfile(best_path), (
@@ -592,8 +717,8 @@ def check_mask_aware_evaluation():
             async_eval._handle_result(result_for(
                 better_outcome, 20,
                 [("win", "life_total"), ("win", "life_total"),
-                 ("draw", "decking")],
-                [-9.0, -9.0, -9.0]))
+                 ("win", "life_total"), ("win", "life_total")],
+                [-9.0, -9.0, -9.0, -9.0]))
             with open(best_path, "rb") as handle:
                 assert handle.read() == b"outcome-bytes", (
                     "fewer timeouts did not beat higher shaped reward")
@@ -607,8 +732,8 @@ def check_mask_aware_evaluation():
             async_eval._handle_result(result_for(
                 reward_only, 30,
                 [("draw", "decking"), ("draw", "decking"),
-                 ("draw", "decking")],
-                [100.0, 100.0, 100.0]))
+                 ("draw", "decking"), ("draw", "decking")],
+                [100.0, 100.0, 100.0, 100.0]))
             with open(best_path, "rb") as handle:
                 assert handle.read() == b"outcome-bytes", (
                     "shaped mean reward overrode decisive outcome quality")
@@ -626,7 +751,12 @@ def check_mask_aware_evaluation():
             assert history["evaluations"][1]["qualified"] is True
             assert history["evaluations"][1]["promoted"] is True
             assert history["evaluations"][2]["promoted"] is False
-            assert history["minimum_qualification_score"] == 0.55
+            assert history["schema_version"] == 3
+            assert history["minimum_qualification_score"] == 0.30
+            assert history["qualification_rule"]["metric"] == \
+                "qualification_interval.lower_bound"
+            assert history["evaluations"][1]["qualification_interval"][
+                "lower_bound"] >= 0.30
             assert history["best_candidate_timestep"] == 20
             assert len(history["evaluations"][0]["checkpoint_sha256"]) == 64
             assert history["evaluations"][0]["episodes"][0][
@@ -712,6 +842,34 @@ def check_mask_aware_evaluation():
             fidelity = m.StrictTrainingFidelityCallback()
             fidelity.locals = {"infos": [{"game_result": "undetermined"}]}
             assert fidelity._on_step() is True
+            fidelity.locals = {"infos": [{
+                "game_result": "win",
+                "fidelity": {
+                    "unparsed_effects": 0,
+                    "unparsed_cards": [],
+                    "effect_continuation_failures": 0,
+                    "effect_continuation_failure_contexts": [],
+                    "lost_spell_recoveries": 0,
+                    "lost_spell_recovery_contexts": [],
+                },
+            }]}
+            assert fidelity._on_step() is True
+            fidelity.locals = {"infos": [{
+                "game_result": "win",
+                "fidelity": {
+                    "effect_continuation_failures": 1,
+                    "effect_continuation_failure_contexts": [{
+                        "card_name": "Synthetic Failure"}],
+                },
+            }]}
+            try:
+                fidelity._on_step()
+            except RuntimeError as error:
+                assert "effect_continuation_failures" in str(error)
+                assert "Synthetic Failure" in str(error)
+            else:
+                raise AssertionError(
+                    "strict fidelity callback ignored fidelity telemetry")
             fidelity.locals = {
                 "infos": [{"game_result": "error_opponent_loop"}]}
             try:
@@ -1229,8 +1387,12 @@ def check_main_failure_semantics():
                 first_manifest = json.load(handle)
             assert first_manifest["status"] == "failed"
             assert first_manifest["phase"] == "training"
-            assert first_manifest["request"]["cli"]["seed"] == 42
-            assert first_manifest["resolved"]["train_worker_seeds"] == [42]
+            assert first_manifest["request"]["cli"]["seed"] == \
+                m.DEFAULT_TRAINING_SEED
+            assert first_manifest["resolved"]["train_worker_seeds"] == [
+                m.DEFAULT_TRAINING_SEED]
+            assert first_manifest["resolved"]["evaluation_seed"] == \
+                m.DEFAULT_EVALUATION_SEED
 
             # A successful learn() is the only path allowed to publish final_model.
             saved_paths.clear()
@@ -1253,6 +1415,11 @@ def check_main_failure_semantics():
             assert second_manifest["status"] == "complete"
             assert second_manifest["validation"]["status"] == "skipped"
             assert second_manifest["request"]["cli"]["seed"] == 1234
+            assert second_manifest["resolved"]["evaluation_seed"] == \
+                m.DEFAULT_EVALUATION_SEED
+            assert second_manifest["resolved"][
+                "fixed_evaluation_schedule_sha256"] == first_manifest[
+                    "resolved"]["fixed_evaluation_schedule_sha256"]
 
             # A checkpoint load failure must also be observable to the shell.
             saved_paths.clear()
@@ -1312,13 +1479,16 @@ def check_main_failure_semantics():
                 fourth_manifest = json.load(handle)
             assert fourth_manifest["status"] == "failed"
             assert fourth_manifest["phase"] == "data_loading"
-            assert parent_seeds == [42, 1234, 42, 42]
+            assert parent_seeds == [
+                m.DEFAULT_TRAINING_SEED, 1234,
+                m.DEFAULT_TRAINING_SEED, m.DEFAULT_TRAINING_SEED]
             # Evaluation envs are no longer built (or seeded) in the training
             # process: the async evaluation worker and the final-validation
             # branch construct their own via make_evaluation_vec_env, which
             # seeds with the evaluation offset internally. With fake models
             # that never write a checkpoint, only train envs are seeded here.
-            assert assigned_seeds == [42, 1234, 42]
+            assert assigned_seeds == [m.DEFAULT_TRAINING_SEED, 1234,
+                                      m.DEFAULT_TRAINING_SEED]
             assert environment_vocabularies
             assert all(
                 vocab == frozen_vocab for vocab in environment_vocabularies), (

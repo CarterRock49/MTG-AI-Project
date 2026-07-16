@@ -2265,15 +2265,12 @@ class ActionSpaceMixin:
             # Apply cost modifiers based on context (Kicker, Additional, Alternative)
             final_cost = gs.mana_system.apply_cost_modifiers(player, parsed_cost, card_id, context)
             if requires_return:
-                # The returned permanent may be an untapped land the mana plan
-                # needs; the cast is affordable only if some permanent can
-                # leave while the cost stays payable.
-                return any(
+                # CR 601.2g activates mana abilities before CR 601.2h pays
+                # the return cost. The selected permanent may therefore tap
+                # for mana and then leave the battlefield.
+                return bool(player.get("battlefield")) and \
                     gs.mana_system.can_pay_mana_cost_with_lands(
-                        player, final_cost, context,
-                        exclude_ids={permanent_id})
-                    for permanent_id in dict.fromkeys(
-                        player.get("battlefield", [])))
+                        player, final_cost, context)
             if gs.mana_system.can_pay_mana_cost_with_lands(player, final_cost, context):
                 return True
             return gs.mana_system.can_pay_with_target_dependent_reduction(

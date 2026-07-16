@@ -32,6 +32,164 @@ class GameStateStackMixin:
         return self.p1 if controller_id == "p1" else self.p2
 
     @staticmethod
+    def _fidelity_text(value, limit=600):
+        """Bound arbitrary engine labels before placing them in telemetry."""
+        if value is None:
+            return None
+        text = str(value)
+        return text if len(text) <= limit else text[:limit] + "..."
+
+    def _fidelity_card_name(self, source_id):
+        card = self._safe_get_card(source_id)
+        name = getattr(card, "name", None) if card is not None else None
+        return self._fidelity_text(name or f"card_{source_id}", limit=240)
+
+    def _effect_fidelity_summary(self, effect, effect_index=None,
+                                 error=None):
+        effect_text = getattr(effect, "effect_text", None)
+        if effect_text is None:
+            effect_text = getattr(effect, "text", None)
+        summary = {
+            "effect_index": effect_index,
+            "effect_type": type(effect).__name__,
+            # Some effect objects inherit the default repr, which embeds a
+            # process-specific memory address.  Omit unavailable text rather
+            # than making otherwise deterministic diagnostics unstable.
+            "effect_text": self._fidelity_text(effect_text),
+        }
+        if error is not None:
+            summary["error_type"] = type(error).__name__
+            summary["error_message"] = self._fidelity_text(error)
+        return summary
+
+    def _finalizer_fidelity_summary(self, finalizer):
+        if not isinstance(finalizer, dict):
+            return self._fidelity_text(finalizer) if finalizer else None
+        summary = {}
+        for key in ("kind", "ability_type", "source_id"):
+            if finalizer.get(key) is not None:
+                summary[key] = self._fidelity_text(finalizer.get(key))
+        context = finalizer.get("context")
+        if isinstance(context, dict):
+            effect_text = context.get("effect_text")
+            if effect_text:
+                summary["effect_text"] = self._fidelity_text(effect_text)
+        return summary or None
+
+    def _effect_continuation_failure_context(self, continuation,
+                                             failure_details):
+        source_id = continuation.get("source_id")
+        effects = list(continuation.get("effects", []) or [])
+        details = list(failure_details or [])
+        if not details:
+            details = [
+                self._effect_fidelity_summary(effect, index)
+                for index, effect in enumerate(effects[:12])
+            ]
+        return {
+            "source_id": self._fidelity_text(source_id),
+            "card_name": self._fidelity_card_name(source_id),
+            "controller_id": self._fidelity_text(
+                continuation.get("controller_id")),
+            "turn": int(getattr(self, "turn", 0) or 0),
+            "phase": int(getattr(self, "phase", -1)),
+            "phase_name": self._PHASE_NAMES.get(
+                getattr(self, "phase", None),
+                self._fidelity_text(getattr(self, "phase", None))),
+            "failed_effects": details[:12],
+            "finalizer": self._finalizer_fidelity_summary(
+                continuation.get("finalizer")),
+        }
+
+    def _record_effect_continuation_result(
+            self, continuation, success, failure_details=None,
+            pending=False):
+        """Record one failed resolving object and carry its exact-once marker.
+
+        Most asynchronous effects resume through
+        :meth:`_resume_effect_continuation`, but targeted effects and two
+        optional-payment choices resume their effect sequence directly.  Keep
+        fidelity classification independent of that routing detail.  A
+        resolving object contributes at most one issue even when it pauses for
+        several choices; any newly-created continuation inherits the marker.
+        """
+        if not isinstance(continuation, dict):
+            return False
+
+        if isinstance(failure_details, list):
+            details = failure_details
+        else:
+            details = continuation.get("failure_details", [])
+            if not isinstance(details, list):
+                details = []
+        continuation["failure_details"] = details
+
+        failed = (
+            not bool(success)
+            or continuation.get("success") is False
+            or bool(details)
+        )
+        recorded = False
+        if (failed
+                and not continuation.get(
+                    "fidelity_failure_recorded", False)):
+            self._record_fidelity_issue(
+                "effect_continuation_failures",
+                "effect_continuation_failure_contexts",
+                self._effect_continuation_failure_context(
+                    continuation, details))
+            continuation["fidelity_failure_recorded"] = True
+            recorded = True
+
+        # A failed continuation can itself pause for another choice.  Carry
+        # the marker forward so later resumes cannot count the same resolving
+        # object again.  Inspect both stores: an empty choice mapping should
+        # not hide a targeting continuation (or vice versa).
+        if pending and continuation.get(
+                "fidelity_failure_recorded", False):
+            for pending_context in (
+                    getattr(self, "choice_context", None),
+                    getattr(self, "targeting_context", None)):
+                if not isinstance(pending_context, dict):
+                    continue
+                pending_continuation = pending_context.get(
+                    "effect_continuation")
+                if isinstance(pending_continuation, dict):
+                    pending_continuation[
+                        "fidelity_failure_recorded"] = True
+        return recorded
+
+    def _lost_spell_recovery_context(self, spell_id, controller, context,
+                                     recovered_occurrences, reason,
+                                     error=None):
+        card = self._safe_get_card(spell_id)
+        effect_text = None
+        finalizer = None
+        if isinstance(context, dict):
+            effect_text = context.get("effect_text")
+            finalizer = context.get("finalizer")
+        if not effect_text and card is not None:
+            effect_text = getattr(card, "oracle_text", None)
+        diagnostic = {
+            "source_id": self._fidelity_text(spell_id),
+            "card_name": self._fidelity_card_name(spell_id),
+            "controller_id": self._effect_controller_id(controller),
+            "turn": int(getattr(self, "turn", 0) or 0),
+            "phase": int(getattr(self, "phase", -1)),
+            "phase_name": self._PHASE_NAMES.get(
+                getattr(self, "phase", None),
+                self._fidelity_text(getattr(self, "phase", None))),
+            "recovered_occurrences": int(recovered_occurrences),
+            "recovery_reason": str(reason),
+            "effect_text": self._fidelity_text(effect_text),
+            "finalizer": self._finalizer_fidelity_summary(finalizer),
+        }
+        if error is not None:
+            diagnostic["error_type"] = type(error).__name__
+            diagnostic["error_message"] = self._fidelity_text(error)
+        return diagnostic
+
+    @staticmethod
     def _counter_distribution_spec(effect_text):
         """Return the cast/activation-time division declared by Oracle text."""
         effect_text = str(effect_text or "")
@@ -93,7 +251,7 @@ class GameStateStackMixin:
 
     def _run_effect_sequence(self, effects, source_id, controller, targets=None,
                              context=None, finalizer=None,
-                             initial_success=True):
+                             initial_success=True, failure_details=None):
         """Apply parsed effects in order, pausing on policy choices.
 
         The stack item has already been popped when resolution reaches here.
@@ -108,6 +266,8 @@ class GameStateStackMixin:
         # instruction has actually created it.
         context.setdefault("_created_object_ids", [])
         success = bool(initial_success)
+        if not isinstance(failure_details, list):
+            failure_details = []
         for effect_index, effect in enumerate(effects):
             previous_choice = getattr(self, 'choice_context', None)
             previous_targeting = getattr(self, 'targeting_context', None)
@@ -120,11 +280,16 @@ class GameStateStackMixin:
                 applied = effect.apply(
                     self, source_id, controller, effect_targets,
                     context=context)
+                if not applied:
+                    failure_details.append(self._effect_fidelity_summary(
+                        effect, effect_index))
                 success = bool(applied) and success
-            except Exception:
+            except Exception as error:
                 logging.exception(
                     "Error applying sequenced effect %r from source %r",
                     getattr(effect, 'effect_text', effect), source_id)
+                failure_details.append(self._effect_fidelity_summary(
+                    effect, effect_index, error=error))
                 success = False
 
             choice = getattr(self, 'choice_context', None)
@@ -138,6 +303,7 @@ class GameStateStackMixin:
                     'resolution_context': self._copy_stack_context(context),
                     'finalizer': copy_module.deepcopy(finalizer),
                     'success': success,
+                    'failure_details': copy_module.deepcopy(failure_details),
                 }
                 return success, True
 
@@ -151,6 +317,7 @@ class GameStateStackMixin:
                     'resolution_context': self._copy_stack_context(context),
                     'finalizer': copy_module.deepcopy(finalizer),
                     'success': success,
+                    'failure_details': copy_module.deepcopy(failure_details),
                 }
                 return success, True
 
@@ -199,13 +366,15 @@ class GameStateStackMixin:
 
         controller = self._effect_controller_from_id(
             continuation.get('controller_id'))
+        failure_details = continuation.setdefault('failure_details', [])
         success, pending = self._run_effect_sequence(
             continuation.get('effects', []),
             continuation.get('source_id'), controller,
             continuation.get('targets'),
             continuation.get('resolution_context', {}),
             finalizer=continuation.get('finalizer'),
-            initial_success=continuation.get('success', True))
+            initial_success=continuation.get('success', True),
+            failure_details=failure_details)
 
         release_split_second = continuation.get('release_split_second', False)
         if pending and release_split_second and self.choice_context:
@@ -222,6 +391,9 @@ class GameStateStackMixin:
         if not pending:
             self.priority_player = self._get_active_player()
             self.priority_pass_count = 0
+        self._record_effect_continuation_result(
+            continuation, success, failure_details, pending=pending)
+
         if not success:
             # The chooser's mask-valid action was legal and fully applied. A
             # later instruction of the resolving object no-opping must not
@@ -1595,7 +1767,7 @@ class GameStateStackMixin:
         return self._resume_after_casting_choice(choice, cast_context)
 
     def choose_casting_additional_return(self, option_index):
-        """Pay a mandatory casting cost by returning one controlled permanent."""
+        """Stage the permanent chosen for a mandatory casting cost."""
         choice = self.choice_context
         if not (self.phase == self.PHASE_CHOOSE and choice
                 and choice.get("type") == "casting_additional_return"):
@@ -1607,30 +1779,13 @@ class GameStateStackMixin:
         controller = choice.get("controller") or choice.get("player")
         if permanent_id not in controller.get("battlefield", []):
             return False
-        in_p1_deck = permanent_id in getattr(self, "original_p1_deck", [])
-        in_p2_deck = permanent_id in getattr(self, "original_p2_deck", [])
-        # Mirror decks reuse numeric card IDs for two physical occurrences.
-        # This choice was built from controller's battlefield, so that zone
-        # membership is authoritative.  A global P1-first controller lookup
-        # cannot distinguish P2's occurrence of the same ID.
-        owner = (controller if in_p1_deck and in_p2_deck
-                 else self._find_card_owner_fallback(permanent_id) or controller)
-        if not self.move_card(
-                permanent_id, controller, "battlefield", owner, "hand",
-                cause="additional_cost",
-                context={"source_id": choice.get("card_id"),
-                         "casting_additional_cost": "return_permanent"}):
-            return False
 
         cast_context = dict(choice.get("original_cast_context", {}))
         cast_context["sample_nonmana_cost_complete"] = True
         cast_context["returned_for_additional_cost"] = permanent_id
-        success = self._resume_after_casting_choice(choice, cast_context)
-        if not success and permanent_id in owner.get("hand", []):
-            self.move_card(
-                permanent_id, owner, "hand", controller, "battlefield",
-                cause="additional_cost_rollback")
-        return success
+        cast_context["_returned_for_additional_cost_index"] = \
+            controller["battlefield"].index(permanent_id)
+        return self._resume_after_casting_choice(choice, cast_context)
 
     def choose_collect_evidence_card(self, option_index):
         """Stage one graveyard card toward a collect-evidence threshold."""
@@ -1645,8 +1800,15 @@ class GameStateStackMixin:
         controller = choice.get("controller") or choice.get("player")
         if card_id not in controller.get("graveyard", []):
             return False
+        option_indices = choice.setdefault(
+            "option_indices", list(range(len(options))))
+        if len(option_indices) != len(options):
+            return False
+        graveyard_index = option_indices.pop(option_index)
         options.pop(option_index)
         choice.setdefault("selected_cards", []).append(card_id)
+        choice.setdefault("selected_choices", []).append(
+            (graveyard_index, card_id))
         card = self._safe_get_card(card_id)
         try:
             mana_value = int(getattr(card, "cmc", 0) or 0)
@@ -1657,7 +1819,7 @@ class GameStateStackMixin:
         return True
 
     def finish_collect_evidence_choice(self):
-        """Decline evidence, or exile staged cards and resume the pending cast."""
+        """Decline evidence, or stage exact cards and resume the pending cast."""
         choice = self.choice_context
         if not (self.phase == self.PHASE_CHOOSE and choice
                 and choice.get("type") == "collect_evidence"):
@@ -1669,32 +1831,14 @@ class GameStateStackMixin:
         if selected and total < threshold:
             return False
 
-        moved = []
-        if selected:
-            for card_id in selected:
-                if not self.move_card(
-                        card_id, controller, "graveyard", controller, "exile",
-                        cause="collect_evidence",
-                        context={"source_id": choice.get("card_id"),
-                                 "evidence_threshold": threshold}):
-                    for moved_id in reversed(moved):
-                        self.move_card(
-                            moved_id, controller, "exile", controller, "graveyard",
-                            cause="additional_cost_rollback")
-                    return False
-                moved.append(card_id)
-
         cast_context = dict(choice.get("original_cast_context", {}))
         cast_context["sample_nonmana_cost_complete"] = True
         cast_context["evidence_collected"] = bool(selected)
         cast_context["evidence_cards"] = list(selected)
-        success = self._resume_after_casting_choice(choice, cast_context)
-        if not success:
-            for card_id in reversed(moved):
-                self.move_card(
-                    card_id, controller, "exile", controller, "graveyard",
-                    cause="additional_cost_rollback")
-        return success
+        cast_context["_evidence_choices"] = list(
+            choice.get("selected_choices", []))
+        cast_context["_evidence_threshold"] = threshold
+        return self._resume_after_casting_choice(choice, cast_context)
 
     @staticmethod
     def _effect_targets_from_context(context):
@@ -2158,16 +2302,38 @@ class GameStateStackMixin:
         # ...(rest of source zone validation remains the same)...
         if source_zone == "command":
             source_list = player.get(source_zone)
-            if isinstance(source_list, (list, set)) and card_id in source_list: card_in_source = True
+            if isinstance(source_list, list):
+                if source_idx is None:
+                    try:
+                        source_idx = source_list.index(card_id)
+                        card_in_source = True
+                    except ValueError:
+                        card_in_source = False
+                else:
+                    card_in_source = (
+                        isinstance(source_idx, int)
+                        and 0 <= source_idx < len(source_list)
+                        and source_list[source_idx] == card_id)
+            elif isinstance(source_list, set):
+                card_in_source = card_id in source_list
         elif source_zone in ["stack_implicit", "library_implicit", "hand_implicit", "nonexistent_zone", "prepared_exile"]: card_in_source = True; source_list = []
         else:
              source_list = player.get(source_zone)
              if source_list is not None:
-                  if isinstance(source_list, (list, set)) and card_id in source_list:
-                       card_in_source = True
-                       if source_idx is None and isinstance(source_list, list):
-                            try: source_idx = source_list.index(card_id)
-                            except ValueError: card_in_source = False
+                  if isinstance(source_list, list):
+                       if source_idx is None:
+                            try:
+                                 source_idx = source_list.index(card_id)
+                                 card_in_source = True
+                            except ValueError:
+                                 card_in_source = False
+                       else:
+                            card_in_source = (
+                                isinstance(source_idx, int)
+                                and 0 <= source_idx < len(source_list)
+                                and source_list[source_idx] == card_id)
+                  elif isinstance(source_list, set):
+                       card_in_source = card_id in source_list
                   elif isinstance(source_list, dict) and card_id in source_list: card_in_source = True
 
         if not card_in_source:
@@ -2658,9 +2824,16 @@ class GameStateStackMixin:
         additional_cost_info = context.get('additional_cost_info')
         can_pay_non_mana_add = True
         if context.get('pay_additional') and additional_cost_info:
-             if not self.mana_system._can_pay_non_mana_cost(player, additional_cost_info, context):
-                  can_pay_non_mana_add = False
-                  logging.warning(f"Cannot cast {card.name}: Cannot meet non-mana additional cost.")
+             # This legacy surface records only a cost description, not the
+             # exact cards/permanents chosen to pay it.  The former helpers
+             # mutated first and attempted a lossy zone rollback later (and no
+             # longer exist).  Fail closed until the action flow supplies the
+             # concrete sacrifice/discard/tap choices understood by the staged
+             # mana transaction.
+             can_pay_non_mana_add = False
+             logging.warning(
+                 f"Cannot cast {card.name}: additional-cost choices were not "
+                 "fully specified.")
         if not can_pay_non_mana_add: return False
 
         # Check final mana affordability
@@ -2677,16 +2850,15 @@ class GameStateStackMixin:
         if (sample_additional_cost
                 and not context.get("sample_nonmana_cost_complete", False)):
             if sample_additional_cost["type"] == "return_permanent":
-                # Returning a permanent can strip an untapped land the mana
-                # plan counts on; only offer returns that keep the final cost
-                # payable, so every mask-exposed choice completes the cast.
-                options = [
-                    permanent_id
-                    for permanent_id in dict.fromkeys(
-                        player.get("battlefield", []))
+                # CR 601.2g allows a mana ability before 601.2h returns the
+                # permanent, so the selected object remains available to the
+                # mana plan. Offer every controlled permanent once the cost is
+                # payable with the unchanged battlefield.
+                options = (
+                    list(dict.fromkeys(player.get("battlefield", [])))
                     if self.mana_system.can_pay_mana_cost_with_lands(
-                        player, final_cost_dict, context,
-                        exclude_ids={permanent_id})]
+                        player, final_cost_dict, context)
+                    else [])
                 if not options:
                     logging.warning(
                         f"Cannot cast {card.name}: no permanent can pay its "
@@ -2721,6 +2893,14 @@ class GameStateStackMixin:
                     })
                 context["sample_nonmana_cost_complete"] = True
                 context["evidence_collected"] = False
+
+        if (sample_additional_cost
+                and sample_additional_cost.get("type") == "return_permanent"
+                and context.get("sample_nonmana_cost_complete", False)
+                and context.get("returned_for_additional_cost") is None):
+            logging.warning(
+                f"Cannot cast {card.name}: mandatory return choice is missing.")
+            return False
 
         # CR 601.2c chooses targets before CR 601.2h pays any costs.  Deferring
         # only target-priced spells left ordinary targeted spells able to pay
@@ -2783,140 +2963,214 @@ class GameStateStackMixin:
             logging.info(f"Waiting for targets before casting {card.name}.")
             return True
 
-        # --- Costs Paid Here ---
-        # 1. Pay Non-Mana Additional Costs FIRST
-        if context.get('pay_additional') and additional_cost_info:
-            if not self.mana_system._pay_non_mana_cost(player, additional_cost_info, context):
-                logging.warning(f"Failed to pay non-mana additional cost for {card.name}.")
-                return False
+        # --- Atomic cost/source transaction ---
+        # The checkpoint starts before mana abilities, Bargain, and every
+        # context-selected cost and remains live through removal of the exact
+        # spell occurrence from its source zone.  It is never used to move a
+        # sacrificed card "back"; unexpected divergence restores the complete
+        # pre-cost state, including triggers, replacements, attachments, and
+        # caller-held player/Card identities.
+        try:
+            cast_checkpoint = self.create_transaction_checkpoint()
+        except Exception as checkpoint_error:
+            logging.critical(
+                "Cannot establish cast transaction for %s: %s",
+                card.name, checkpoint_error, exc_info=True)
+            return False
 
-        # 2. Pay Final Mana Cost
-        paid_mana_details = self.mana_system.pay_mana_cost_get_details(player, final_cost_dict, context)
+        context["_payment_source_card_id"] = card_id
+        context["_payment_source_zone"] = source_zone
+        context["_payment_source_index"] = source_idx
+        context["_payment_transaction_checkpoint"] = cast_checkpoint
+        private_payment_keys = (
+            "_payment_source_card_id", "_payment_source_zone",
+            "_payment_source_index", "_payment_transaction_checkpoint")
+
+        def clear_private_payment_context():
+            for private_payment_key in private_payment_keys:
+                context.pop(private_payment_key, None)
+
+        try:
+            paid_mana_details = self.mana_system.pay_mana_cost_get_details(
+                player, final_cost_dict, context)
+        except Exception as payment_error:
+            logging.critical(
+                "Cost payment raised for %s: %s", card.name,
+                payment_error, exc_info=True)
+            try:
+                self.restore_transaction_checkpoint(cast_checkpoint)
+            except Exception as restore_error:
+                logging.critical(
+                    "Failed to restore cast transaction for %s: %s",
+                    card.name, restore_error, exc_info=True)
+            finally:
+                clear_private_payment_context()
+            return False
         if paid_mana_details is None:
-             logging.warning(f"Failed to pay final mana cost for {card.name}. Rolling back non-mana costs...")
-             if context.get('pay_additional') and additional_cost_info:
-                  self.mana_system._rollback_non_mana_cost(player, additional_cost_info, context)
+             logging.warning(f"Failed to pay final cost for {card.name}.")
+             try:
+                  self.restore_transaction_checkpoint(cast_checkpoint)
+             except Exception as restore_error:
+                  logging.critical(
+                      "Failed to restore rejected cast for %s: %s",
+                      card.name, restore_error, exc_info=True)
+             finally:
+                  clear_private_payment_context()
              return False
-
-        bargain_sacrifice_id = context.get("bargain_sacrifice_id")
-        bargain_sacrifice_was_token = False
-        if context.get("bargained"):
-             if bargain_sacrifice_id not in self._bargain_options(player, self._safe_get_card):
-                  self.mana_system.add_mana(
-                      player, paid_mana_details.get('spent_specific', {}))
-                  if context.get('pay_additional') and additional_cost_info:
-                      self.mana_system._rollback_non_mana_cost(
-                          player, additional_cost_info, context)
-                  return False
-             bargain_card = self._safe_get_card(bargain_sacrifice_id)
-             bargain_sacrifice_was_token = bool(
-                 getattr(bargain_card, "is_token", False))
-             if not self.move_card(
-                     bargain_sacrifice_id, player, "battlefield", player,
-                     "graveyard", cause="bargain",
-                     context={"source_id": card_id}):
-                  self.mana_system.add_mana(
-                      player, paid_mana_details.get('spent_specific', {}))
-                  if context.get('pay_additional') and additional_cost_info:
-                      self.mana_system._rollback_non_mana_cost(
-                          player, additional_cost_info, context)
-                  return False
 
         # --- Move Card from Source Zone ---
         removed = False
         source_list_live = player.get(source_zone)
+        adjusted_source_idx = source_idx
+        if isinstance(source_idx, int):
+             paid_indices = []
+             if source_zone == "hand":
+                  paid_indices = context.get("discard_additional", []) or []
+             elif source_zone == "graveyard":
+                  paid_indices = (
+                      list(context.get("delve_cards", []) or [])
+                      + list(context.get("escape_cards", []) or [])
+                      + [choice[0] for choice in
+                         (context.get("_evidence_choices", []) or [])
+                         if (isinstance(choice, (list, tuple))
+                             and len(choice) == 2
+                             and isinstance(choice[0], int))])
+             adjusted_source_idx -= sum(
+                 1 for paid_idx in paid_indices
+                 if isinstance(paid_idx, int) and paid_idx < source_idx)
         if source_list_live is not None:
-             if isinstance(source_list_live, list) and source_idx is not None and 0 <= source_idx < len(source_list_live) and source_list_live[source_idx] == card_id:
-                  source_list_live.pop(source_idx)
+             if (isinstance(source_list_live, list)
+                     and adjusted_source_idx is not None
+                     and 0 <= adjusted_source_idx < len(source_list_live)
+                     and source_list_live[adjusted_source_idx] == card_id):
+                  source_list_live.pop(adjusted_source_idx)
                   removed = True
-             elif isinstance(source_list_live, (list, set)) and card_id in source_list_live:
-                 if isinstance(source_list_live, list): source_list_live.remove(card_id)
-                 elif isinstance(source_list_live, set): source_list_live.discard(card_id)
+             elif isinstance(source_list_live, set) and card_id in source_list_live:
+                 source_list_live.discard(card_id)
                  removed = True
         elif source_zone in ["stack_implicit", "library_implicit", "hand_implicit", "nonexistent_zone", "prepared_exile"]: removed = True
 
         if not removed:
              logging.error(f"CRITICAL: Could not remove {card.name} from {source_zone} after paying costs.")
-             if paid_mana_details: self.mana_system.add_mana(player, paid_mana_details.get('spent_specific',{}))
-             if context.get('pay_additional') and additional_cost_info: self.mana_system._rollback_non_mana_cost(player, additional_cost_info, context)
-             if (bargain_sacrifice_id is not None
-                     and not bargain_sacrifice_was_token
-                     and bargain_sacrifice_id in player.get("graveyard", [])):
-                  self.move_card(
-                      bargain_sacrifice_id, player, "graveyard", player,
-                      "battlefield", cause="bargain_rollback")
+             try:
+                  self.restore_transaction_checkpoint(cast_checkpoint)
+             except Exception as restore_error:
+                  logging.critical(
+                      "Failed to restore cast transaction for %s: %s",
+                      card.name, restore_error, exc_info=True)
+             finally:
+                  clear_private_payment_context()
              return False
-        if source_zone == "exile" and hasattr(self, "cards_castable_from_exile"):
-             self.cards_castable_from_exile.discard(card_id)
-             getattr(self, "exile_alternative_costs", {}).pop(card_id, None)
-        if source_zone == "exile":
-             self._consume_plot_permission(player, card_id)
-        if source_zone == "graveyard" and context.get(
-                "graveyard_adventure_cast"):
-             self._consume_graveyard_adventure_permission(player, card_id)
-        if source_zone == "graveyard" and context.get("flashback_cast"):
-             self.flashback_cards.add(card_id)
-        if source_zone == "graveyard" and context.get("harmonize_cast"):
-             self.flashback_cards.add(card_id)
-        if context.get("prepared_copy"):
-             # Casting the virtual copy from exile makes the source permanent
-             # unprepared; the permanent itself never changes zones.
-             self.prepared_cards.discard(card_id)
+        try:
+            clear_private_payment_context()
+            payment_grants_cant_be_countered = bool(
+                paid_mana_details.get("payment", {}).get(
+                    "grants_cant_be_countered"))
+            if source_zone == "exile" and hasattr(self, "cards_castable_from_exile"):
+                 self.cards_castable_from_exile.discard(card_id)
+                 getattr(self, "exile_alternative_costs", {}).pop(card_id, None)
+            if source_zone == "exile":
+                 self._consume_plot_permission(player, card_id)
+            if source_zone == "graveyard" and context.get(
+                    "graveyard_adventure_cast"):
+                 self._consume_graveyard_adventure_permission(player, card_id)
+            if source_zone == "graveyard" and context.get("flashback_cast"):
+                 self.flashback_cards.add(card_id)
+            if source_zone == "graveyard" and context.get("harmonize_cast"):
+                 self.flashback_cards.add(card_id)
+            if context.get("prepared_copy"):
+                 # Casting the virtual copy from exile makes the source permanent
+                 # unprepared; the permanent itself never changes zones.
+                 self.prepared_cards.discard(card_id)
 
-        # --- Prepare FINAL stack context ---
-        final_stack_context = context.copy()
-        # Runtime Card objects link back to GameState and thread locks. Every
-        # rule-relevant cast characteristic is serialized elsewhere in context.
-        final_stack_context.pop("card", None)
-        final_stack_context["source_zone"] = source_zone
-        # Preserve cast provenance through permanent resolution and its ETB
-        # event.  Zone movement later rewrites ``source_zone`` to the trigger
-        # source's current zone, so that field alone cannot answer intervening
-        # conditions such as Sunderflock's "if you cast it".
-        final_stack_context["was_cast"] = True
-        final_stack_context["cast_controller_id"] = (
-            "p1" if player is self.p1 else "p2")
-        final_stack_context["final_paid_cost"] = final_cost_dict
-        final_stack_context["final_paid_details"] = paid_mana_details
-        final_stack_context["requires_target"] = requires_target
-        final_stack_context["num_targets"] = num_targets
-        final_stack_context["min_targets"] = min_targets
-        final_stack_context["max_targets"] = num_targets
-        casting_card = context.get("card")
-        if not hasattr(casting_card, "card_types"):
-            casting_card = card
-        (cast_card_types, cast_card_subtypes,
-         cast_card_has_flying) = \
-            self.mana_system.spell_characteristics_for_cast(
-                casting_card, context)
-        final_stack_context["cast_card_types"] = sorted(cast_card_types)
-        final_stack_context["cast_card_subtypes"] = sorted(
-            cast_card_subtypes)
-        final_stack_context["cast_card_has_flying"] = bool(
-            cast_card_has_flying)
-        if context.get("prepared_copy"):
-             prepared_type_line = str(
-                 context.get("prepared_face", {}).get("type_line", ""))
-             final_stack_context["cast_card_types"] = [
-                 card_type for card_type in ("instant", "sorcery")
-                 if card_type in prepared_type_line.lower()
-             ]
-        if player.pop('next_spell_uncounterable', False):
-            final_stack_context['cant_be_countered'] = True
-        final_stack_context.pop('pay_offspring', None) # Clear intent flag
-        final_stack_context.pop('kicker_cost_to_pay', None)
-        final_stack_context.pop('additional_cost_info', None)
-        final_stack_context.pop('source_idx', None)
+            # --- Prepare FINAL stack context ---
+            final_stack_context = context.copy()
+            # Runtime Card objects link back to GameState and thread locks. Every
+            # rule-relevant cast characteristic is serialized elsewhere in context.
+            final_stack_context.pop("card", None)
+            final_stack_context["source_zone"] = source_zone
+            # Preserve cast provenance through permanent resolution and its ETB
+            # event.  Zone movement later rewrites ``source_zone`` to the trigger
+            # source's current zone, so that field alone cannot answer intervening
+            # conditions such as Sunderflock's "if you cast it".
+            final_stack_context["was_cast"] = True
+            final_stack_context["cast_controller_id"] = (
+                "p1" if player is self.p1 else "p2")
+            final_stack_context["final_paid_cost"] = final_cost_dict
+            final_stack_context["final_paid_details"] = paid_mana_details
+            final_stack_context["requires_target"] = requires_target
+            final_stack_context["num_targets"] = num_targets
+            final_stack_context["min_targets"] = min_targets
+            final_stack_context["max_targets"] = num_targets
+            if payment_grants_cant_be_countered:
+                 final_stack_context["cant_be_countered"] = True
+            casting_card = context.get("card")
+            if not hasattr(casting_card, "card_types"):
+                casting_card = card
+            (cast_card_types, cast_card_subtypes,
+             cast_card_has_flying) = \
+                self.mana_system.spell_characteristics_for_cast(
+                    casting_card, context)
+            final_stack_context["cast_card_types"] = sorted(cast_card_types)
+            final_stack_context["cast_card_subtypes"] = sorted(
+                cast_card_subtypes)
+            final_stack_context["cast_card_has_flying"] = bool(
+                cast_card_has_flying)
+            if context.get("prepared_copy"):
+                 prepared_type_line = str(
+                     context.get("prepared_face", {}).get("type_line", ""))
+                 final_stack_context["cast_card_types"] = [
+                     card_type for card_type in ("instant", "sorcery")
+                     if card_type in prepared_type_line.lower()
+                 ]
+            if player.pop('next_spell_uncounterable', False):
+                final_stack_context['cant_be_countered'] = True
+            final_stack_context.pop('pay_offspring', None) # Clear intent flag
+            final_stack_context.pop('kicker_cost_to_pay', None)
+            final_stack_context.pop('additional_cost_info', None)
+            final_stack_context.pop('source_idx', None)
+            final_stack_context.pop('_returned_for_additional_cost_index', None)
+            final_stack_context.pop('_evidence_choices', None)
+            final_stack_context.pop('_evidence_threshold', None)
 
-        self.add_to_stack("SPELL", card_id, player, final_stack_context)
-        if targets_committed:
-             self.notify_targets_committed(
-                 card_id, player, final_stack_context.get("targets", {}),
-                 stack_context=final_stack_context)
-        elif requires_target and num_targets > 0:
-             raise RuntimeError(
-                 f"Targeted spell {card.name} reached the stack without "
-                 "committed targets")
+            try:
+                 self.add_to_stack("SPELL", card_id, player, final_stack_context)
+                 if targets_committed:
+                      self.notify_targets_committed(
+                          card_id, player,
+                          final_stack_context.get("targets", {}),
+                          stack_context=final_stack_context)
+                 elif requires_target and num_targets > 0:
+                      raise RuntimeError(
+                          f"Targeted spell {card.name} reached the stack without "
+                          "committed targets")
+            except Exception as stack_insert_error:
+                 logging.critical(
+                     "Failed to insert paid spell %s on the stack: %s",
+                     card.name, stack_insert_error, exc_info=True)
+                 try:
+                      self.restore_transaction_checkpoint(cast_checkpoint)
+                 except Exception as restore_error:
+                      logging.critical(
+                          "Failed to restore stack-insertion transaction for "
+                          "%s: %s", card.name, restore_error, exc_info=True)
+                 finally:
+                      clear_private_payment_context()
+                 return False
+
+        except Exception as post_source_error:
+            logging.critical(
+                "Failed to complete paid cast transaction for %s: %s",
+                card.name, post_source_error, exc_info=True)
+            try:
+                self.restore_transaction_checkpoint(cast_checkpoint)
+            except Exception as restore_error:
+                logging.critical(
+                    "Failed to restore post-source cast transaction for "
+                    "%s: %s", card.name, restore_error, exc_info=True)
+            finally:
+                clear_private_payment_context()
+            return False
 
         logging.info(f"Successfully cast spell: {card.name} ({card_id}) from {source_zone}")
 
@@ -3701,6 +3955,15 @@ class GameStateStackMixin:
                     _owner, _zone = self.find_card_location(_spell_id)
                     if _zone is None and isinstance(top_item[2], dict):
                         top_item[2].setdefault("graveyard", []).append(_spell_id)
+                        _recovery_context = (
+                            top_item[3] if len(top_item) > 3
+                            and isinstance(top_item[3], dict) else {})
+                        self._record_fidelity_issue(
+                            "lost_spell_recoveries",
+                            "lost_spell_recovery_contexts",
+                            self._lost_spell_recovery_context(
+                                _spell_id, top_item[2], _recovery_context,
+                                1, "resolution_exception", error=e))
                         logging.warning(f"Recovered lost spell {_spell_id} to graveyard after resolution error.")
             except Exception:
                 pass
@@ -3720,6 +3983,16 @@ class GameStateStackMixin:
                     missing = expected_spell_occurrences - actual_occurrences
                     controller.setdefault("graveyard", []).extend(
                         [spell_id] * missing)
+                    recovery_context = (
+                        top_item[3] if len(top_item) > 3
+                        and isinstance(top_item[3], dict) else {})
+                    self._record_fidelity_issue(
+                        "lost_spell_recoveries",
+                        "lost_spell_recovery_contexts",
+                        self._lost_spell_recovery_context(
+                            spell_id, controller, recovery_context, missing,
+                            "post_resolution_occurrence_repair"),
+                        count=missing)
                     logging.error(
                         "Recovered %d lost physical occurrence(s) of spell %r "
                         "after stack resolution.", missing, spell_id)

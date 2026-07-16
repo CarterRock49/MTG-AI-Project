@@ -22,57 +22,58 @@ Status legend: ✅ complete, ◐ active/partially complete, ▢ not started.
 ## Executive status
 
 The engine, policy boundary, replay/fuzz infrastructure, format lineage, and
-Harvest orchestration are operational. The representative Standard corpus has
-no known severe fidelity entry. The project is **not production-ready** because
+Harvest orchestration are operational. The representative Standard corpus does
+not currently carry a severe support-ledger entry, but that is not a clean-
+runtime guarantee; the new strict recovery counters must remain zero in a fresh
+run. The project is **not production-ready** because
 no trained checkpoint has passed the paired-seat strength gate, matchup
 calibration has not run, format-wide card support remains incomplete, and the
 deck-builder feedback loop is not connected.
 
-### Round 7.89 / Observation v3 pre-run boundary
+### Round 7.92 verified delivery baseline
 
-The corrected v3 observation contract, active-gated curriculum, balanced
-evaluation schedule, combat audit, and final targeting/analytics audit are
-green:
+The corrected Observation v3 contract and the Round 7.92 ratchet, fidelity,
+payment, canary, and qualification changes are green at the following current
+working-tree counts:
 
 | Gate | Result |
 | --- | --- |
-| Golden scenarios | 403/403 |
+| Golden scenarios | 404/404 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
-| Discovered unit tests | 298/298 |
-| Focused targeting and lifecycle audit | 32/32 |
-| Card/deck analytics and evaluator audit | 40/40 |
-| Focused combat regressions | 22/22 |
-| Strategic numeric regressions | 14/14 |
+| Discovered unit tests | 428/428 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
-| Failed-run replay | exact 117-action trace reaches and executes Room action 250 cleanly |
-| Diff/whitespace check | clean |
 | Observation schema | v3 / `6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137` |
 
-Standing broader gates last recorded green: fixture Harvest 16/16, production
-Harvest protocol 17/17, card registry 19/19, deck ingestion 13/13, fuzz/replay
-configuration 6/6, and strict long fuzz 32 seeds × 10,000 valid actions.
+Standing broader gates last recorded green: fixture Harvest 18/18, production
+Harvest protocol 17/17, card registry 19/19, deck ingestion 13/13, and
+fuzz/replay configuration 6/6. The strict long-fuzz result (32 seeds × 10,000
+valid actions) is historical until that scheduled/manual gate is rerun.
 
 The final pre-run audit aligned target discovery, action masks, selection, and
 resolution around the exact active instruction; unknown target grammar fails
-closed. Card and deck analytics now preserve canonical printing identity,
+closed. Card and deck analytics now preserve canonical card identity,
 player-relative turns, draw-aware rates, and atomic per-file persistence.
 Evaluator caches retain only static characteristics, while live state and
 perspective are recomputed for each decision.
 
 ### Non-negotiable lineage rules
 
-- **Start every new policy from Round 7.89.** Observation v3 corrects learned
+- **Start every new policy from the Round 7.89 Observation v3 boundary, using
+  the current Round 7.92 reward/curriculum contract.** Observation v3 corrects learned
   mana, land-development, resource-advantage, and strategic-viability
   semantics. Adaptive card/deck history is recorded but excluded from live
   evaluator advice by default so worker-local histories cannot make the same
   public state nonstationary. Recorded archetypes are canonical and play-turn
   analytics are player-relative; targetable observations match the active
   target instruction. Do not resume an Observation v2 checkpoint into this
-  lineage.
+  lineage. Fresh Round 7.92 training uses
+  `discounted-state-potential-v6` and `combat-v5`; do not resume an older
+  curriculum checkpoint.
 - Resume now verifies the companion manifest's reward contract and Observation
   version/hash. Curriculum continuation is intentionally rejected until its
-  per-worker scheduler counters can be checkpointed; launch Round 7.89 fresh.
+  per-worker scheduler counters can be checkpointed; launch a fresh
+  current-round run.
 - Do not mix pre-7.46 statistics with format-namespace statistics.
 - Statistics collected before July 2026 are unusable. They were affected by
   perspective, winner attribution, fabricated play-turn, first-strike, layer,
@@ -119,19 +120,20 @@ deliberately rejected to keep the policy deck- and opponent-agnostic):
 3. **Reward contract v6** (`discounted-state-potential-v6`): a life lead at
    the turn limit now pays -8 instead of -10 (all other limit outcomes stay
    -10), so "almost won" is no longer worth exactly as much as losing while
-   remaining strictly worse than every decisive outcome. The convex
+   remaining worse than a decisive win (a decisive loss still pays -10). The convex
    damage-progress potential weight doubles (0.40 → 0.80). Resume remains
    version-gated, so v5 checkpoints cannot enter this lineage.
 4. **Paired-seat observation audit.** The 7.90 evaluation's 5-27 (P1) versus
    10-20-2 (P2) split motivated a standing regression
-   (`tests/seat_parity_test.py`) proving my_*/opp_* extraction is a pure
-   viewpoint on a shared state. It passes — the split is not an observation
-   perspective bug.
+   (`tests/seat_parity_test.py`) covering the audited `my_*`/`opp_*` fields on
+   paired constructed states. It passes, so that tested extractor slice did
+   not reproduce the split; it is not proof that every runtime seat asymmetry
+   has been eliminated.
 
-`combat-v4` is the fresh-run default; `combat-v3` remains resolvable for
-reproducibility. Fixed evaluation is unchanged (full-strength scripted
-opponents, engine-default turn limit) so qualification scores stay comparable
-across rounds.
+`combat-v4` was the Round 7.91 default and `combat-v3` remains resolvable for
+reproducibility. Round 7.92 supersedes both for fresh runs with `combat-v5`.
+Fixed evaluation continues to use full-strength scripted opponents and the
+engine-default turn limit.
 
 ### Run 1 result (`round-7.91-annealed-ramp-v1`) and the choice-phase fix
 
@@ -157,9 +159,88 @@ by restoring its phase and chooser instead of letting an episode brick. The
 handicapped scripted opponents block far more than earlier rounds, which is
 why this dormant path finally fired.
 
+Run 2 (`round-7.91-annealed-ramp-v2`) reproduced run 1 deterministically,
+annealed bridge to full strength at 244k, entered full_pool at 369k, and died
+at ~375k on a second dormant defect: the COUNTER_SPELL mask matched
+"counter target spell" without validating rider clauses, so a mask-valid
+Spell Snare aimed at a mana-value-1 Daydream failed execution. The mask now
+runs the same targeting-system validation as `cast_spell` and aims at a
+spell that is actually a legal target (`tests/counter_spell_mask_test.py`).
+
+The older Round 7.89/7.90 interrupted-run manifests can still report
+`status: running`; that is a historical lifecycle-recording defect, not
+evidence that either process remains active. Their checkpoint results remain
+diagnostic only.
+
+### Run 3 verdict (`round-7.91-annealed-ramp-v3`, interrupted at ~730k)
+
+Run 3 cleared both fixed defects and produced the round's full result:
+fastest climb in project history (0.281 qualification at 400k versus 7.88
+needing 800k+ for 0.25), then an oscillating plateau — 0.188, 0.203, 0.109,
+0.281, 0.188, 0.250, 0.109 across the seven evaluations. The old interval was
+a descriptive Bernoulli estimate over repeated, paired cases and should not be
+read as a precise independent-sample bound. The curriculum ramps raised the
+*speed* to competence, but did not show a higher ceiling. The pooled 448-game
+diagnostic suggests concentrated deck-skill holes rather than diffuse
+weakness; because it reuses cases across correlated checkpoints, it does not
+locate the ceiling precisely.
+
+Those scores are not a controlled comparison with Rounds 7.89/7.90. Those
+runs used eight environments, training/evaluation seeds `20260715`/`21260715`,
+and schedule hash `f5aa…`; Round 7.91 used six environments, seeds
+`42`/`1000042`, and schedule hash `bde3…`. Each suite was fixed within its own
+run, but the cases and training configuration differed across rounds.
+
+The pooled diagnostics were:
+
+| Skill hole | Evidence (eval, all 7 checkpoints pooled) |
+| --- | --- |
+| Piloting reactive decks | 4c Control 0-43 (0%), Jeskai 12%, Dimir 11% as agent decks; training full_pool win rates 3-4% on the same decks — 37% of full_pool episodes produce near-pure loss signal |
+| Beating token swarms | 1-54 vs Azorius Momo, 4-52 vs Selesnya as opponents |
+| Closing against durdle | 30 and 34 of 56 games vs 4c Control / Jeskai hit the 31-turn limit |
+
+Round 7.92 implements the two stage-level responses: `combat-v5` (now the
+fresh-run default) gives goldfish 25 turns — runs 1-3 all lost goldfish to its
+deadline at ~71% timeouts under 20 turns — and extends the annealed handicap
+to the scripted portion of `full_pool` (epsilon 0.40 → 0 by ratchet). The
+full-pool bag is 80% scripted and 20% novice, but before v5 both active
+profiles began at full strength; it was therefore 100% active full-strength,
+not 80% full-strength. The ratchet now keeps a separate window of qualifying
+scripted outcomes, so interleaved novice games cannot prevent the required 24
+scripted samples from ever accumulating.
+
+The same fix batch makes fidelity enforcement cover failed effect
+continuations and lost-spell recoveries (with diagnostic contexts), persists a
+pair-aware 95% qualification interval, and gates promotion to `best_model.zip`
+on its lower bound rather than the point estimate. These changes pass the
+delivery gate.
+
+The pilot-side skill holes need a different
+lever and are deliberately **not** addressed by v5; candidates for the next
+decision, in rough order of expected value:
+
+1. Matchup-weighted scheduling: oversample the agent piloting its worst
+   decks once a win-rate floor exists, or handicap opponents specifically
+   when the agent pilots a reactive deck (per-matchup epsilon).
+2. Larger held-out paired-seat qualification suites if the lower confidence
+   bound remains too wide for a promotion decision.
+3. Policy capacity/optimization (network width, rollout length, entropy
+   schedule) — only after the curriculum-level levers are exhausted, and
+   as a single attributable canary change.
+
+The named `--canary-config round-7.92` contract checks its enumerated CLI and
+complete PPO setting tree, reward-contract version/scalars, the full resolved
+curriculum hash, feature-output width, CUDA device class, hashed lineage, and
+evaluation schedule: one million timesteps, 100k periodic evaluation with 64
+games (32 seat-swapped pairs), 50k checkpoints, eight training environments,
+training seed `20260715`, independent evaluation seed `21260715`, Observation
+v3, reward v6, and `combat-v5`. Mismatch in those checked fields fails before
+training. Git/patch provenance, runtime libraries, and the specific GPU model
+are recorded for audit rather than constrained by the canary selector.
+
 ---
 
-## Latest run finding — `round-7.87-curriculum-v5` is diagnostic-only; Round 7.88 repaired
+## Earlier run finding — `round-7.87-curriculum-v5` is diagnostic-only; Round 7.88 repaired
 
 `ALPHA_ZERO_MTG_V3.00_20260715_002725_round-7.87-curriculum-v5` was manually
 interrupted at 107,200 steps. It was fidelity-clean, but the fixed curriculum
@@ -167,7 +248,7 @@ advanced much faster than demonstrated ability: goldfish finished 33 decisive
 wins, no losses, and 49 timeouts; race then fell to 13 wins and 265 losses;
 bridge recorded 5 wins and 169 losses. The 25k fixed evaluation consumed about
 937 seconds and returned 1 win, 50 losses, and 13 timeouts, yet that first weak
-checkpoint was still published as `best_model`. The 100k boundary was skipped
+checkpoint was still promoted to `best_model`. The 100k boundary was skipped
 because the single evaluator was backlogged. Critic values also became much
 larger than rollout rewards while fit quality was unstable, and per-card gzip
 statistics produced avoidable small-file I/O.
@@ -180,7 +261,7 @@ run-lifecycle controls:
   mixtures instead of jumping from passive to 100% novice.
 - Full evaluation defaults to every 100k steps. A checkpoint needs a 55%
   qualification score (decisive wins plus half non-timeout draws) before
-  `best_model.zip` is published; best-so-far candidates remain observable.
+  promotion to `best_model.zip`; best-so-far candidates remain observable.
 - Evaluation game logs identify the exact checkpoint timestep and SHA-256.
   Backlog skips and interruption cancellations are durable, pending snapshots
   are cleaned up, and user interruption has its own manifest status and
@@ -189,9 +270,10 @@ run-lifecycle controls:
   aggregate writes for ten games and flush on shutdown. Critic scale telemetry
   now warns on repeated value/reward divergence.
 
-Round 7.89 preserves `combat-v2` for reproducibility and makes `combat-v3` the
-fresh-run default. Its mastery window retains opponent profile, race requires a
-novice floor, and bridge requires separate novice and scripted floors. Stage
+Round 7.89 preserves `combat-v2` for reproducibility and made `combat-v3` that
+round's fresh-run default. Its mastery window retains opponent profile; race
+requires a novice floor, and bridge requires separate novice and scripted
+floors. Stage
 deadlines are reported as forced transitions and bound full-pool entry to about
 375k timesteps, rather than allowing bridge to consume most of the run.
 
@@ -219,7 +301,8 @@ Round 7.87 establishes a new reward/training boundary:
   learned seat, gives all turn limits and safety truncations `-10`, removes
   handler-local action reward from the optimized objective, and records a
   terminal-result sign diagnostic.
-- Periodic evaluation uses one immutable 64-case paired deck/seat/seed suite.
+- Periodic evaluation uses one immutable 64-game suite of 32 seat-swapped
+  deck/seat/seed pairs.
   Promotion is lexicographic: decisive wins, decisive win-minus-loss score,
   fewer timeouts, then shaped return. `evaluations.json` retains every case,
   resolved runtime identity, outcome, checkpoint SHA-256, and promotion
@@ -374,27 +457,48 @@ v3 throughput and memory alongside behavior telemetry.
 
 ## Current execution plan
 
-### Now — train the Round 7.89 active-gated canary
+### Now — verify and run the Round 7.92 pinned canary
 
-1. Freeze the Round 7.89 source and launch a fresh Standard candidate with
-   reward v5, `combat-v3`, eight workers, 100k evaluation cadence, and the
-   balanced fixed 64-case suite. Do not resume the Round 7.88 checkpoint.
-2. Confirm `race` cannot master without its novice floor and `bridge` cannot
-   master without both novice and scripted floors. A deadline transition must
-   be reported as `deadline`, never as mastery.
-3. Confirm stage-duration ceilings place the run in `full_pool` by roughly
-   375k timesteps, leaving most of the one-million-step run for all eight decks.
-4. At each 100k boundary, compare checkpoints only through `evaluations.json`.
-   Require rising decisive wins, balanced deck exposure, zero reward-sign and
-   fidelity failures, controlled policy KL, and a stable critic.
-5. Keep Observation v3, the curriculum thresholds, evaluation cases, and
-   PPO settings unchanged within this canary so the result is attributable.
+1. Keep the now-green delivery gate mandatory for the mixed-pool ratchet,
+   strict fidelity counters, composite-payment transaction, canary validation,
+   and paired qualification interval. Do not launch if that gate regresses.
+2. Launch a fresh Standard candidate with
+   `--canary-config round-7.92 --run-name round-7.92-combat-v5-v1`. The named
+   configuration checks reward `discounted-state-potential-v6`, the full
+   resolved `combat-v5` hash, feature width/device class, 1M timesteps, eight
+   environments, 100k periodic
+   evaluation with 64 games (32 seat-swapped pairs), 50k checkpoints, training
+   seed `20260715`, and evaluation seed `21260715`.
+   Do not resume an older curriculum checkpoint.
+3. Confirm `race` and `bridge` satisfy their full-strength profile floors and
+   reach epsilon zero before mastery. In the terminal `full_pool` stage,
+   interleaved novice games must not starve the qualifying scripted window:
+   epsilon must reach zero by 750,000 trainer timesteps, followed by at least
+   24 full-strength scripted `full_pool` outcomes before the 1M-step run ends.
+   Treat either miss as a failed canary acceptance criterion. A stage deadline
+   transition must be reported as `deadline`.
+4. At each 100k boundary, compare checkpoints through `evaluations.json`.
+   Require balanced case/seat exposure, zero reward-sign failures, zero strict
+   fidelity counters (including effect-continuation failures and lost-spell
+   recoveries), and promotion to `best_model.zip` only when the pair-aware 95%
+   qualification lower bound reaches 55%.
+5. Keep the enumerated named-canary fields unchanged. A mismatch in the checked
+   seed, worker-count, schedule, reward/PPO configuration, resolved curriculum,
+   feature width/device class, or hashed lineage invalidates the comparison.
+   Treat source, runtime-library, or specific-GPU differences recorded in the
+   manifest as audit variables; the selector records but does not constrain
+   them.
 
 ### Next — qualify and calibrate Standard
 
-1. Pass paired-seat scripted qualification: at least the configured 55%
-   qualification score, timeout life leads worth zero, zero fidelity counters, and
-   exact checkpoint/lineage provenance.
+1. Pass an independent held-out paired-seat scripted qualification: the 95%
+   lower confidence bound for decisive wins plus half non-timeout draws must
+   reach the configured 55% threshold, with timeout life leads worth zero,
+   zero fidelity counters, and exact checkpoint/lineage provenance. Do not
+   reuse the training seed or the periodic-evaluation schedule as final
+   qualification evidence. The current Harvest CLI enforces its 55% point
+   score only, so its pass remains necessary but not sufficient until the
+   protocol persists and enforces the same interval.
 2. Freeze the qualified checkpoint as the baseline and promote it into the
    checkpoint league.
 3. Run 3–5 known-matchup deck pairs at Harvest scale and compare simulated
@@ -420,6 +524,12 @@ v3 throughput and memory alongside behavior telemetry.
   treat any schema mismatch or hidden-information leak as a run-stopper.
 - Profile production-sized training and Harvest workloads; land optimizations
   as separately verified changes.
+- Measure cast transaction cost in the pinned canary before changing rollback:
+  a logging-disabled 120-card microbenchmark measured a 15.21 ms median
+  constructor-free checkpoint versus 34.30 ms for the canonical clone (12
+  timed samples). Ordinary casts take one checkpoint and nonmana-cost preflight
+  currently takes about two; optimize only if end-to-end profiling identifies
+  this as a material training bottleneck.
 
 ---
 
@@ -466,6 +576,10 @@ classification is clean.
   finite rewards, mana clearing, and layer idempotence.
 - Failures retain seed, actions, context, state, and a replay command; clean
   seeds leave no artifact.
+- Successful fixed-evaluation games now retain evaluation-only, both-actor
+  action/state traces in atomic gzip sidecars. The dependency-free Stats
+  Workbench joins every case to its game-log provenance and loads one selected
+  trace on demand; historical evaluations are explicitly summary-only.
 - The remaining acceptance gap is matchup calibration, not test
   infrastructure.
 
@@ -498,7 +612,10 @@ Parallel deterministic shards, checkpoint identity, aggregate success-only
 manifests, candidate scoring, paired-seat qualification, and promotion gates
 are implemented. Remaining: production-scale throughput measurement, a
 qualified checkpoint, calibration, builder-side exclusion/confidence logic,
-and automatic candidate feedback.
+and automatic candidate feedback. The unified Stats Workbench now exposes run
+lineage, evaluations, isolated DeckStats scopes, fidelity/support evidence,
+and Harvest/promotion manifests, but it is an operator/debugger rather than the
+missing automated builder consumer.
 
 ### 6. Format program — ◐
 
@@ -515,9 +632,10 @@ and automatic candidate feedback.
 
 ## Known limitations that still matter
 
-Priority 0 simulation integrity has no known open defect. Priority 1 agent
-choice exposure is substantially complete, but combat still has bounded rules
-families rathx er than complete coverage. The following behaviors fail closed or
+The current fix batch has no known unresolved Priority 0 simulation-integrity
+defect. Priority 1 agent choice exposure
+is substantially complete, but combat still has bounded rules
+families rather than complete coverage. The following behaviors fail closed or
 remain fidelity-marked rather than being treated as fully supported.
 
 | Area | Current boundary |
@@ -554,7 +672,8 @@ The project is complete only when all of these are true:
    explicitly excluded/down-weighted according to its support status.
 4. Every value-relevant player decision is exposed to the policy, including
    arbitrary legal multi-blocker damage distributions.
-5. A trained policy passes paired-seat qualification and statistics come from
+5. A trained policy passes independent held-out paired-seat qualification at
+   the configured 95% lower-bound threshold, and statistics come from
    qualified policy/league play rather than the random or scripted baseline.
 6. Known-matchup calibration passes within a documented tolerance.
 7. The format-aware builder consumes version-matched statistics and support
@@ -566,7 +685,8 @@ The project is complete only when all of these are true:
 ## Checkpoint and schema boundaries
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
-mistake. The practical rule is: **start this policy fresh from Round 7.89.**
+mistake. The practical rule is: **start fresh from the Round 7.89 Observation
+v3 boundary using the current Round 7.92 reward/curriculum contract.**
 
 | Minimum round | Incompatible change |
 | --- | --- |
@@ -587,6 +707,7 @@ mistake. The practical rule is: **start this policy fresh from Round 7.89.**
 | 7.89 | Observation v3 semantic corrections, profile-specific mastery gates, bounded full-pool entry, balanced evaluation exposure, and the renewed combat audit |
 | 7.90 | Analytics memory-redundancy refactor, validated behavior-neutral against the 7.89 canary trajectory |
 | 7.91 | Annealed opponent handicap (`combat-v4`), stage turn limits, graded turn-limit reward v6, doubled damage-progress potential, and the paired-seat observation audit |
+| 7.92 | `combat-v5` (goldfish 25 turns, full-pool handicap ramp), mixed-profile-safe terminal ratchet windows, strict recovery fidelity counters, pinned canary seeds/configuration, and pair-aware lower-bound qualification |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing
@@ -644,6 +765,21 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
   fail-closed, separated and snapshotted damage steps, preserved combat state,
   unified source events and lifelink, opened overflow combat choices, and
   removed the timeout life-lead incentive with reward contract v4.
+- **7.87–7.90:** corrected terminal perspective with reward v5, introduced
+  deterministic mastery gates and asynchronous fixed evaluation, moved to
+  Observation v3 with semantic/profile-floor corrections, and validated the
+  behavior-neutral analytics-memory refactor.
+- **7.91:** introduced annealed active opponents, graded reward v6, explicit
+  stage turn limits, and a scoped paired-seat observation audit; three runs
+  demonstrated faster curriculum climbing but a concentrated matchup plateau.
+- **7.92:** introduced `combat-v5`, repaired the full-pool qualifying-outcome
+  ratchet, expanded strict recovery fidelity telemetry, pinned independent
+  train/evaluation seeds in a named canary contract, and changed periodic
+  checkpoint qualification from a point estimate to a pair-aware 95%
+  lower-bound gate. The delivery suite is green at 428 unit tests, 404
+  scenarios, 9/9 runtime smoke, 13/13 training smoke, and 8/8 default fuzz
+  seeds plus the phase-boundary check. The held-out Harvest protocol still needs the same
+  interval enforcement before its point-score pass is sufficient evidence.
 
 ### Institutional lessons retained from the silent-bug catalog
 

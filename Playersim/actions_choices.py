@@ -1181,33 +1181,72 @@ class ChoiceHandlersMixin:
             source_id = ctx.get("source_id")
             controller = ctx.get("controller")
             continuation = ctx.get('effect_continuation')
+            has_continuation = (
+                isinstance(continuation, dict) and bool(continuation))
+            failure_details = None
+            if has_continuation:
+                continuation.setdefault('source_id', source_id)
+                continuation.setdefault(
+                    'controller_id', gs._effect_controller_id(controller))
+                failure_details = continuation.setdefault(
+                    'failure_details', [])
+                if not isinstance(failure_details, list):
+                    failure_details = []
+                    continuation['failure_details'] = failure_details
             gs.targeting_context = None
             restore_phase(controller)
             try:
                 gs.notify_targets_committed(source_id, controller, categorized_targets)
                 result = pending_effect._apply_effect(
                     gs, source_id, controller, categorized_targets)
-            except NotImplementedError:
+            except NotImplementedError as exc:
                 logging.error(
                     f"Effect application not implemented for: {pending_effect.effect_text}")
+                if failure_details is not None:
+                    failure_details.append(gs._effect_fidelity_summary(
+                        pending_effect, error=exc))
+                    continuation['success'] = False
+                    gs._record_effect_continuation_result(
+                        continuation, False, failure_details)
                 return -0.15, False
             except Exception as exc:
                 logging.exception(
                     f"Error resuming targeted effect '{pending_effect.effect_text}': {exc}")
+                if failure_details is not None:
+                    failure_details.append(gs._effect_fidelity_summary(
+                        pending_effect, error=exc))
+                    continuation['success'] = False
+                    gs._record_effect_continuation_result(
+                        continuation, False, failure_details)
                 return -0.15, False
             if result is None:
                 logging.warning(
                     f"Effect application returned None for: {pending_effect.effect_text}")
+                if failure_details is not None:
+                    detail = gs._effect_fidelity_summary(pending_effect)
+                    detail['error_type'] = 'NoneResult'
+                    detail['error_message'] = (
+                        'Targeted effect application returned None.')
+                    failure_details.append(detail)
+                    continuation['success'] = False
+                    gs._record_effect_continuation_result(
+                        continuation, False, failure_details)
                 return -0.15, False
-            if continuation:
+            if has_continuation:
+                if not result:
+                    failure_details.append(gs._effect_fidelity_summary(
+                        pending_effect))
                 continuation['success'] = bool(result) and bool(
                     continuation.get('success', True))
                 next_choice = getattr(gs, 'choice_context', None)
                 if (next_choice
                         and next_choice.get('type') in gs._ASYNC_EFFECT_CHOICE_TYPES):
                     next_choice['effect_continuation'] = continuation
+                    gs._record_effect_continuation_result(
+                        continuation, continuation['success'],
+                        failure_details, pending=True)
                     return 0.05, True
-                gs._run_effect_sequence(
+                success, pending = gs._run_effect_sequence(
                     continuation.get('effects', []),
                     continuation.get('source_id'),
                     gs._effect_controller_from_id(
@@ -1215,7 +1254,11 @@ class ChoiceHandlersMixin:
                     continuation.get('targets'),
                     continuation.get('resolution_context', {}),
                     finalizer=continuation.get('finalizer'),
-                    initial_success=continuation.get('success', True))
+                    initial_success=continuation.get('success', True),
+                    failure_details=failure_details)
+                gs._record_effect_continuation_result(
+                    continuation, success, failure_details,
+                    pending=pending)
                 return 0.05, True
             return 0.05, bool(result)
 
@@ -2057,6 +2100,14 @@ class ChoiceHandlersMixin:
                     ctx.get('followup_text', ''),
                     source_name=getattr(source, 'name', None))
                 continuation = ctx.get('effect_continuation') or {}
+                continuation.setdefault('source_id', source_id)
+                continuation.setdefault(
+                    'controller_id', gs._effect_controller_id(player))
+                failure_details = continuation.setdefault(
+                    'failure_details', [])
+                if not isinstance(failure_details, list):
+                    failure_details = []
+                    continuation['failure_details'] = failure_details
                 effects = list(followup) + list(
                     continuation.get('effects', []))
                 targets = continuation.get(
@@ -2069,7 +2120,11 @@ class ChoiceHandlersMixin:
                     effects, source_id, player, targets,
                     resolution_context,
                     finalizer=continuation.get('finalizer'),
-                    initial_success=continuation.get('success', True))
+                    initial_success=continuation.get('success', True),
+                    failure_details=failure_details)
+                gs._record_effect_continuation_result(
+                    continuation, success, failure_details,
+                    pending=pending)
                 if not pending:
                     gs.priority_player = gs._get_active_player()
                     gs.priority_pass_count = 0
@@ -2088,6 +2143,14 @@ class ChoiceHandlersMixin:
                     ctx.get('followup_text', ''),
                     source_name=getattr(source, 'name', None))
                 continuation = ctx.get('effect_continuation') or {}
+                continuation.setdefault('source_id', source_id)
+                continuation.setdefault(
+                    'controller_id', gs._effect_controller_id(player))
+                failure_details = continuation.setdefault(
+                    'failure_details', [])
+                if not isinstance(failure_details, list):
+                    failure_details = []
+                    continuation['failure_details'] = failure_details
                 effects = list(followup) + list(
                     continuation.get('effects', []))
                 targets = continuation.get(
@@ -2100,7 +2163,11 @@ class ChoiceHandlersMixin:
                     effects, source_id, player, targets,
                     resolution_context,
                     finalizer=continuation.get('finalizer'),
-                    initial_success=continuation.get('success', True))
+                    initial_success=continuation.get('success', True),
+                    failure_details=failure_details)
+                gs._record_effect_continuation_result(
+                    continuation, success, failure_details,
+                    pending=pending)
                 if not pending:
                     gs.priority_player = gs._get_active_player()
                     gs.priority_pass_count = 0

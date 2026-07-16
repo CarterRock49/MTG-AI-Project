@@ -1,6 +1,8 @@
 import os
 import json
+import gzip
 import hashlib
+import math
 import queue
 import re
 import platform
@@ -16,6 +18,7 @@ import argparse
 import numpy as np
 import traceback
 import warnings
+from copy import deepcopy
 from collections import deque
 from datetime import datetime, timezone
 from importlib import metadata as importlib_metadata
@@ -950,6 +953,73 @@ TENSORBOARD_DIR = os.path.join(BASE_DIR, "tensorboard_logs")
 
 TRAINING_MANIFEST_SCHEMA_VERSION = 1
 EVALUATION_SEED_OFFSET = 1_000_000
+DEFAULT_TRAINING_SEED = 20_260_715
+DEFAULT_EVALUATION_SEED = 21_260_715
+DEFAULT_TRAINING_ENVIRONMENTS = 8
+
+# A named canary is an experiment contract, not merely a convenient collection
+# of defaults.  Supplying --canary-config makes launch fail closed if a CLI,
+# lineage, reward, curriculum, or evaluation-suite input drifts.
+ROUND_7_92_CANARY = {
+    "id": "round-7.92",
+    "cli": {
+        "timesteps": 1_000_000,
+        "eval_freq": 100_000,
+        "eval_episodes": 64,
+        "checkpoint_freq": 50_000,
+        "learning_rate": 2e-4,
+        "batch_size": 256,
+        "n_steps": 1024,
+        "n_envs": DEFAULT_TRAINING_ENVIRONMENTS,
+        "seed": DEFAULT_TRAINING_SEED,
+        "eval_seed": DEFAULT_EVALUATION_SEED,
+        "curriculum": "combat-v5",
+        "format": DEFAULT_FORMAT_NAME,
+        "cpu_only": False,
+    },
+    "training_config": {
+        "learning_rate": 2e-4,
+        "n_steps": 1024,
+        "batch_size": 256,
+        "reward_contract_version": "discounted-state-potential-v6",
+        "gamma": 0.999,
+        "gae_lambda": 0.98,
+        "clip_range": 0.2,
+        "clip_range_vf": 0.2,
+        "ent_coef": 0.01,
+        "vf_coef": 0.25,
+        "target_kl": 0.02,
+        "net_arch": {
+            "pi": [512, 256, 128],
+            "vf": [512, 256, 128],
+        },
+        "n_epochs": 5,
+        "max_grad_norm": 0.5,
+        "activation_fn": "torch.nn.modules.activation.ReLU",
+        "action_reward_scale": 0.0,
+        "state_potential_scale": 0.4,
+    },
+    "lineage": {
+        "observation_schema_version": 3,
+        "observation_schema_sha256": (
+            "6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137"),
+        "card_registry_sha256": (
+            "c1c7248db35957a43b0068c1c790dce2e615f0b349eb15967fb64001ef2351bb"),
+        "feature_schema_sha256": (
+            "4a0bf0357ae8f9b9b647e4cffa81ef512a36bfcc676fc63b68f7b9a58b99f2fb"),
+        "corpus_sha256": (
+            "26fc8d70005e25f43bc2f6e2e557274ee7b0c752d5e6e9addf7a104aba7cd89e"),
+        "evaluation_schedule_sha256": (
+            "f5aa91235bade4a49db923577542032dfcb04a2db2f6fae180f6083072755763"),
+    },
+    "runtime": {
+        "curriculum_sha256": (
+            "10a22d4a539a017673e484fc5fcfd3a2ff9f70a1892bcfb8f0bf06948f77f0bb"),
+        "feature_output_dim": 1024,
+        "selected_device": "cuda",
+    },
+}
+CANARY_CONFIGS = {ROUND_7_92_CANARY["id"]: ROUND_7_92_CANARY}
 
 
 def utc_timestamp():
@@ -995,6 +1065,19 @@ def write_bytes_atomic(path, payload):
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary_path, path)
+
+
+def write_gzip_json_atomic(path, payload):
+    """Atomically publish deterministic, compact gzip JSON."""
+    serialized = json.dumps(
+        json_safe(payload), ensure_ascii=False, allow_nan=False,
+        separators=(",", ":"), sort_keys=True,
+    ).encode("utf-8") + b"\n"
+    # A zero timestamp keeps the gzip header stable across repeated writes of
+    # the same evaluation payload.  Sidecar identity hashes the exact bytes
+    # consumed by the viewer, not a second uncompressed representation.
+    compressed = gzip.compress(serialized, compresslevel=6, mtime=0)
+    write_bytes_atomic(path, compressed)
 
 
 def sha256_file(path):
@@ -1107,10 +1190,101 @@ def build_fixed_evaluation_schedule(decks, n_eval_episodes, seed):
 
 def evaluation_schedule_sha256(schedule):
     """Hash a fixed evaluation schedule independent of JSON whitespace."""
+    return configuration_sha256(list(schedule))
+
+
+def configuration_sha256(value):
+    """Hash a resolved configuration tree independent of JSON whitespace."""
     payload = json.dumps(
-        json_safe(list(schedule)), sort_keys=True,
+        json_safe(value), sort_keys=True,
         separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
+
+
+def _configuration_values_match(actual, expected):
+    if isinstance(expected, float):
+        try:
+            return math.isclose(
+                float(actual), expected, rel_tol=0.0, abs_tol=1e-12)
+        except (TypeError, ValueError, OverflowError):
+            return False
+    return actual == expected
+
+
+def validate_canary_cli(args):
+    """Fail closed when a named experiment's requested inputs drift."""
+    canary_id = getattr(args, "canary_config", None)
+    if not canary_id:
+        return None
+    config = CANARY_CONFIGS.get(str(canary_id))
+    if config is None:
+        raise ValueError(f"Unknown canary configuration: {canary_id}")
+    mismatches = []
+    for key, expected in config["cli"].items():
+        actual = getattr(args, key, None)
+        if not _configuration_values_match(actual, expected):
+            mismatches.append(f"{key}={actual!r} (expected {expected!r})")
+    if getattr(args, "resume", None):
+        mismatches.append("resume must be unset")
+    if getattr(args, "optimize_hp", False):
+        mismatches.append("optimize_hp must be false")
+    if mismatches:
+        raise ValueError(
+            f"Canary {canary_id} launch contract mismatch: "
+            + "; ".join(mismatches))
+    return deepcopy(config)
+
+
+def validate_canary_runtime(config, *, lineage, training_config, curriculum,
+                             schedule_sha256, num_envs, selected_device):
+    """Validate resolved code/data identities after the corpus is loaded."""
+    if config is None:
+        return
+    expected_training = json_safe(config["training_config"])
+    expected_lineage = config["lineage"]
+    expected_runtime = config["runtime"]
+    actual_training = json_safe(training_config)
+    actual = dict(actual_training)
+    actual.update({
+        "observation_schema_version":
+            AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION,
+        "observation_schema_sha256":
+            AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256,
+        "card_registry_sha256":
+            (lineage.get("card_registry") or {}).get("sha256"),
+        "feature_schema_sha256":
+            (lineage.get("feature_schema") or {}).get("sha256"),
+        "corpus_sha256": (lineage.get("corpus") or {}).get("sha256"),
+        "evaluation_schedule_sha256": schedule_sha256,
+        "curriculum": (curriculum or {}).get("id"),
+        "curriculum_sha256": configuration_sha256(curriculum),
+        "num_envs": int(num_envs),
+        "feature_output_dim": FEATURE_OUTPUT_DIM,
+        "selected_device": str(selected_device),
+    })
+    expected = {
+        **expected_training,
+        **expected_lineage,
+        **expected_runtime,
+        "curriculum": config["cli"]["curriculum"],
+        "num_envs": config["cli"]["n_envs"],
+    }
+    mismatches = [
+        f"{key}={actual.get(key)!r} (expected {value!r})"
+        for key, value in expected.items()
+        if not _configuration_values_match(actual.get(key), value)
+    ]
+    missing_training = sorted(set(expected_training) - set(actual_training))
+    unexpected_training = sorted(set(actual_training) - set(expected_training))
+    if missing_training:
+        mismatches.append(f"training_config missing keys={missing_training!r}")
+    if unexpected_training:
+        mismatches.append(
+            f"training_config unexpected keys={unexpected_training!r}")
+    if mismatches:
+        raise RuntimeError(
+            f"Canary {config['id']} resolved contract mismatch: "
+            + "; ".join(mismatches))
 
 
 def git_provenance():
@@ -1447,6 +1621,7 @@ def evaluation_history_summary(run_id):
                     history.get("fixed_schedule") or ()),
                 "minimum_qualification_score": history.get(
                     "minimum_qualification_score"),
+                "qualification_rule": history.get("qualification_rule"),
                 "skipped_evaluations": len(
                     history.get("skipped_evaluations") or ()),
                 "cancelled_evaluations": len(
@@ -1486,8 +1661,21 @@ def evaluation_history_summary(run_id):
             "qualification_scores": [
                 float(item.get("qualification_score", 0.0))
                 for item in evaluations],
+            "qualification_lower_bounds": [
+                float((item.get("qualification_interval") or
+                       (item.get("summary") or {}).get(
+                           "qualification_interval") or {}).get(
+                               "lower_bound", 0.0))
+                for item in evaluations],
+            "qualification_upper_bounds": [
+                float((item.get("qualification_interval") or
+                       (item.get("summary") or {}).get(
+                           "qualification_interval") or {}).get(
+                               "upper_bound", 1.0))
+                for item in evaluations],
             "minimum_qualification_score": history.get(
                 "minimum_qualification_score"),
+            "qualification_rule": history.get("qualification_rule"),
             "qualified_evaluation_points": len(qualified),
             "skipped_evaluations": len(
                 history.get("skipped_evaluations") or ()),
@@ -1537,10 +1725,38 @@ def training_fidelity_failure(info):
     if game_result.startswith("error") or game_result in {
             "invalid_limit", "aborted"}:
         severe_flags["game_result"] = game_result
-    if not severe_flags:
+
+    def has_issue(value):
+        if value is None:
+            return False
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float, np.number)):
+            try:
+                return not np.isfinite(value) or float(value) != 0.0
+            except (TypeError, ValueError, OverflowError):
+                return True
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, dict):
+            return any(has_issue(item) for item in value.values())
+        if isinstance(value, (list, tuple, set)):
+            return any(has_issue(item) for item in value)
+        return bool(value)
+
+    fidelity = info.get("fidelity")
+    fidelity_issues = {
+        str(key): value for key, value in fidelity.items()
+        if has_issue(value)
+    } if isinstance(fidelity, dict) else {}
+    if not severe_flags and not fidelity_issues:
         return None
-    return (info.get("error_message") or info.get("invalid_action_reason")
-            or severe_flags)
+    return {
+        "message": (info.get("error_message")
+                    or info.get("invalid_action_reason")),
+        "engine": severe_flags,
+        "fidelity": fidelity_issues,
+    }
 
 
 def rollout_signature(observation, masks, actions, env_index):
@@ -2550,6 +2766,11 @@ class CurriculumProgressCallback(BaseCallback):
         self._stage_selected_timestep = 0
         self._stage_entry_timestep = 0
         self._recent_outcomes = deque()
+        # Handicap evidence has its own profile-filtered window.  Sharing the
+        # aggregate mastery deque can make a ratchet impossible when a stage's
+        # profile bag also contains unhandicapped opponents (for example,
+        # combat-v5 full_pool is eight scripted games and two novice games).
+        self._handicap_outcomes = deque()
         self._transition_history = []
         self._pending_activation_workers = set()
         self._stale_stage_episodes = 0
@@ -2573,9 +2794,21 @@ class CurriculumProgressCallback(BaseCallback):
             else int(stage_index)
         if selected is None:
             selected = 0
-        gate = self.curriculum["stages"][selected].get(
-            "advance_when") or {}
-        return max(1, int(gate.get("window_episodes", 1)))
+        stage = self.curriculum["stages"][selected]
+        gate = stage.get("advance_when") or {}
+        # A final stage has no mastery gate.  Retain an aggregate diagnostic
+        # window at least as large as its separate handicap-evidence window.
+        handicap = stage.get("handicap") or {}
+        return max(1, int(gate.get("window_episodes", 1)),
+                   int(handicap.get("window_episodes", 0)))
+
+    def _handicap_window_size(self, stage_index=None):
+        selected = self._active_stage_index if stage_index is None \
+            else int(stage_index)
+        if selected is None:
+            selected = 0
+        handicap = self.curriculum["stages"][selected].get("handicap") or {}
+        return max(1, int(handicap.get("window_episodes", 1)))
 
     def _persist_mastery_state(self):
         if self.progression != "mastery":
@@ -2589,6 +2822,7 @@ class CurriculumProgressCallback(BaseCallback):
                 None if self._stage_entry_timestep is None
                 else int(self._stage_entry_timestep)),
             "recent_outcomes": list(self._recent_outcomes),
+            "handicap_outcomes": list(self._handicap_outcomes),
             "transition_history": list(self._transition_history),
             "pending_activation_workers": sorted(
                 self._pending_activation_workers),
@@ -2623,6 +2857,8 @@ class CurriculumProgressCallback(BaseCallback):
             self._stage_selected_timestep = int(self.num_timesteps)
             self._stage_entry_timestep = int(self.num_timesteps)
             self._recent_outcomes = deque(maxlen=self._window_size(0))
+            self._handicap_outcomes = deque(
+                maxlen=self._handicap_window_size(0))
             self._transition_history = []
             self._pending_activation_workers = set()
             self._stale_stage_episodes = 0
@@ -2645,6 +2881,23 @@ class CurriculumProgressCallback(BaseCallback):
             [self._normalize_outcome_record(record) for record in
              list(state.get("recent_outcomes") or ())],
             maxlen=self._window_size(self._active_stage_index))
+        restored_handicap = state.get("handicap_epsilon")
+        self._handicap_epsilon = (
+            None if restored_handicap is None else float(restored_handicap))
+        if "handicap_outcomes" in state:
+            handicap_records = list(state.get("handicap_outcomes") or ())
+        else:
+            # Backward-compatible migration: older checkpoints only persisted
+            # the aggregate window, so retain any qualifying evidence still
+            # present there.
+            handicap_records = list(self._recent_outcomes)
+        normalized_handicap_records = [
+            self._normalize_outcome_record(record)
+            for record in handicap_records]
+        self._handicap_outcomes = deque(
+            [record for record in normalized_handicap_records
+             if self._is_current_handicap_outcome(record)],
+            maxlen=self._handicap_window_size(self._active_stage_index))
         self._transition_history = list(
             state.get("transition_history") or ())
         self._pending_activation_workers = {
@@ -2652,9 +2905,6 @@ class CurriculumProgressCallback(BaseCallback):
             state.get("pending_activation_workers") or ()}
         self._stale_stage_episodes = max(
             0, int(state.get("stale_stage_episodes", 0)))
-        restored_handicap = state.get("handicap_epsilon")
-        self._handicap_epsilon = (
-            None if restored_handicap is None else float(restored_handicap))
 
     def _training_environment_count(self):
         count = getattr(self.training_env, "num_envs", None)
@@ -2716,13 +2966,16 @@ class CurriculumProgressCallback(BaseCallback):
             else:
                 outcome = canonical_evaluation_game_result(
                     info.get("game_result"))
-            self._recent_outcomes.append({
+            record = {
                 "outcome": outcome,
                 "opponent_profile": str(
                     info.get("opponent_profile") or "unknown"),
                 "opponent_handicap": float(
                     info.get("opponent_handicap") or 0.0),
-            })
+            }
+            self._recent_outcomes.append(record)
+            if self._is_current_handicap_outcome(record):
+                self._handicap_outcomes.append(record)
             changed = True
         if (self._stage_entry_timestep is None
                 and not self._pending_activation_workers):
@@ -2745,6 +2998,17 @@ class CurriculumProgressCallback(BaseCallback):
             return None
         return self.curriculum["stages"][selected].get("handicap")
 
+    def _is_current_handicap_outcome(self, record):
+        config = self._stage_handicap()
+        if config is None or self._handicap_epsilon is None:
+            return False
+        current = float(self._handicap_epsilon)
+        return (
+            current > 0.0
+            and record["opponent_profile"] in set(config["profiles"])
+            and float(record.get("opponent_handicap", 0.0)) == current
+        )
+
     def _handicap_rates(self):
         """Rolling outcomes against the handicapped profiles at the live
         epsilon; records from earlier ratchet levels no longer count."""
@@ -2754,7 +3018,7 @@ class CurriculumProgressCallback(BaseCallback):
         current = float(self._handicap_epsilon or 0.0)
         profiles = set(config["profiles"])
         records = [
-            record for record in self._recent_outcomes
+            record for record in self._handicap_outcomes
             if record["opponent_profile"] in profiles
             and float(record.get("opponent_handicap", 0.0)) == current]
         window = int(config["window_episodes"])
@@ -2794,6 +3058,9 @@ class CurriculumProgressCallback(BaseCallback):
             return
         previous = float(self._handicap_epsilon)
         self._handicap_epsilon = max(0.0, round(previous - rates["step"], 6))
+        # Evidence is specific to one epsilon; the next step must earn a fresh
+        # qualifying window rather than wait for stale records to age out.
+        self._handicap_outcomes.clear()
         self.training_env.env_method(
             "set_opponent_handicap", float(self._handicap_epsilon),
             rates["profiles"])
@@ -2990,6 +3257,9 @@ class CurriculumProgressCallback(BaseCallback):
             self._stale_stage_episodes = 0
             self._recent_outcomes = deque(
                 maxlen=self._window_size(self._active_stage_index))
+            self._handicap_outcomes = deque(
+                maxlen=self._handicap_window_size(
+                    self._active_stage_index))
             # Each stage anneals from its own configured start.
             self._handicap_epsilon = None
             self._persist_mastery_state()
@@ -3073,6 +3343,142 @@ def evaluation_is_timeout(terminal_reason):
         "turn_limit" in reason or reason.endswith("_timeout"))
 
 
+def _student_t_critical_95(degrees_of_freedom):
+    """Return the two-sided 95% Student-t critical value without SciPy."""
+    df = int(degrees_of_freedom)
+    if df <= 0:
+        raise ValueError("degrees_of_freedom must be positive")
+    # Exact table values where the small-sample correction matters most.
+    table = (
+        12.706, 4.303, 3.182, 2.776, 2.571, 2.447, 2.365, 2.306,
+        2.262, 2.228, 2.201, 2.179, 2.160, 2.145, 2.131, 2.120,
+        2.110, 2.101, 2.093, 2.086, 2.080, 2.074, 2.069, 2.064,
+        2.060, 2.056, 2.052, 2.048, 2.045, 2.042,
+    )
+    if df <= len(table):
+        return table[df - 1]
+    # Cornish-Fisher expansion is accurate to better than the precision used
+    # in reports for the production 32-pair suite and converges to Normal.
+    z = 1.959963984540054
+    inverse_df = 1.0 / df
+    return (
+        z
+        + (z**3 + z) * inverse_df / 4.0
+        + (5.0 * z**5 + 16.0 * z**3 + 3.0 * z)
+        * inverse_df**2 / 96.0
+        + (3.0 * z**7 + 19.0 * z**5 + 17.0 * z**3 - 15.0 * z)
+        * inverse_df**3 / 384.0
+    )
+
+
+def _qualification_points(episode):
+    if episode.get("timeout"):
+        return 0.0
+    result = episode.get("game_result")
+    if result == "win":
+        return 1.0
+    if result == "draw":
+        return 0.5
+    return 0.0
+
+
+def _paired_qualification_units(episodes):
+    """Return adjacent paired-seat unit scores, or None if not fully paired."""
+    if len(episodes) % 2:
+        return None
+    units = []
+    for index in range(0, len(episodes), 2):
+        first = episodes[index]
+        second = episodes[index + 1]
+        first_case = first.get("case")
+        second_case = second.get("case")
+        if not isinstance(first_case, dict) or not isinstance(
+                second_case, dict):
+            return None
+        is_pair = (
+            first_case.get("seed") is not None
+            and first_case.get("seed") == second_case.get("seed")
+            and first_case.get("agent_is_p1") is True
+            and second_case.get("agent_is_p1") is False
+            and bool(first_case.get("p1_deck"))
+            and bool(first_case.get("p2_deck"))
+            and first_case.get("p1_deck") != first_case.get("p2_deck")
+            and first_case.get("p1_deck") == second_case.get("p2_deck")
+            and first_case.get("p2_deck") == second_case.get("p1_deck")
+            and bool(first_case.get("opponent_profile"))
+            and first_case.get("opponent_profile")
+            == second_case.get("opponent_profile")
+        )
+        if not is_pair:
+            return None
+        units.append(
+            (_qualification_points(first) + _qualification_points(second))
+            / 2.0)
+    return units
+
+
+def qualification_score_interval(episodes):
+    """Conservative 95% interval that respects paired-seat case clustering.
+
+    The Wilson component keeps all-win/all-loss suites from reporting a zero
+    uncertainty interval and supports the half point awarded to a real draw.
+    When every adjacent case is a seat-swapped pair, a Student-t interval over
+    pair means is added and the conservative envelope is returned.
+    """
+    count = len(episodes)
+    if count <= 0:
+        raise ValueError("qualification interval requires at least one episode")
+    total_points = sum(_qualification_points(item) for item in episodes)
+    score = total_points / count
+    z = 1.959963984540054
+    z_squared = z * z
+    denominator = 1.0 + z_squared / count
+    wilson_center = (score + z_squared / (2.0 * count)) / denominator
+    wilson_half_width = (
+        z * math.sqrt(
+            score * (1.0 - score) / count
+            + z_squared / (4.0 * count * count))
+        / denominator
+    )
+    wilson_lower = max(0.0, wilson_center - wilson_half_width)
+    wilson_upper = min(1.0, wilson_center + wilson_half_width)
+    interval = {
+        "method": "wilson-score",
+        "confidence": 0.95,
+        "lower_bound": float(wilson_lower),
+        "upper_bound": float(wilson_upper),
+        "episode_units": int(count),
+        "paired_units": 0,
+        "wilson_lower_bound": float(wilson_lower),
+        "wilson_upper_bound": float(wilson_upper),
+    }
+
+    paired_units = _paired_qualification_units(episodes)
+    if paired_units is None:
+        return interval
+    interval["paired_units"] = int(len(paired_units))
+    if len(paired_units) < 2:
+        return interval
+    pair_count = len(paired_units)
+    pair_mean = float(np.mean(paired_units))
+    pair_std = float(np.std(paired_units, ddof=1))
+    pair_half_width = (
+        _student_t_critical_95(pair_count - 1)
+        * pair_std / math.sqrt(pair_count)
+    )
+    paired_lower = max(0.0, pair_mean - pair_half_width)
+    paired_upper = min(1.0, pair_mean + pair_half_width)
+    interval.update({
+        "method": "wilson-score+paired-t-envelope",
+        "lower_bound": float(min(wilson_lower, paired_lower)),
+        "upper_bound": float(max(wilson_upper, paired_upper)),
+        "paired_units": int(pair_count),
+        "paired_lower_bound": float(paired_lower),
+        "paired_upper_bound": float(paired_upper),
+    })
+    return interval
+
+
 def summarize_evaluation_episodes(episodes):
     """Validate per-case outcomes and derive the checkpoint promotion score."""
     if not episodes:
@@ -3135,6 +3541,8 @@ def summarize_evaluation_episodes(episodes):
         "qualification_score": float(
             (decisive_wins + 0.5 * non_timeout_draws) / len(normalized)),
     }
+    summary["qualification_interval"] = qualification_score_interval(
+        normalized)
     # Fixed cases make counts comparable across checkpoints.  Shaped reward is
     # deliberately last: a timeout-heavy policy can never become "best" merely
     # because it accumulated a favorable life-lead shaping return.
@@ -3160,6 +3568,126 @@ def install_fixed_evaluation_schedule(eval_env, schedule):
         raise RuntimeError(
             "Evaluation environments must implement reset_episode_schedule() "
             "and set_episode_schedule(cases)") from error
+
+
+def _capture_evaluation_terminal_info(info):
+    """Extract the process-safe terminal fields retained by evaluation."""
+    info = info or {}
+    captured = {
+        "raw_game_result": info.get("game_result"),
+        "terminal_reason": info.get("terminal_reason"),
+        "resolved_case": {
+            "seed": info.get("episode_seed"),
+            "p1_deck": info.get("p1_deck"),
+            "p2_deck": info.get("p2_deck"),
+            "agent_is_p1": info.get("agent_is_p1"),
+            "opponent_profile": info.get("opponent_profile"),
+        },
+    }
+    debug = info.get("evaluation_debug")
+    if debug is not None:
+        if not isinstance(debug, dict):
+            raise RuntimeError(
+                "Evaluation terminal debug payload must be an object")
+        captured["debug"] = json_safe(debug)
+    return captured
+
+
+def _build_evaluation_episode(case_index, case, outcome, reward, length):
+    """Join one fixed case, terminal record, and evaluate_policy result."""
+    episode = {
+        "case_index": int(case_index),
+        "case": dict(case),
+        "resolved_case": dict(outcome["resolved_case"]),
+        "raw_game_result": outcome["raw_game_result"],
+        "terminal_reason": outcome["terminal_reason"],
+        "reward": float(reward),
+        "length": int(length),
+    }
+    # Optional and additive: histories produced before evaluation replay
+    # capture, plus synthetic callback tests, remain valid without this field.
+    if outcome.get("debug") is not None:
+        episode["debug"] = deepcopy(outcome["debug"])
+    return episode
+
+
+def _persist_evaluation_debug_sidecars(
+        episodes, *, timestep, evaluation_history_path):
+    """Externalize inline per-game debug data before history publication.
+
+    Worker results intentionally retain inline ``debug`` for process-boundary
+    compatibility.  Only the callback that owns ``evaluations.json`` knows its
+    final directory, so it atomically writes the heavy payloads and substitutes
+    small, relative references there.
+    """
+    normalized = [dict(episode) for episode in episodes]
+    if not any(episode.get("debug") is not None for episode in normalized):
+        return normalized
+    if not evaluation_history_path:
+        raise RuntimeError(
+            "Evaluation debug sidecars require an evaluation history path")
+    try:
+        safe_timestep = int(timestep)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise RuntimeError(
+            f"Invalid evaluation timestep for debug sidecars: {timestep!r}") \
+            from error
+    if safe_timestep < 0:
+        raise RuntimeError(
+            "Evaluation timestep for debug sidecars cannot be negative")
+
+    history_directory = os.path.dirname(os.path.abspath(
+        os.fspath(evaluation_history_path)))
+    seen_case_indices = set()
+    externalized = []
+    for ordinal, episode in enumerate(normalized):
+        item = dict(episode)
+        debug = item.pop("debug", None)
+        if debug is None:
+            externalized.append(item)
+            continue
+        if not isinstance(debug, dict):
+            raise RuntimeError(
+                f"Evaluation case {ordinal} debug payload must be an object")
+        try:
+            case_index = int(item.get("case_index", ordinal))
+        except (TypeError, ValueError, OverflowError) as error:
+            raise RuntimeError(
+                f"Invalid evaluation case index for debug sidecar: "
+                f"{item.get('case_index')!r}") from error
+        if case_index < 0 or case_index in seen_case_indices:
+            raise RuntimeError(
+                "Evaluation debug sidecars require unique non-negative case "
+                f"indices; received {case_index}")
+        seen_case_indices.add(case_index)
+
+        relative_path = os.path.join(
+            "games", str(safe_timestep),
+            f"case_{case_index:03d}.json.gz")
+        sidecar_path = os.path.abspath(os.path.join(
+            history_directory, relative_path))
+        if os.path.commonpath((history_directory, sidecar_path)) \
+                != history_directory:
+            raise RuntimeError(
+                "Evaluation debug sidecar resolved outside history directory")
+        write_gzip_json_atomic(sidecar_path, debug)
+
+        trace = debug.get("trace")
+        replay = debug.get("replay")
+        replay_actions = replay.get("actions") \
+            if isinstance(replay, dict) else None
+        item.update({
+            "debug_path": os.path.relpath(
+                sidecar_path, history_directory).replace(os.sep, "/"),
+            "debug_sha256": sha256_file(sidecar_path),
+            "debug_size_bytes": os.path.getsize(sidecar_path),
+            "trace_event_count": len(trace)
+            if isinstance(trace, (list, tuple)) else 0,
+            "replay_action_count": len(replay_actions)
+            if isinstance(replay_actions, (list, tuple)) else 0,
+        })
+        externalized.append(item)
+    return externalized
 
 
 def _async_evaluation_worker(request_queue, result_queue, env_factory,
@@ -3206,18 +3734,8 @@ def _async_evaluation_worker(request_queue, result_queue, env_factory,
             def capture_terminal_info(callback_locals, _callback_globals):
                 if not bool(callback_locals.get("done")):
                     return
-                info = callback_locals.get("info") or {}
-                terminal_infos.append({
-                    "raw_game_result": info.get("game_result"),
-                    "terminal_reason": info.get("terminal_reason"),
-                    "resolved_case": {
-                        "seed": info.get("episode_seed"),
-                        "p1_deck": info.get("p1_deck"),
-                        "p2_deck": info.get("p2_deck"),
-                        "agent_is_p1": info.get("agent_is_p1"),
-                        "opponent_profile": info.get("opponent_profile"),
-                    },
-                })
+                terminal_infos.append(_capture_evaluation_terminal_info(
+                    callback_locals.get("info")))
 
             episode_rewards, episode_lengths = evaluate_policy(
                 model, eval_env, n_eval_episodes=n_eval_episodes,
@@ -3244,15 +3762,8 @@ def _async_evaluation_worker(request_queue, result_queue, env_factory,
                         "Fixed evaluation case did not resolve as requested: "
                         f"index={case_index} expected={expected_case} "
                         f"resolved={resolved_case}")
-                episodes.append({
-                    "case_index": case_index,
-                    "case": dict(case),
-                    "resolved_case": dict(resolved_case),
-                    "raw_game_result": outcome["raw_game_result"],
-                    "terminal_reason": outcome["terminal_reason"],
-                    "reward": float(reward),
-                    "length": int(length),
-                })
+                episodes.append(_build_evaluation_episode(
+                    case_index, case, outcome, reward, length))
             episodes, summary, promotion_key = \
                 summarize_evaluation_episodes(episodes)
             result_queue.put({
@@ -3369,12 +3880,18 @@ class AsyncMaskableEvalCallback(BaseCallback):
             item for item in self._evaluation_records
             if item.get("promoted")]
         write_json_atomic(self.evaluation_history_path, {
-            "schema_version": 2,
+            "schema_version": 3,
             "kind": "playersim_fixed_checkpoint_evaluations",
             "schedule_sha256": self.schedule_sha256,
             "fixed_schedule": self.fixed_evaluation_schedule,
             "minimum_qualification_score":
                 self.minimum_qualification_score,
+            "qualification_rule": {
+                "metric": "qualification_interval.lower_bound",
+                "operator": ">=",
+                "threshold": self.minimum_qualification_score,
+                "confidence": 0.95,
+            },
             "promotion_order": [
                 "decisive_wins",
                 "decisive_score",
@@ -3408,14 +3925,32 @@ class AsyncMaskableEvalCallback(BaseCallback):
                 raise RuntimeError(
                     f"Asynchronous evaluation case {index} did not match "
                     "the fixed schedule")
+        episodes = _persist_evaluation_debug_sidecars(
+            episodes, timestep=result["timesteps"],
+            evaluation_history_path=self.evaluation_history_path)
         mean_reward = float(summary["mean_reward"])
+        qualification_score = float(summary["qualification_score"])
+        qualification_interval = summary["qualification_interval"]
+        expected_pair_units = int(summary["episodes"]) // 2
+        if (int(summary["episodes"]) % 2
+                or qualification_interval.get("paired_units")
+                != expected_pair_units):
+            raise RuntimeError(
+                "Asynchronous evaluation outcomes do not form the complete "
+                "adjacent seat-swapped pairs required for qualification")
+        qualification_lower = float(
+            qualification_interval["lower_bound"])
+        qualification_upper = float(
+            qualification_interval["upper_bound"])
         logging.info(
             "Async evaluation @ %s steps: decisive=%s-%s score=%s "
-            "timeouts=%s/%s mean_reward=%.3f mean_ep_length=%.1f",
+            "timeouts=%s/%s mean_reward=%.3f mean_ep_length=%.1f "
+            "qualification=%.3f (paired 95%% interval %.3f-%.3f)",
             result["timesteps"], summary["decisive_wins"],
             summary["decisive_losses"], summary["decisive_score"],
             summary["timeouts"], summary["episodes"], mean_reward,
-            summary["mean_ep_length"])
+            summary["mean_ep_length"], qualification_score,
+            qualification_lower, qualification_upper)
         self.logger.record("eval/mean_reward", mean_reward)
         self.logger.record("eval/std_reward", summary["std_reward"])
         self.logger.record(
@@ -3428,11 +3963,14 @@ class AsyncMaskableEvalCallback(BaseCallback):
             "eval/decisive_score", summary["decisive_score"])
         self.logger.record("eval/timeouts", summary["timeouts"])
         self.logger.record("eval/timeout_rate", summary["timeout_rate"])
-        qualification_score = float(summary["qualification_score"])
         qualified = (
-            qualification_score >= self.minimum_qualification_score)
+            qualification_lower >= self.minimum_qualification_score)
         self.logger.record(
             "eval/qualification_score", qualification_score)
+        self.logger.record(
+            "eval/qualification_lower_bound", qualification_lower)
+        self.logger.record(
+            "eval/qualification_upper_bound", qualification_upper)
         self.logger.record("eval/qualified", float(qualified))
         self.logger.record(
             "eval/evaluated_at_timesteps", int(result["timesteps"]))
@@ -3469,15 +4007,18 @@ class AsyncMaskableEvalCallback(BaseCallback):
                 except OSError:
                     pass
             logging.info(
-                "New qualified fixed-suite outcome key %s (score %.3f); "
+                "New qualified fixed-suite outcome key %s (score %.3f, "
+                "95%% lower bound %.3f); "
                 "promoted the evaluated snapshot to best_model.zip",
-                promotion_key, qualification_score)
+                promotion_key, qualification_score, qualification_lower)
         elif candidate_promoted and not qualified:
             logging.warning(
                 "Evaluation @ %s is the best candidate so far, but its "
-                "qualification score %.3f is below %.3f; best_model.zip "
+                "qualification 95%% lower bound %.3f (score %.3f) is below "
+                "%.3f; best_model.zip "
                 "was not published.", result["timesteps"],
-                qualification_score, self.minimum_qualification_score)
+                qualification_lower, qualification_score,
+                self.minimum_qualification_score)
         self._evaluation_records.append({
             "timesteps": int(result["timesteps"]),
             "completed_at": utc_timestamp(),
@@ -3487,6 +4028,7 @@ class AsyncMaskableEvalCallback(BaseCallback):
             "schedule_sha256": self.schedule_sha256,
             "promotion_key": list(promotion_key),
             "qualification_score": qualification_score,
+            "qualification_interval": qualification_interval,
             "qualified": qualified,
             "candidate_promoted": candidate_promoted,
             "promoted": promoted,
@@ -3843,7 +4385,9 @@ def main():
     parser.add_argument("--learning-rate", type=float, default=2e-4, help="Initial learning rate")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size for training")
     parser.add_argument("--n-steps", type=int, default=1024, help="Number of steps to collect before training")
-    parser.add_argument("--n-envs", type=int, default=0, help="Number of environments to run in parallel (0 = auto)")
+    parser.add_argument(
+        "--n-envs", type=int, default=DEFAULT_TRAINING_ENVIRONMENTS,
+        help="Number of environments to run in parallel (0 = auto)")
     parser.add_argument("--debug", action="store_true", help="Enable additional debugging")
     parser.add_argument("--optimize-hp", action="store_true", help="Run hyperparameter optimization")
     parser.add_argument("--record-network", action="store_true", 
@@ -3851,8 +4395,13 @@ def main():
     parser.add_argument("--record-freq", type=int, default=5000, 
                         help="Frequency for recording network parameters")
     parser.add_argument("--cpu-only", action="store_true", help="Force CPU training even if GPU is available")
-    parser.add_argument("--seed", type=int, default=42,
-                        help="Base seed for Python, NumPy, Torch, workers, and evaluation")
+    parser.add_argument(
+        "--seed", type=int, default=DEFAULT_TRAINING_SEED,
+        help="Base seed for Python, NumPy, Torch, and training workers")
+    parser.add_argument(
+        "--eval-seed", type=int, default=DEFAULT_EVALUATION_SEED,
+        help=("Independent seed for evaluation deck selection, paired cases, "
+              "and evaluation workers"))
     parser.add_argument("--format", type=str, default=DEFAULT_FORMAT_NAME,
                         help="Enforce strict format legality and load the frozen "
                              "formats/<format> card registry and feature schema "
@@ -3865,9 +4414,14 @@ def main():
                              "(default: formats/<format> when --format is given)")
     parser.add_argument(
         "--curriculum",
-        choices=("combat-v4", "combat-v3", "combat-v2", "combat-v1", "none"),
-        default="combat-v4",
+        choices=("combat-v5", "combat-v4", "combat-v3", "combat-v2",
+                 "combat-v1", "none"),
+        default="combat-v5",
         help="Deterministic training opponent curriculum (evaluation stays fixed)")
+    parser.add_argument(
+        "--canary-config", choices=tuple(CANARY_CONFIGS), default=None,
+        help=("Validate the named canary's enumerated CLI and resolved "
+              "experiment contract before training starts"))
     args = parser.parse_args()
     if args.resume and args.optimize_hp:
         parser.error("--resume and --optimize-hp cannot be used together")
@@ -3884,10 +4438,23 @@ def main():
                 args.resume, args.curriculum)
         except ValueError as error:
             parser.error(str(error))
-    maximum_base_seed = (2**32 - 1) - EVALUATION_SEED_OFFSET - 10_000
-    if not 0 <= args.seed <= maximum_base_seed:
+    # Hyperparameter trials still derive an isolated evaluation seed with the
+    # historical offset, while the normal run consumes --eval-seed directly.
+    maximum_training_seed = (
+        (2**32 - 1) - EVALUATION_SEED_OFFSET - 10_000)
+    maximum_evaluation_seed = (2**32 - 1) - 10_000
+    if not 0 <= args.seed <= maximum_training_seed:
         parser.error(
-            f"--seed must be between 0 and {maximum_base_seed} so worker seeds remain valid")
+            f"--seed must be between 0 and {maximum_training_seed} so "
+            "worker and hyperparameter-evaluation seeds remain valid")
+    if not 0 <= args.eval_seed <= maximum_evaluation_seed:
+        parser.error(
+            f"--eval-seed must be between 0 and {maximum_evaluation_seed} so "
+            "evaluation worker seeds remain valid")
+    try:
+        canary_config = validate_canary_cli(args)
+    except ValueError as error:
+        parser.error(str(error))
 
     configure_runtime_logging(debug=args.debug, worker=False)
 
@@ -4047,13 +4614,22 @@ def main():
         # A single alternating-seat evaluator avoids global random/NumPy stream
         # coupling between multiple environments inside DummyVecEnv.
         eval_env_count = 1
-        eval_seed = args.seed + EVALUATION_SEED_OFFSET
+        eval_seed = args.eval_seed
         eval_rng = random.Random(eval_seed)
         eval_decks = eval_rng.sample(decks, min(10, len(decks)))
         fixed_evaluation_schedule = build_fixed_evaluation_schedule(
             eval_decks, args.eval_episodes, eval_seed)
         fixed_evaluation_schedule_hash = evaluation_schedule_sha256(
             fixed_evaluation_schedule)
+        validate_canary_runtime(
+            canary_config,
+            lineage=lineage,
+            training_config=training_config,
+            curriculum=resolved_curriculum,
+            schedule_sha256=fixed_evaluation_schedule_hash,
+            num_envs=num_envs,
+            selected_device=selected_device,
+        )
         subproc_start_method = "spawn" if os.name == "nt" else None
         learner_threads = (
             max(2, detected_cpus - num_envs)
@@ -4071,6 +4647,7 @@ def main():
              else f"non-dict-deck-{index}")
             for index, deck in enumerate(eval_decks)]
         manifest["resolved"] = {
+            "canary_config": json_safe(canary_config),
             "training_config": json_safe(training_config),
             "observation_schema_version":
                 AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION,
@@ -4416,8 +4993,14 @@ def main():
             try:
                 vec_env.close()
             except Exception as close_error:
+                # Interrupted SubprocVecEnv workers often raise exceptions
+                # whose str() is empty (EOFError, BrokenPipeError); log the
+                # repr and traceback so the cause is never a blank line.
                 logging.error(
-                    "Could not close training environments: %s", close_error)
+                    "Could not close training environments: %r", close_error)
+                logging.debug(
+                    "Training environment close failure detail:",
+                    exc_info=True)
         if eval_env is not None:
             try:
                 eval_env.close()

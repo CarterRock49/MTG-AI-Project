@@ -9,8 +9,8 @@ import numpy as np
 
 from Playersim.curriculum import (
     COMBAT_CURRICULUM_V1, COMBAT_CURRICULUM_V2, COMBAT_CURRICULUM_V3,
-    COMBAT_CURRICULUM_V4, CurriculumScheduler, derive_matchup_seed,
-    resolve_curriculum,
+    COMBAT_CURRICULUM_V4, COMBAT_CURRICULUM_V5, CurriculumScheduler,
+    derive_matchup_seed, resolve_curriculum,
 )
 
 
@@ -195,6 +195,32 @@ class CurriculumSchedulerTest(unittest.TestCase):
         self.assertEqual(scheduler.peek(True)["max_turns"], 20)
         scheduler.set_timestep(150_000)
         self.assertIsNone(scheduler.peek(True)["max_turns"])
+
+    def test_v5_relaxes_goldfish_turns_and_ramps_full_pool(self):
+        spec = resolve_curriculum("combat-v5", DECKS)
+        self.assertEqual(spec["id"], "combat-v5")
+        self.assertEqual(spec["version"], 5)
+        goldfish, race, bridge, full_pool = spec["stages"]
+
+        # Goldfish gets breathing room for a fresh policy's slow kills; the
+        # stages that receive an already-competent policy stay tight.
+        self.assertEqual(goldfish["max_turns"], 25)
+        self.assertEqual(race["max_turns"], 20)
+        self.assertEqual(bridge["max_turns"], 25)
+
+        # full_pool no longer cold-opens at full scripted strength.
+        handicap = full_pool["handicap"]
+        self.assertEqual(handicap["profiles"], ["scripted"])
+        self.assertEqual(handicap["start"], 0.40)
+        self.assertGreater(handicap["window_episodes"], 0)
+        # The terminal stage has no mastery gate; the ratchet is the only
+        # consumer of its rolling outcomes.
+        self.assertIsNone(full_pool.get("advance_when"))
+
+        # v4 is untouched for reproducibility.
+        v4 = resolve_curriculum("combat-v4", DECKS)
+        self.assertEqual(v4["stages"][0]["max_turns"], 20)
+        self.assertIsNone(v4["stages"][3].get("handicap"))
 
     def test_v4_handicap_and_turn_limit_validation_fails_closed(self):
         def broken(mutate):

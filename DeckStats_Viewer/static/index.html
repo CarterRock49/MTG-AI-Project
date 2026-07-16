@@ -1,0 +1,187 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Playersim Stats Workbench</title>
+  <link rel="stylesheet" href="/viewer.css">
+</head>
+<body>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Workbench navigation">
+      <a class="brand" href="#overview" aria-label="Playersim Stats Workbench home">
+        <span class="brand-mark" aria-hidden="true">P</span>
+        <span><strong>Playersim</strong><small>Stats Workbench</small></span>
+      </a>
+
+      <div class="sidebar-status">
+        <span class="status-dot" id="health-dot"></span>
+        <span id="health-label">Discovering artifacts…</span>
+      </div>
+
+      <nav class="section-nav">
+        <a href="#overview" class="active"><span>01</span>Overview</a>
+        <a href="#run"><span>02</span>Run & lineage</a>
+        <a href="#evaluations"><span>03</span>Evaluation games</a>
+        <a href="#deck-stats"><span>04</span>Decks & cards</a>
+        <a href="#game-log"><span>05</span>Recorded games</a>
+        <a href="#harvest"><span>06</span>Harvest & health</a>
+      </nav>
+
+      <div class="sidebar-foot">
+        <span>Local-only viewer</span>
+        <code>schema-aware · no CDN</code>
+      </div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Unified debugging console</p>
+          <h1>Every run. Every deck. Every evaluation game.</h1>
+        </div>
+        <button id="refresh-button" class="button primary" type="button">
+          <span aria-hidden="true">↻</span> Refresh artifacts
+        </button>
+      </header>
+
+      <div id="alert" class="alert hidden" role="alert"></div>
+
+      <section id="overview" class="section">
+        <div class="section-heading">
+          <div><p class="eyebrow">Project inventory</p><h2>Overview</h2></div>
+          <p id="scan-time" class="muted">Waiting for the first scan</p>
+        </div>
+        <div id="overview-cards" class="metric-grid" aria-live="polite"></div>
+        <div class="two-column overview-panels">
+          <article class="panel">
+            <div class="panel-heading"><h3>Evaluation history</h3><span id="trend-caption" class="chip">No run selected</span></div>
+            <svg id="evaluation-trend" class="trend-chart" viewBox="0 0 760 260" role="img" aria-label="Qualification score by checkpoint"></svg>
+            <div id="trend-legend" class="chart-legend"></div>
+          </article>
+          <article class="panel">
+            <div class="panel-heading"><h3>Artifact health</h3><span id="diagnostic-count" class="chip">0 notices</span></div>
+            <div id="overview-diagnostics" class="diagnostic-list empty-state">No diagnostics loaded.</div>
+          </article>
+        </div>
+      </section>
+
+      <section id="run" class="section">
+        <div class="section-heading">
+          <div><p class="eyebrow">Experiment context</p><h2>Run, configuration & lineage</h2></div>
+        </div>
+        <div class="control-strip">
+          <label class="field grow"><span>Training run</span><select id="run-selector" aria-label="Training run"></select></label>
+          <div id="run-status" class="run-status"></div>
+        </div>
+        <div id="run-summary" class="run-summary empty-state">Choose a discovered run to inspect its complete manifest.</div>
+        <div class="two-column">
+          <article class="panel"><div class="panel-heading"><h3>Resolved experiment</h3></div><div id="run-config" class="kv-grid"></div></article>
+          <article class="panel"><div class="panel-heading"><h3>Lineage & runtime</h3></div><div id="run-lineage" class="kv-grid"></div></article>
+        </div>
+        <details class="raw-drawer">
+          <summary>Complete training manifest JSON</summary>
+          <div class="raw-actions"><button class="button ghost copy-button" data-copy="run-manifest-json">Copy JSON</button></div>
+          <pre id="run-manifest-json">No manifest selected.</pre>
+        </details>
+      </section>
+
+      <section id="evaluations" class="section">
+        <div class="section-heading">
+          <div><p class="eyebrow">Checkpoint debugger</p><h2>Full evaluation games</h2></div>
+          <span id="eval-visible-count" class="count-badge">0 games</span>
+        </div>
+        <div class="filter-grid" aria-label="Evaluation game filters">
+          <label class="field"><span>Checkpoint</span><select id="eval-checkpoint-filter"></select></label>
+          <label class="field"><span>Result</span><select id="eval-result-filter"><option value="">All results</option><option>win</option><option>loss</option><option>draw</option></select></label>
+          <label class="field"><span>Terminal reason</span><select id="eval-terminal-filter"><option value="">All reasons</option></select></label>
+          <label class="field"><span>Seat</span><select id="eval-seat-filter"><option value="">Both seats</option><option value="P1">Agent as P1</option><option value="P2">Agent as P2</option></select></label>
+          <label class="field"><span>Debug state</span><select id="eval-trace-filter"><option value="">All games</option><option value="trace">Action trace available</option><option value="replay">Replay available</option><option value="terminal">Terminal debug available</option><option value="legacy">Summary only</option><option value="timeout">Timeouts</option></select></label>
+          <label class="field grow"><span>Deck, seed, case or profile</span><input id="eval-search" type="search" placeholder="Search all evaluation fields…"></label>
+        </div>
+
+        <div class="master-detail">
+          <article class="panel table-panel">
+            <div class="table-wrap" tabindex="0">
+              <table id="eval-games-table">
+                <thead><tr><th>Step</th><th>Case / pair</th><th>Agent deck</th><th>Opponent</th><th>Seat</th><th>Result</th><th>Reason</th><th>Length</th><th>Reward</th><th>Debug</th></tr></thead>
+                <tbody id="eval-games-body"><tr><td colspan="10" class="empty-cell">Select a run with evaluation history.</td></tr></tbody>
+              </table>
+            </div>
+          </article>
+          <aside id="evaluation-game-detail" class="detail-panel" aria-label="Selected evaluation game">
+            <div class="empty-state">Select a game row for its full debug record, paired-seat comparison, case, replay and raw JSON.</div>
+          </aside>
+        </div>
+      </section>
+
+      <section id="deck-stats" class="section">
+        <div class="section-heading">
+          <div><p class="eyebrow">Statistics scopes</p><h2>Decks, cards & meta</h2></div>
+          <span id="stats-integrity" class="chip">No scope selected</span>
+        </div>
+        <div class="control-strip">
+          <label class="field grow"><span>Statistics source</span><select id="stats-source-selector"></select></label>
+          <div id="stats-source-summary" class="compact-metrics"></div>
+        </div>
+
+        <div class="two-column analytics-memory-grid">
+          <article class="panel">
+            <div class="panel-heading"><h3>CardMemory health & provenance</h3><span id="card-memory-health" class="chip">Not loaded</span></div>
+            <div id="card-memory-status" class="memory-status empty-state">Select a statistics source.</div>
+          </article>
+          <article class="panel">
+            <div class="panel-heading"><h3>StrategyMemory diagnostics</h3><span id="strategy-memory-health" class="chip">Not loaded</span></div>
+            <div id="strategy-memory-status" class="memory-status empty-state">Select a statistics source.</div>
+          </article>
+        </div>
+
+        <div class="stats-grid">
+          <article class="panel">
+            <div class="panel-heading"><h3>Deck performance</h3><label class="inline-search"><span class="sr-only">Search decks</span><input id="deck-search" type="search" placeholder="Filter decks…"></label></div>
+            <div class="table-wrap compact"><table><thead><tr><th>Deck</th><th>Archetype</th><th>Games</th><th>W–L–D</th><th>Win rate</th><th>Avg turns</th></tr></thead><tbody id="deck-table-body"></tbody></table></div>
+          </article>
+          <aside id="deck-detail" class="detail-panel"><div class="empty-state">Select a deck to see its list, matchups, stage splits, card performance and raw aggregate.</div></aside>
+        </div>
+
+        <div class="stats-grid card-grid">
+          <article class="panel">
+            <div class="panel-heading"><h3>Card performance</h3><label class="inline-search"><span class="sr-only">Search cards</span><input id="card-search" type="search" placeholder="Filter cards or IDs…"></label></div>
+            <div class="table-wrap compact"><table class="card-memory-table"><thead><tr><th rowspan="2">Card</th><th rowspan="2">ID</th><th colspan="4" class="column-group deckstats-group">DeckStats aggregate</th><th colspan="5" class="column-group memory-group">CardMemory lifetime snapshot</th></tr><tr><th>Games</th><th>W–L–D</th><th>Win rate</th><th>Used</th><th>Games</th><th>Effectiveness</th><th>Seen / played</th><th>Opening</th><th>Recent</th></tr></thead><tbody id="card-table-body"></tbody></table></div>
+          </article>
+          <aside id="card-detail" class="detail-panel"><div class="empty-state">Select a canonical card ID to compare DeckStats and CardMemory without collapsing same-name identities.</div></aside>
+        </div>
+
+        <div class="two-column">
+          <article class="panel"><div class="panel-heading"><h3>Meta & matchup data</h3></div><div id="meta-detail" class="json-summary empty-state">No meta artifact loaded.</div></article>
+          <article class="panel"><div class="panel-heading"><h3>Fidelity & support</h3></div><div id="fidelity-detail" class="json-summary empty-state">No fidelity artifact loaded.</div></article>
+        </div>
+      </section>
+
+      <section id="game-log" class="section">
+        <div class="section-heading">
+          <div><p class="eyebrow">Authoritative outcomes</p><h2>Recorded game log</h2></div>
+          <span id="stats-game-range" class="count-badge">0 games</span>
+        </div>
+        <article class="panel table-panel">
+          <div class="panel-toolbar"><button id="game-prev" class="button ghost">← Previous</button><span id="game-page-label">Page 1</span><button id="game-next" class="button ghost">Next →</button></div>
+          <div class="table-wrap"><table><thead><tr><th>Timestamp</th><th>Result</th><th>Reason</th><th>P1 deck</th><th>P2 deck</th><th>Agent seat</th><th>Turn</th><th>Stage</th><th>Checkpoint</th><th>Fidelity</th></tr></thead><tbody id="stats-games-body"></tbody></table></div>
+          <details class="raw-drawer"><summary>Selected game · complete JSON</summary><pre id="stats-game-json">Select a game-log row.</pre></details>
+        </article>
+      </section>
+
+      <section id="harvest" class="section">
+        <div class="section-heading">
+          <div><p class="eyebrow">Qualification evidence</p><h2>Harvests & artifact diagnostics</h2></div>
+        </div>
+        <div id="harvest-list" class="harvest-grid empty-state">No Harvest manifests discovered.</div>
+        <article class="panel diagnostics-panel"><div class="panel-heading"><h3>All loader diagnostics</h3></div><div id="all-diagnostics" class="diagnostic-list empty-state">No loader warnings.</div></article>
+      </section>
+
+      <footer><span>Playersim Stats Workbench</span><span id="footer-root">Local artifact view</span></footer>
+    </main>
+  </div>
+  <script src="/viewer.js" defer></script>
+</body>
+</html>

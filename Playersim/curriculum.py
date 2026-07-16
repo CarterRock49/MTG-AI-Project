@@ -307,6 +307,28 @@ COMBAT_CURRICULUM_V4 = {
 }
 
 
+# Round 7.92: the v4 canary (run round-7.91-annealed-ramp-v3, ~730k steps)
+# earned race mastery and reached a 0.281 evaluation at 400k, then plateaued.
+# Two stage-level causes were measurable:
+# - goldfish at 20 turns converted a fresh policy's slow kills into ~71%
+#   timeouts, so the stage fell to its deadline instead of mastering; race at
+#   20 turns worked once the policy arrived competent.  V5 gives goldfish 25.
+# - full_pool cold-opened at 80% full-strength scripted play across all
+#   eight decks (training decisive win rate ~15%).  V5 extends the proven
+#   annealed handicap to full_pool so the four decks absent from bridge ramp
+#   in the same way bridge's scripted profile did.
+COMBAT_CURRICULUM_V5 = deepcopy(COMBAT_CURRICULUM_V4)
+COMBAT_CURRICULUM_V5.update({"id": "combat-v5", "version": 5})
+COMBAT_CURRICULUM_V5["stages"][0]["max_turns"] = 25
+COMBAT_CURRICULUM_V5["stages"][3]["handicap"] = {
+    "profiles": ["scripted"],
+    "start": 0.40,
+    "step": 0.20,
+    "window_episodes": 24,
+    "min_decisive_win_rate": 0.25,
+}
+
+
 def _stable_seed(*parts) -> int:
     payload = ":".join(str(part) for part in parts).encode("utf-8")
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
@@ -326,6 +348,7 @@ def resolve_curriculum(name, decks):
         "combat-v2": COMBAT_CURRICULUM_V2,
         "combat-v3": COMBAT_CURRICULUM_V3,
         "combat-v4": COMBAT_CURRICULUM_V4,
+        "combat-v5": COMBAT_CURRICULUM_V5,
     }
     if name not in presets:
         raise ValueError(f"Unknown curriculum: {name}")

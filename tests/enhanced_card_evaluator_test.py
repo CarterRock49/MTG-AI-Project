@@ -1,6 +1,8 @@
+import json
 import math
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from Playersim.enhanced_card_evaluator import EnhancedCardEvaluator
 
@@ -128,6 +130,183 @@ class FakeStats:
 
 
 class EnhancedCardEvaluatorTests(unittest.TestCase):
+    def test_opt_in_diagnostics_explain_exact_scalar_and_deduplicate(self):
+        card = make_card("Explained", power=4, toughness=3)
+        memory = MutableMemory(
+            effectiveness=0.8, optimal_turn=2, games_played=8)
+        evaluator = EnhancedCardEvaluator(
+            FakeGameState({1: card}), card_memory=memory)
+
+        ordinary = evaluator.evaluate_card(
+            1, "general", {"position": "ahead"})
+        self.assertIsNone(evaluator.drain_diagnostics())
+        evaluator.set_diagnostics_enabled(True, max_events=8)
+
+        explained = evaluator.evaluate_card(
+            1, "general", {"position": "ahead", "nonfinite": float("nan")})
+        self.assertNotEqual(ordinary, 0.0)
+        self.assertEqual(explained, ordinary)
+        payload = evaluator.drain_diagnostics()
+        event = payload["events"][0]
+        self.assertEqual(explained, event["final_score"])
+        self.assertEqual(event["runtime_card_id"], 1)
+        self.assertEqual(event["canonical_card_id"], 1)
+        self.assertEqual(event["card_name"], "Explained")
+        self.assertEqual(event["context"], "general")
+        self.assertEqual(event["perspective"], "p1")
+        self.assertEqual(event["history"]["source"], "card_memory")
+        self.assertEqual(event["history"]["overall_games"], 8.0)
+        self.assertIsNone(event["context_details"]["nonfinite"])
+        components = event["components"]
+        self.assertAlmostEqual(
+            event["adjustments"]["weighted_score"],
+            components["base"] * 0.6
+            + components["context"] * 0.25
+            + components["history"] * 0.1
+            + components["stats"] * 0.05)
+        self.assertFalse(event["flags"]["exception"])
+        self.assertFalse(payload["causal_attribution"])
+        json.dumps(payload, allow_nan=False)
+
+        # Identical calls in one action window retain exact multiplicity without
+        # serializing duplicate component dictionaries.
+        evaluator.evaluate_card(1, "general", {"position": "ahead"})
+        evaluator.evaluate_card(1, "general", {"position": "ahead"})
+        repeated = evaluator.drain_diagnostics()
+        self.assertEqual(len(repeated["events"]), 1)
+        self.assertEqual(repeated["events"][0]["repeat_count"], 2)
+        self.assertEqual(repeated["deduplicated_events"], 1)
+
+        # The cache telemetry starts at enablement, not evaluator construction.
+        totals = evaluator.diagnostic_totals()
+        self.assertEqual(totals["cache_misses"], 0)
+        self.assertGreaterEqual(totals["cache_hits"], 3)
+
+    def test_diagnostics_bound_each_window_and_the_complete_game(self):
+        cards = {
+            card_id: make_card(f"Bounded {card_id}")
+            for card_id in range(1, 5)
+        }
+        evaluator = EnhancedCardEvaluator(FakeGameState(cards))
+        evaluator.set_diagnostics_enabled(
+            True, max_events=1, max_total_events=2)
+
+        evaluator.evaluate_card(1)
+        evaluator.evaluate_card(2)
+        first = evaluator.drain_diagnostics()
+        self.assertEqual(len(first["events"]), 1)
+        self.assertEqual(first["dropped_events"], 1)
+
+        evaluator.evaluate_card(2)
+        second = evaluator.drain_diagnostics()
+        self.assertEqual(len(second["events"]), 1)
+        evaluator.evaluate_card(3)
+        third = evaluator.drain_diagnostics()
+        self.assertEqual(third["events"], [])
+        self.assertEqual(third["dropped_events"], 1)
+
+        totals = evaluator.diagnostic_totals()
+        self.assertEqual(totals["event_budget"], 2)
+        self.assertEqual(totals["recorded"], 2)
+        self.assertEqual(totals["dropped"], 2)
+        self.assertEqual(totals["calls"], 4)
+        self.assertLessEqual(
+            totals["serialized_bytes"], totals["serialized_byte_budget"])
+
+    def test_diagnostics_are_structurally_and_byte_bounded_without_score_drift(self):
+        card = make_card("Pathological Diagnostic")
+        control = EnhancedCardEvaluator(FakeGameState({1: card}))
+        evaluator = EnhancedCardEvaluator(FakeGameState({1: card}))
+        evaluator.set_diagnostics_enabled(
+            True, max_events=8, max_total_events=8, max_total_bytes=512)
+
+        cyclic = {"ordinary": "kept", "long-key-" + "x" * 2000: "value"}
+        cyclic["cycle"] = cyclic
+        expected = control.evaluate_card(1, context_details=cyclic)
+        actual = evaluator.evaluate_card(1, context_details=cyclic)
+        self.assertEqual(actual, expected)
+
+        payload = evaluator.drain_diagnostics()
+        self.assertIsInstance(payload, dict)
+        json.dumps(payload, allow_nan=False)
+        totals = evaluator.diagnostic_totals()
+        self.assertLessEqual(totals["serialized_bytes"], 512)
+        self.assertGreater(totals["sanitization_omissions"], 0)
+        self.assertEqual(totals["serialization_errors"], 0)
+        self.assertEqual(totals["serialized_byte_budget"], 512)
+        self.assertIn("sanitizer_limits", totals)
+
+    def test_unknown_set_values_have_stable_address_free_serialization(self):
+        class NamedUnknown:
+            def __init__(self, name):
+                self.name = name
+
+        first = EnhancedCardEvaluator._diagnostic_json_safe({
+            NamedUnknown("beta"), NamedUnknown("alpha")})
+        second = EnhancedCardEvaluator._diagnostic_json_safe({
+            NamedUnknown("alpha"), NamedUnknown("beta")})
+        self.assertEqual(first, second)
+        encoded = json.dumps(first, sort_keys=True, allow_nan=False)
+        self.assertNotIn("0x", encoded)
+        self.assertIn("alpha", encoded)
+        self.assertIn("beta", encoded)
+
+    def test_diagnostic_metadata_failure_cannot_change_scalar(self):
+        card = make_card("Telemetry Isolation", power=3, toughness=2)
+        control = EnhancedCardEvaluator(FakeGameState({1: card}))
+        evaluator = EnhancedCardEvaluator(FakeGameState({1: card}))
+        expected = control.evaluate_card(
+            1, "general", {"position": "ahead"})
+        evaluator.set_diagnostics_enabled(True)
+
+        with patch.object(
+                evaluator, "_diagnostic_perspective_label",
+                side_effect=RuntimeError("hostile diagnostic metadata")):
+            actual = evaluator.evaluate_card(
+                1, "general", {"position": "ahead"})
+
+        self.assertEqual(actual, expected)
+        omitted = evaluator.drain_diagnostics()
+        self.assertEqual(omitted["events"], [])
+        self.assertEqual(omitted["dropped_events"], 1)
+        totals = evaluator.diagnostic_totals()
+        self.assertEqual(totals["calls"], 1)
+        self.assertEqual(totals["dropped"], 1)
+        self.assertEqual(totals["serialization_errors"], 1)
+
+    def test_diagnostics_record_history_fallback_and_scoring_exception(self):
+        stats = FakeStats({"games_played": 10, "wins": 8, "draws": 1})
+        evaluator = EnhancedCardEvaluator(
+            FakeGameState({1: make_card("Fallback")}),
+            stats_tracker=stats,
+            card_memory=MutableMemory(raise_on_read=True))
+        control = EnhancedCardEvaluator(
+            FakeGameState({1: make_card("Fallback")}),
+            stats_tracker=FakeStats(
+                {"games_played": 10, "wins": 8, "draws": 1}),
+            card_memory=MutableMemory(raise_on_read=True))
+        expected_score = control.evaluate_card(1)
+        evaluator.set_diagnostics_enabled(True)
+
+        self.assertEqual(evaluator.evaluate_card(1), expected_score)
+        fallback = evaluator.drain_diagnostics()["events"][0]
+        self.assertEqual(fallback["history"]["source"], "deck_stats")
+        self.assertEqual(
+            fallback["history"]["fallback_reason"], "card_memory_error")
+        self.assertEqual(fallback["history"]["deck_stats_games"], 10.0)
+        self.assertTrue(fallback["flags"]["fallback"])
+
+        class BrokenState(FakeGameState):
+            def _safe_get_card(self, card_id):
+                raise RuntimeError("broken lookup")
+
+        broken = EnhancedCardEvaluator(BrokenState({}))
+        broken.set_diagnostics_enabled(True)
+        self.assertEqual(broken.evaluate_card(7), 0.0)
+        failed = broken.drain_diagnostics()["events"][0]
+        self.assertTrue(failed["flags"]["exception"])
+        self.assertIn("broken lookup", failed["error"])
+
     def test_attack_state_is_live_and_non_haste_is_not_always_sick(self):
         cards = {
             1: make_card("Attacker", power=3, toughness=3),

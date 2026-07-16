@@ -7,9 +7,11 @@ Run from the repository root with::
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -26,7 +28,32 @@ from scenario_test import (  # noqa: E402
 from Playersim.ability_types import DiscardEffect, TriggeredAbility  # noqa: E402
 
 
+class _FailedContinuationEffect:
+    effect_text = "Test continuation instruction that cannot be applied."
+
+    def apply(self, game_state, source_id, controller, targets, context=None):
+        return False
+
+
+class _SuccessfulTargetEffect:
+    effect_text = "Test targeted instruction that applies successfully."
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        return True
+
+
 class ChoiceContextPhaseTest(unittest.TestCase):
+    @staticmethod
+    def _json_fidelity(game_state):
+        fidelity = {
+            key: sorted(value) if isinstance(value, set) else value
+            for key, value in game_state.fidelity_counters.items()
+        }
+        # Match the environment's per-game set conversion and require strict
+        # JSON values (no custom encoder and no NaN/Infinity extensions).
+        return json.loads(json.dumps(
+            fidelity, sort_keys=True, allow_nan=False))
+
     def _stacked_choice_state(self, seed):
         game_state = fresh(seed)
         player = game_state.p2
@@ -94,6 +121,250 @@ class ChoiceContextPhaseTest(unittest.TestCase):
             game_state.previous_priority_phase,
             game_state.PHASE_MAIN_PRECOMBAT)
         self.assertIn(game_state.priority_player, (game_state.p1, game_state.p2))
+
+    def test_failed_effect_continuation_records_fidelity_once_with_context(self):
+        game_state, player, source_id = self._stacked_choice_state(928)
+        completed_choice = {
+            "type": "resolution_choice",
+            "player": player,
+            "resume_phase": game_state.PHASE_PRIORITY,
+            "effect_continuation": {
+                "effects": [
+                    _FailedContinuationEffect(),
+                    DiscardEffect(1, target="controller"),
+                ],
+                "source_id": source_id,
+                "controller_id": "p2",
+                "targets": {},
+                "resolution_context": {},
+                "finalizer": {
+                    "kind": "ability",
+                    "ability_type": "TRIGGER",
+                    "source_id": source_id,
+                    "controller_id": "p2",
+                    "context": {"effect_text": "Test trigger finalizer."},
+                },
+                "success": True,
+            },
+        }
+        game_state.choice_context = completed_choice
+        game_state.phase = game_state.PHASE_CHOOSE
+
+        self.assertTrue(game_state._resume_effect_continuation(
+            completed_choice))
+        self.assertEqual(
+            game_state.fidelity_counters["effect_continuation_failures"], 1)
+        contexts = game_state.fidelity_counters[
+            "effect_continuation_failure_contexts"]
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0]["source_id"], str(source_id))
+        self.assertTrue(contexts[0]["card_name"])
+        self.assertEqual(
+            contexts[0]["failed_effects"][0]["effect_text"],
+            _FailedContinuationEffect.effect_text)
+        self.assertEqual(contexts[0]["finalizer"]["kind"], "ability")
+        self.assertEqual(game_state.choice_context.get("type"), "discard")
+
+        # Completing the second asynchronous segment must not classify the
+        # same resolving-object failure a second time.
+        self.assertTrue(game_state.choose_discard_card(0))
+        self.assertEqual(
+            game_state.fidelity_counters["effect_continuation_failures"], 1)
+        self.assertEqual(len(contexts), 1)
+        serialized = self._json_fidelity(game_state)
+        self.assertEqual(serialized["effect_continuation_failures"], 1)
+
+    def test_targeted_direct_continuation_records_and_propagates_once(self):
+        game_state, player, source_id = self._stacked_choice_state(932)
+        game_state.agent_is_p1 = False
+        continuation = {
+            "effects": [
+                _FailedContinuationEffect(),
+                DiscardEffect(1, target="controller"),
+            ],
+            "source_id": source_id,
+            "controller_id": "p2",
+            "targets": {},
+            "resolution_context": {},
+            "finalizer": None,
+            "success": True,
+        }
+        game_state.targeting_context = {
+            "controller": player,
+            "source_id": source_id,
+            "selected_targets": ["p1"],
+            "required_count": 1,
+            "min_targets": 1,
+            "max_targets": 1,
+            "resume_effect": _SuccessfulTargetEffect(),
+            "effect_continuation": continuation,
+        }
+        game_state.phase = game_state.PHASE_TARGETING
+        handler = get_env().action_handler
+        handler.game_state = game_state
+
+        reward, completed = handler._finalize_targeting_choice()
+
+        self.assertTrue(completed)
+        self.assertEqual(reward, 0.05)
+        self.assertEqual(
+            game_state.fidelity_counters["effect_continuation_failures"], 1)
+        self.assertTrue(continuation["fidelity_failure_recorded"])
+        self.assertEqual(game_state.choice_context.get("type"), "discard")
+        pending = game_state.choice_context["effect_continuation"]
+        self.assertTrue(pending["fidelity_failure_recorded"])
+        contexts = game_state.fidelity_counters[
+            "effect_continuation_failure_contexts"]
+        self.assertEqual(
+            contexts[0]["failed_effects"][0]["effect_type"],
+            "_FailedContinuationEffect")
+
+        self.assertTrue(game_state.choose_discard_card(0))
+        self.assertEqual(
+            game_state.fidelity_counters["effect_continuation_failures"], 1)
+        self.assertEqual(len(contexts), 1)
+
+    def test_optional_direct_continuations_record_failures_once(self):
+        cases = (
+            (933, "optional_mana_then"),
+            (934, "optional_discard_then"),
+        )
+        for seed, choice_kind in cases:
+            with self.subTest(choice_kind=choice_kind):
+                game_state = fresh(seed)
+                game_state.agent_is_p1 = True
+                player = game_state.p1
+                source_id = player["hand"][0]
+                option = (
+                    player["hand"][-1]
+                    if choice_kind == "optional_discard_then" else "pay")
+                continuation = {
+                    "effects": [],
+                    "source_id": source_id,
+                    "controller_id": "p1",
+                    "targets": {},
+                    "resolution_context": {},
+                    "finalizer": None,
+                    "success": True,
+                }
+                game_state.choice_context = {
+                    "type": "resolution_choice",
+                    "player": player,
+                    "options": [option],
+                    "choice_kind": choice_kind,
+                    "source_id": source_id,
+                    "mana_cost": "{0}",
+                    "followup_text": "Synthetic failed follow-up.",
+                    "resume_phase": game_state.PHASE_PRIORITY,
+                    "effect_continuation": continuation,
+                }
+                game_state.phase = game_state.PHASE_CHOOSE
+                handler = get_env().action_handler
+                handler.game_state = game_state
+
+                patches = [mock.patch(
+                    "Playersim.ability_utils.EffectFactory.create_effects",
+                    return_value=[_FailedContinuationEffect()])]
+                if choice_kind == "optional_mana_then":
+                    patches.append(mock.patch.object(
+                        type(game_state.mana_system), "pay_mana_cost",
+                        return_value=True))
+                with patches[0]:
+                    if len(patches) == 2:
+                        with patches[1]:
+                            reward, completed = handler._handle_choose_mode(
+                                0, {})
+                    else:
+                        reward, completed = handler._handle_choose_mode(0, {})
+
+                self.assertFalse(completed)
+                self.assertEqual(reward, -0.1)
+                self.assertEqual(
+                    game_state.fidelity_counters[
+                        "effect_continuation_failures"], 1)
+                self.assertTrue(continuation["fidelity_failure_recorded"])
+                contexts = game_state.fidelity_counters[
+                    "effect_continuation_failure_contexts"]
+                self.assertEqual(len(contexts), 1)
+                self.assertEqual(contexts[0]["source_id"], str(source_id))
+                self.assertEqual(
+                    contexts[0]["failed_effects"][0]["effect_type"],
+                    "_FailedContinuationEffect")
+
+                # Reclassification of the same resolving object is a no-op.
+                game_state._record_effect_continuation_result(
+                    continuation, False,
+                    continuation.get("failure_details"))
+                self.assertEqual(
+                    game_state.fidelity_counters[
+                        "effect_continuation_failures"], 1)
+
+    def test_lost_spell_recovery_records_each_occurrence_exactly_once(self):
+        cases = (
+            (929, None, "post_resolution_occurrence_repair"),
+            (930, RuntimeError("resolution probe"), "resolution_exception"),
+        )
+        for seed, resolution_error, expected_reason in cases:
+            with self.subTest(reason=expected_reason):
+                game_state = fresh(seed)
+                player = game_state.p1
+                spell_id = inject_real_card(game_state, player, "Opt", "hand")
+                player["hand"].remove(spell_id)
+                game_state.phase = game_state.PHASE_PRIORITY
+                game_state.previous_priority_phase = (
+                    game_state.PHASE_MAIN_PRECOMBAT)
+                game_state.priority_player = player
+                game_state.stack = [("SPELL", spell_id, player, {
+                    "requires_target": False,
+                    "effect_text": "Scry 1, then draw a card.",
+                })]
+
+                patch_kwargs = (
+                    {"side_effect": resolution_error}
+                    if resolution_error is not None else {"return_value": True})
+                with mock.patch.object(
+                        type(game_state), "_resolve_spell", **patch_kwargs):
+                    game_state.resolve_top_of_stack()
+
+                self.assertEqual(player["graveyard"].count(spell_id), 1)
+                self.assertEqual(
+                    game_state.fidelity_counters["lost_spell_recoveries"], 1)
+                contexts = game_state.fidelity_counters[
+                    "lost_spell_recovery_contexts"]
+                self.assertEqual(len(contexts), 1)
+                self.assertEqual(contexts[0]["source_id"], str(spell_id))
+                self.assertEqual(contexts[0]["card_name"], "Opt")
+                self.assertEqual(contexts[0]["recovered_occurrences"], 1)
+                self.assertEqual(
+                    contexts[0]["recovery_reason"], expected_reason)
+                if resolution_error is not None:
+                    self.assertEqual(
+                        contexts[0]["error_type"], "RuntimeError")
+                serialized = self._json_fidelity(game_state)
+                self.assertEqual(serialized["lost_spell_recoveries"], 1)
+
+    def test_fidelity_schema_backfills_legacy_state_and_clones_in_isolation(self):
+        game_state = fresh(931)
+        game_state.fidelity_counters = {
+            "unparsed_effects": 2,
+            "unparsed_cards": ["Legacy Card"],
+        }
+        counters = game_state._ensure_fidelity_counters()
+
+        self.assertEqual(counters["unparsed_effects"], 2)
+        self.assertEqual(counters["effect_continuation_failures"], 0)
+        self.assertEqual(counters["lost_spell_recoveries"], 0)
+        self.assertEqual(counters["unparsed_cards"], {"Legacy Card"})
+
+        cloned = game_state.clone()
+        self.assertIsNotNone(cloned)
+        self.assertEqual(cloned.fidelity_counters, counters)
+        cloned.fidelity_counters[
+            "effect_continuation_failure_contexts"].append({"clone": True})
+        self.assertEqual(
+            game_state.fidelity_counters[
+                "effect_continuation_failure_contexts"], [])
+        self._json_fidelity(cloned)
 
     def test_opt_scry_pauses_draw_and_finalizer_over_nonempty_stack(self):
         game_state = fresh(923)

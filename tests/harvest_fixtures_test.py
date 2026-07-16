@@ -107,6 +107,8 @@ def _write_valid_artifact_fixture(output: Path, version: str) -> dict:
             "unparsed_mana": 0,
             "unparsed_modal": 0,
             "unparsed_effects": 0,
+            "effect_continuation_failures": 0,
+            "lost_spell_recoveries": 0,
             "unparsed_cards": [],
         },
     }
@@ -120,6 +122,8 @@ def _write_valid_artifact_fixture(output: Path, version: str) -> dict:
             "unparsed_mana": 0,
             "unparsed_modal": 0,
             "unparsed_effects": 0,
+            "effect_continuation_failures": 0,
+            "lost_spell_recoveries": 0,
             "unparsed_cards": {},
         }),
         encoding="utf-8",
@@ -336,6 +340,35 @@ class HarvestFixturesTest(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "not valid gzip JSON"):
                     harvest._validate_artifacts(output, 1, "fixture-test")
 
+    def test_artifact_validation_rejects_missing_game_fidelity_counter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = harvest.prepare_output_directory(Path(temp) / "run")
+            record = _write_valid_artifact_fixture(output, "fixture-test")
+            record = dict(record)
+            record["fidelity"] = dict(record["fidelity"])
+            record["fidelity"].pop("effect_continuation_failures")
+            (output / "game_log.jsonl").write_text(
+                json.dumps(record) + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                    RuntimeError,
+                    "missing fidelity counters: effect_continuation_failures"):
+                harvest._validate_artifacts(output, 1, "fixture-test")
+
+    def test_artifact_validation_rejects_missing_report_fidelity_counter(self):
+        with tempfile.TemporaryDirectory() as temp:
+            output = harvest.prepare_output_directory(Path(temp) / "run")
+            _write_valid_artifact_fixture(output, "fixture-test")
+            report_path = output / "fidelity_report.json"
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+            report.pop("lost_spell_recoveries")
+            report_path.write_text(json.dumps(report), encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                    RuntimeError,
+                    "Fidelity report is missing counters: lost_spell_recoveries"):
+                harvest._validate_artifacts(output, 1, "fixture-test")
+
     def test_artifact_validation_rejects_cross_file_count_mismatch(self):
         with tempfile.TemporaryDirectory() as temp:
             output = harvest.prepare_output_directory(Path(temp) / "run")
@@ -438,7 +471,12 @@ class HarvestFixturesTest(unittest.TestCase):
             fidelity_counters = {
                 "unimplemented_action": 0, "unparsed_mana": 0,
                 "unparsed_modal": 0, "unparsed_effects": 0,
+                "effect_continuation_failures": 0,
+                "lost_spell_recoveries": 0,
+                "unimplemented_action_types": set(),
                 "unparsed_cards": set(),
+                "effect_continuation_failure_contexts": [],
+                "lost_spell_recovery_contexts": [],
             }
 
         class SuccessfulEnvironment(RealEnvironment):
@@ -455,7 +493,10 @@ class HarvestFixturesTest(unittest.TestCase):
                 self._fidelity_agg = {
                     "games_recorded": 0, "unimplemented_action": 0,
                     "unparsed_mana": 0, "unparsed_modal": 0,
-                    "unparsed_effects": 0, "unparsed_cards": {},
+                    "unparsed_effects": 0,
+                    "effect_continuation_failures": 0,
+                    "lost_spell_recoveries": 0,
+                    "unparsed_cards": {},
                 }
                 self.output = Path(kwargs["deck_stats_path"])
                 self.stats_tracker = type(

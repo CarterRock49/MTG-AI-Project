@@ -471,7 +471,11 @@ class CardMemoryIntegrityTest(unittest.TestCase):
                 p1={"life": 20}, p2={"life": 0},
                 agent_is_p1=True, turn=4, max_turns=30,
                 terminal_reason="life_total",
-                fidelity_counters={"unparsed_effects": 1})
+                fidelity_counters={
+                    "unparsed_effects": 1,
+                    "effect_continuation_failures": 2,
+                    "lost_spell_recoveries": 3,
+                })
 
             original_write = env._atomic_write_json
             write_attempts = 0
@@ -500,6 +504,30 @@ class CardMemoryIntegrityTest(unittest.TestCase):
             self.assertTrue(records[0]["game_id"])
             self.assertEqual(report["games_recorded"], 1)
             self.assertEqual(report["unparsed_effects"], 1)
+            self.assertEqual(report["effect_continuation_failures"], 2)
+            self.assertEqual(report["lost_spell_recoveries"], 3)
+
+    def test_fidelity_serialization_backfills_partial_state_schema(self):
+        from Playersim.environment import AlphaZeroMTGEnv
+
+        env = AlphaZeroMTGEnv.__new__(AlphaZeroMTGEnv)
+        state = SimpleNamespace(fidelity_counters={"unparsed_effects": 0})
+
+        def ensure_fidelity_counters():
+            state.fidelity_counters.setdefault(
+                "effect_continuation_failures", 0)
+            state.fidelity_counters.setdefault("lost_spell_recoveries", 0)
+            return state.fidelity_counters
+
+        state._ensure_fidelity_counters = Mock(
+            side_effect=ensure_fidelity_counters)
+        env.game_state = state
+
+        counters = env._current_fidelity_counters()
+
+        state._ensure_fidelity_counters.assert_called_once_with()
+        self.assertIn("effect_continuation_failures", counters)
+        self.assertIn("lost_spell_recoveries", counters)
 
     def test_shared_artifact_path_refreshes_an_external_append(self):
         from Playersim.environment import AlphaZeroMTGEnv

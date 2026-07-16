@@ -195,6 +195,83 @@ class HandicapRatchetTest(unittest.TestCase):
             env.handicap_calls()[-1], ("set_opponent_handicap", (0.0, [])))
 
 
+class FinalStageHandicapTest(unittest.TestCase):
+    """A terminal stage has no mastery gate, but its handicap must ratchet."""
+
+    FINAL_STAGE_CURRICULUM = {
+        "id": "final-handicap-test",
+        "version": 1,
+        "progression": "mastery",
+        "stages": [
+            {
+                "name": "learn",
+                "start_timestep": 0,
+                "advance_when": {
+                    "window_episodes": 2,
+                    "min_stage_timesteps": 1,
+                    "max_stage_timesteps": 5,
+                    "min_decisive_win_rate": 0.5,
+                    "max_decisive_loss_rate": 0.5,
+                    "max_timeout_rate": 1.0,
+                },
+            },
+            {
+                "name": "full_pool",
+                "start_timestep": 5,
+                "profile_bag": ["novice"] * 2 + ["scripted"] * 8,
+                "handicap": {
+                    "profiles": ["scripted"],
+                    "start": 0.40,
+                    "step": 0.20,
+                    "window_episodes": 24,
+                    "min_decisive_win_rate": 0.5,
+                },
+            },
+        ],
+    }
+
+    def test_terminal_stage_ratchets_through_mixed_profile_cycles(self):
+        callback, probe, _ = build_callback(self.FINAL_STAGE_CURRICULUM)
+        callback.num_timesteps = 5
+        # Deadline-advance into the terminal stage.
+        callback.locals = {"infos": [], "dones": np.array([])}
+        assert callback._on_step()
+        self.assertEqual(callback._active_stage_index, 1)
+        self.assertEqual(callback._handicap_epsilon, 0.40)
+        # Reproduce the combat-v5 full-pool mix: each ten-game cycle contains
+        # eight handicapped scripted games and two unhandicapped novice games.
+        # The novice results must not evict scripted evidence from the
+        # handicap's 24-qualifying-episode window.
+        mixed_cycle = (
+            ["scripted"] * 4 + ["novice"]
+            + ["scripted"] * 4 + ["novice"])
+        for cycle_index in range(3):
+            for profile_index, profile in enumerate(mixed_cycle):
+                record_outcome(
+                    callback, profile, "win",
+                    0.40 if profile == "scripted" else 0.0,
+                    stage="full_pool")
+                if cycle_index < 2 or profile_index < 8:
+                    self.assertEqual(callback._handicap_epsilon, 0.40)
+            if cycle_index == 1:
+                saved = getattr(
+                    callback.model,
+                    m.CurriculumProgressCallback.MODEL_STATE_ATTRIBUTE)
+                self.assertEqual(len(saved["handicap_outcomes"]), 16)
+                restored = m.CurriculumProgressCallback(
+                    self.FINAL_STAGE_CURRICULUM)
+                restored.model = callback.model
+                restored.num_timesteps = callback.num_timesteps
+                restored._on_training_start()
+                self.assertEqual(len(restored._handicap_outcomes), 16)
+                callback = restored
+        self.assertEqual(callback._handicap_epsilon, 0.20)
+        self.assertEqual(
+            probe.handicap_calls()[-1],
+            ("set_opponent_handicap", (0.20, ["scripted"])))
+        self.assertEqual(len(callback._handicap_outcomes), 0)
+
+
 class StageTurnLimitTest(unittest.TestCase):
     """Curriculum stages may shorten episodes without moving the env ceiling."""
 

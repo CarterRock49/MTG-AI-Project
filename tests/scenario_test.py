@@ -12632,8 +12632,8 @@ def scenario_auto_tap_cast_from_untapped_lands():
         "auto-tap floated mana beyond the spell's cost"
 
 
-@scenario("601.2b / auto-tap",
-          "a return-permanent additional cost only offers returns that keep the cost payable")
+@scenario("601.2g-h / auto-tap",
+          "a mana permanent may tap before paying a return additional cost")
 def scenario_return_cost_preserves_mana_plan():
     gs = fresh(); env = get_env(); handler = env.action_handler
     gs.agent_is_p1 = True
@@ -12657,33 +12657,28 @@ def scenario_return_cost_preserves_mana_plan():
     }])
     player["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 0, 'C': 0}
 
-    # With only the two Islands, any return leaves {U}{U} unpayable.
-    mask = env.action_mask()
-    assert not mask[20], \
-        "PLAY_SPELL was offered although every return breaks the mana plan"
-
-    mountain = inject_into_zone(gs, player, {
-        "name": "Isolation Mountain", "type_line": "Basic Land - Mountain",
-        "oracle_text": "{T}: Add {R}.",
-    }, "battlefield")
+    # CR 601.2g lets both Islands activate before CR 601.2h returns one.
     mask = env.action_mask()
     assert mask[20], \
-        "PLAY_SPELL was absent although returning the Mountain keeps {U}{U} payable"
+        "PLAY_SPELL was absent although an Island can tap before returning"
     _, _, _, _, info = env.step(20)
     assert not info.get('execution_failed'), info.get('error_message')
     assert gs.phase == gs.PHASE_CHOOSE \
         and gs.choice_context.get("type") == "casting_additional_return", \
         "the cast did not enter its return-permanent choice"
-    assert gs.choice_context.get("options") == [mountain], \
-        f"viable return options were wrong: {gs.choice_context.get('options')}"
+    assert gs.choice_context.get("options") == islands, \
+        f"return options omitted a tappable Island: {gs.choice_context.get('options')}"
     _, _, _, _, info = env.step(353)
     assert not info.get('execution_failed'), info.get('error_message')
-    assert mountain in player["hand"], "the returned Mountain did not reach hand"
+    assert islands[0] in player["hand"], "the returned Island did not reach hand"
     assert gs.stack and gs.stack[-1][1] == fear, \
         "the spell did not reach the stack after paying its return cost"
     tapped = player.get("tapped_permanents", set())
-    assert all(island in tapped for island in islands), \
-        "auto-tap did not use both Islands after the Mountain was returned"
+    assert islands[1] in tapped, \
+        "the Island left on the battlefield was not tapped for mana"
+    paid = gs.stack[-1][3]["final_paid_details"]["payment"]
+    assert paid["colors"].get("U", 0) == 2, \
+        "both Islands did not produce the {U}{U} paid before the return"
 
 
 @scenario("117.1 / 601.2c", "a targeted sorcery preserves its main phase through target selection")

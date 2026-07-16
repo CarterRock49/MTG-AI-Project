@@ -137,6 +137,112 @@ class GameState(
         PHASE_MAIN_POSTCOMBAT, PHASE_END_STEP, PHASE_CLEANUP,
     })
 
+    # Keep the fidelity schema here rather than in individual engine paths so
+    # fresh games, resets, and clones all expose the same JSON-safe contract.
+    # Context lists are deliberately capped: one pathological game must not
+    # turn a diagnostic aid into an unbounded training-memory leak.
+    _FIDELITY_COUNT_KEYS = (
+        "unimplemented_action",
+        "unparsed_mana",
+        "unparsed_modal",
+        "unparsed_effects",
+        "effect_continuation_failures",
+        "lost_spell_recoveries",
+    )
+    _FIDELITY_SET_KEYS = (
+        "unimplemented_action_types",
+        "unparsed_cards",
+    )
+    _FIDELITY_CONTEXT_KEYS = (
+        "effect_continuation_failure_contexts",
+        "lost_spell_recovery_contexts",
+    )
+    _FIDELITY_CONTEXT_LIMIT = 32
+
+    @classmethod
+    def _new_fidelity_counters(cls):
+        counters = {key: 0 for key in cls._FIDELITY_COUNT_KEYS}
+        counters.update({key: set() for key in cls._FIDELITY_SET_KEYS})
+        counters.update({key: [] for key in cls._FIDELITY_CONTEXT_KEYS})
+        return counters
+
+    @classmethod
+    def _fidelity_json_safe(cls, value):
+        """Return deterministic data accepted by the per-game JSON writer."""
+        if value is None or isinstance(value, (str, bool, int)):
+            return value
+        if isinstance(value, float):
+            return value if np.isfinite(value) else str(value)
+        if isinstance(value, dict):
+            return {
+                str(key): cls._fidelity_json_safe(item)
+                for key, item in sorted(
+                    value.items(), key=lambda pair: str(pair[0]))
+            }
+        if isinstance(value, set):
+            ordered = sorted(value, key=lambda item: str(item))
+            return [cls._fidelity_json_safe(item) for item in ordered]
+        if isinstance(value, (list, tuple)):
+            return [cls._fidelity_json_safe(item) for item in value]
+        return str(value)
+
+    def _ensure_fidelity_counters(self):
+        """Backfill the current fidelity schema on legacy/cloned state.
+
+        Older in-memory states can lack newly introduced keys, while tests and
+        lookahead clones occasionally provide a partial counter dictionary.
+        Normalize those shapes at the write boundary instead of making every
+        caller know which version created the state.
+        """
+        counters = getattr(self, "fidelity_counters", None)
+        if not isinstance(counters, dict):
+            counters = {}
+            self.fidelity_counters = counters
+
+        for key in self._FIDELITY_COUNT_KEYS:
+            try:
+                counters[key] = max(0, int(counters.get(key, 0) or 0))
+            except (TypeError, ValueError, OverflowError):
+                counters[key] = 0
+
+        for key in self._FIDELITY_SET_KEYS:
+            value = counters.get(key, set())
+            if isinstance(value, set):
+                continue
+            if isinstance(value, (list, tuple)):
+                counters[key] = {str(item) for item in value}
+            elif value:
+                counters[key] = {str(value)}
+            else:
+                counters[key] = set()
+
+        for key in self._FIDELITY_CONTEXT_KEYS:
+            value = counters.get(key, [])
+            if isinstance(value, set):
+                value = sorted(value, key=lambda item: str(item))
+            elif isinstance(value, tuple):
+                value = list(value)
+            elif not isinstance(value, list):
+                value = [value] if value else []
+            counters[key] = [
+                self._fidelity_json_safe(item)
+                for item in value[:self._FIDELITY_CONTEXT_LIMIT]
+            ]
+        return counters
+
+    def _record_fidelity_issue(self, counter_key, context_key, context,
+                               count=1):
+        """Increment one fidelity category and retain bounded diagnostics."""
+        counters = self._ensure_fidelity_counters()
+        try:
+            increment = max(0, int(count))
+        except (TypeError, ValueError, OverflowError):
+            increment = 1
+        counters[counter_key] = int(counters.get(counter_key, 0) or 0) + increment
+        contexts = counters.setdefault(context_key, [])
+        if len(contexts) < self._FIDELITY_CONTEXT_LIMIT:
+            contexts.append(self._fidelity_json_safe(context))
+
     def _get_phase(self):
         return self._phase
 
@@ -512,14 +618,7 @@ class GameState(
                             _card.reset_to_printed()
             except Exception as _e:
                 logging.error(f"Error clearing transient card state: {_e}")
-            self.fidelity_counters = {
-                "unimplemented_action": 0,
-                "unimplemented_action_types": set(),
-                "unparsed_mana": 0,
-                "unparsed_modal": 0,
-                "unparsed_effects": 0,
-                "unparsed_cards": set(),  # names of cards whose text the engine could not fully parse
-            }
+            self.fidelity_counters = self._new_fidelity_counters()
             self.day_night_state = None
             self.day_night_checked_this_turn = False
             self.split_second_active = False
@@ -1018,41 +1117,34 @@ class GameState(
         """
 
         logging.debug("Cloning GameState starting...")
-        # 1. Copy the registry mapping, then isolate every card identity that
-        # can become mutable in this branch. The frozen registry records remain
-        # shared only for unreachable cards; live/zone/stack/merged cards use
-        # branch-local Card objects.
-        cloned_card_db = self.card_db.copy()
-        reachable_card_ids = set()
-        for player in (self.p1, self.p2):
-            if not player:
-                continue
-            for zone in (
-                    "library", "hand", "battlefield", "graveyard", "exile"):
-                reachable_card_ids.update(player.get(zone, []))
-        for item in getattr(self, "stack", []):
-            if isinstance(item, tuple) and len(item) > 1:
-                reachable_card_ids.add(item[1])
-        for info in getattr(self, "mutated_permanents", {}).values():
-            reachable_card_ids.update(info.get("components", []))
-        for primary_id, info in getattr(self, "melded_permanents", {}).items():
-            reachable_card_ids.update({
-                primary_id, info.get("partner_id"), info.get("result_id")})
-        for source_id, info in getattr(self, "specialized_cards", {}).items():
-            reachable_card_ids.update({source_id, info.get("variant_id")})
-        reachable_card_ids.discard(None)
-        for card_id in reachable_card_ids:
-            card = self.card_db.get(card_id)
-            if card is not None:
-                cloned_card_db[card_id] = self._clone_card_object(
-                    card, None)
+        # 1. Isolate every registry Card before GameState construction.  The
+        # constructor resets all Card objects it receives, including objects
+        # outside the five standard zones.
+        # GameState construction resets transient state on every card in the
+        # supplied registry.  Passing through even one shared Card therefore
+        # mutates the source branch merely by taking a checkpoint (phased-out
+        # cards exposed this first, but permission/copy trackers can hold many
+        # other nonstandard live objects).  Isolate the complete registry;
+        # maintaining an exhaustive list of every rules zone is brittle.
+        cloned_card_db = {
+            card_id: self._clone_card_object(card, None)
+            for card_id, card in self.card_db.items()
+        }
         # Construct only after replacing live objects. GameState initialization
         # resets transient Card state, so passing the source branch's live Card
         # objects here would itself mutate the source while making a clone.
         cloned_state = GameState(
             cloned_card_db, self.max_turns, self.max_hand_size,
             self.max_battlefield)
-        for card_id in reachable_card_ids:
+        for card_id in self.card_db:
+            # GameState construction deliberately clears transient Card state
+            # (counters, faces, layer output) to prevent cross-game leakage.
+            # A branch clone needs the opposite semantics: restore the exact
+            # live object after construction has completed its reset pass.
+            source_card = self.card_db.get(card_id)
+            if source_card is not None:
+                cloned_state.card_db[card_id] = self._clone_card_object(
+                    source_card, cloned_state)
             cloned_card = cloned_state.card_db.get(card_id)
             if cloned_card is not None and hasattr(cloned_card, "game_state"):
                 cloned_card.game_state = cloned_state
@@ -1100,6 +1192,7 @@ class GameState(
         mutable_attrs_deepcopy = [
             "stack", "current_block_assignments", "exhaust_ability_used", "_last_card_locations",
             "_ceased_token_cards",
+            "fidelity_counters",
             "impending_cards", "_offspring_cost_paid_context", "until_end_of_turn_effects",
             "temp_control_effects", "abilities_activated_this_turn", "spells_cast_this_turn",
             "once_per_turn_triggers",
@@ -1154,6 +1247,11 @@ class GameState(
                 except Exception as e:
                     logging.error(f"Error copying attribute '{attr}': {e}")
                     setattr(cloned_state, attr, [] if isinstance(val, (list, set)) else {}) # Fallback empty
+
+        # ``fidelity_counters`` was smaller in older states.  Preserve all
+        # existing counts while backfilling the current schema, and ensure the
+        # cloned diagnostic lists cannot mutate their source branch.
+        cloned_state._ensure_fidelity_counters()
 
         # ``deepcopy(stack)`` creates detached copies of the controller player
         # dictionaries.  Those compare like players but are not either cloned
@@ -1359,6 +1457,97 @@ class GameState(
             except Exception as e:
                  logging.error(f"Error cloning AbilityHandler state: {e}", exc_info=True)
 
+        # Final completeness pass.  The historical hand-maintained attribute
+        # lists above inevitably missed newly added slots, which made a clone
+        # (and therefore a transaction checkpoint) silently reset unrelated
+        # live state.  Copy every ordinary slot with one identity memo, and
+        # copy every mutable subsystem into its already-created clone-local
+        # object so no source/player/Card/system references leak across.
+        subsystem_names = (
+            "ability_handler", "layer_system", "mana_system",
+            "replacement_effects", "targeting_system", "combat_resolver",
+            "action_handler", "card_evaluator", "strategic_planner",
+            "combat_action_handler")
+        if (getattr(self, "combat_action_handler", None) is not None
+                and getattr(cloned_state, "combat_action_handler", None) is None):
+            cloned_state.combat_action_handler = copy.copy(
+                self.combat_action_handler)
+
+        identity_memo = {
+            id(self): cloned_state,
+            id(self.p1): cloned_state.p1,
+            id(self.p2): cloned_state.p2,
+        }
+        for card_id, source_card in self.card_db.items():
+            cloned_card = cloned_state.card_db.get(card_id)
+            if cloned_card is not None:
+                identity_memo[id(source_card)] = cloned_card
+        for name in subsystem_names:
+            source_system = getattr(self, name, None)
+            cloned_system = getattr(cloned_state, name, None)
+            if source_system is not None and cloned_system is not None:
+                identity_memo[id(source_system)] = cloned_system
+        for name in ("strategy_memory", "stats_tracker", "card_memory"):
+            service = getattr(self, name, None)
+            if service is not None:
+                identity_memo[id(service)] = service
+
+        excluded_slots = {
+            "card_db", "p1", "p2", "delayed_triggers",
+            "strategy_memory", "stats_tracker", "card_memory",
+            *subsystem_names,
+        }
+        for name in self.__slots__:
+            if name in excluded_slots or not hasattr(self, name):
+                continue
+            try:
+                setattr(cloned_state, name, copy.deepcopy(
+                    getattr(self, name), identity_memo))
+            except Exception as clone_error:
+                logging.error(
+                    "Clone completeness pass failed for slot %s: %s",
+                    name, clone_error, exc_info=True)
+                raise
+
+        for name in subsystem_names:
+            source_system = getattr(self, name, None)
+            cloned_system = getattr(cloned_state, name, None)
+            if source_system is None or cloned_system is None:
+                continue
+            source_dict = getattr(source_system, "__dict__", None)
+            target_dict = getattr(cloned_system, "__dict__", None)
+            if source_dict is None or target_dict is None:
+                continue
+            target_dict.clear()
+            for key, value in source_dict.items():
+                try:
+                    target_dict[key] = copy.deepcopy(value, identity_memo)
+                except Exception as clone_error:
+                    logging.error(
+                        "Clone completeness pass failed for %s.%s: %s",
+                        name, key, clone_error, exc_info=True)
+                    raise
+
+        # Function objects are immutable to deepcopy.  Rebind callbacks after
+        # the completeness pass (which is the final writer of subsystem
+        # state), before layer application can invoke a source-capturing
+        # condition during lookahead.
+        if cloned_state.replacement_effects:
+            for effect in getattr(
+                    cloned_state.replacement_effects,
+                    "active_effects", []):
+                self._rebind_rule_effect_callbacks(effect, cloned_state)
+            cloned_state.replacement_effects.effect_index = defaultdict(list)
+            for effect in cloned_state.replacement_effects.active_effects:
+                event_type = effect.get("event_type")
+                if event_type:
+                    cloned_state.replacement_effects.effect_index[
+                        event_type].append(effect)
+        if cloned_state.layer_system:
+            for effect in self._iter_layer_effect_data(
+                    cloned_state.layer_system):
+                self._rebind_rule_effect_callbacks(effect, cloned_state)
+
 
         # Other subsystems: Most likely stateless or state handled elsewhere (e.g., player mana pool for ManaSystem)
         # Just ensure they are linked to the CLONED state (done by _init_subsystems)
@@ -1409,10 +1598,345 @@ class GameState(
         logging.info("GameState cloned successfully.")
         return cloned_state
 
+    def create_transaction_checkpoint(self):
+        """Capture a restorable pre-mutation state for an engine transaction.
+
+        A constructor-free ``deepcopy`` captures the complete slotted object
+        graph without layer application, registration side effects, or log
+        traffic. The three analytics services intentionally keep their live
+        identities; payment preflight detaches them before executing any
+        speculative rule event.
+        """
+        subsystem_names = (
+            "ability_handler", "layer_system", "mana_system",
+            "replacement_effects", "targeting_system", "combat_resolver",
+            "action_handler", "card_evaluator", "strategic_planner",
+            "combat_action_handler")
+        identities = {
+            # Keep the exact live identities separately from the cloned state.
+            # A failed cost can delete a token from card_db, so consulting the
+            # already-mutated registry during restore is too late.
+            "p1": self.p1,
+            "p2": self.p2,
+            "card_db": self.card_db,
+            "cards": dict(self.card_db),
+            "ceased_token_cards": getattr(self, "_ceased_token_cards", None),
+            # Tokens that ceased to exist are deliberately absent from
+            # ``card_db`` but their Card objects are still part of rules
+            # state.  Preserve their pre-transaction identities separately;
+            # a later failed sacrifice may otherwise replace one with the
+            # checkpoint's copied Card object.
+            "ceased_cards": dict(
+                getattr(self, "_ceased_token_cards", {}) or {}),
+            "systems": {
+                name: getattr(self, name, None)
+                for name in subsystem_names
+            },
+            "external": {
+                name: getattr(self, name, None)
+                for name in (
+                    "strategy_memory", "stats_tracker", "card_memory")
+            },
+        }
+        # Deepcopy allocates the whole slotted object graph without invoking
+        # GameState/Card/subsystem constructors.  Pin long-lived analytics:
+        # they are not rules state and may own locks/background writers.
+        donor_memo = {
+            id(service): service
+            for service in identities["external"].values()
+            if service is not None
+        }
+        state = copy.deepcopy(self, donor_memo)
+        if state.replacement_effects and self.replacement_effects:
+            for effect in getattr(
+                    state.replacement_effects, "active_effects", []):
+                self._rebind_rule_effect_callbacks(effect, state)
+            state.replacement_effects.effect_index = defaultdict(list)
+            for effect in state.replacement_effects.active_effects:
+                if effect.get("event_type"):
+                    state.replacement_effects.effect_index[
+                        effect["event_type"]].append(effect)
+        if state.layer_system:
+            for effect in self._iter_layer_effect_data(state.layer_system):
+                self._rebind_rule_effect_callbacks(effect, state)
+        # Python functions are immutable to deepcopy, so explicitly rebind
+        # supported delayed callbacks whose closures capture this GameState.
+        state.delayed_triggers = []
+        for entry in getattr(self, "delayed_triggers", []):
+            cloned_entry = self._clone_delayed_trigger_entry(entry, state)
+            if cloned_entry is not None:
+                state.delayed_triggers.append(cloned_entry)
+        return {"state": state, "identities": identities}
+
+    def restore_transaction_checkpoint(self, checkpoint):
+        """Restore a checkpoint without invalidating caller-held identities.
+
+        Payment callers commonly retain references to ``p1``/``p2`` and to
+        live ``Card`` objects.  Swapping in the clone would make those callers
+        observe the abandoned branch, so players and cards are restored in
+        place while rules subsystems are rebuilt against this GameState.
+        """
+        if isinstance(checkpoint, dict):
+            snapshot = checkpoint.get("state")
+        else:
+            snapshot = checkpoint
+        if not isinstance(snapshot, GameState):
+            raise ValueError("Invalid transaction checkpoint.")
+
+        identities = (
+            checkpoint.get("identities", {})
+            if isinstance(checkpoint, dict) else {})
+        subsystem_names = (
+            "ability_handler", "layer_system", "mana_system",
+            "replacement_effects", "targeting_system", "combat_resolver",
+            "action_handler", "card_evaluator", "strategic_planner",
+            "combat_action_handler")
+        live_p1 = identities.get("p1", self.p1)
+        live_p2 = identities.get("p2", self.p2)
+        live_card_db = identities.get("card_db", self.card_db)
+        live_cards = identities.get("cards", dict(self.card_db))
+        live_ceased_cards = identities.get("ceased_cards", {})
+        live_systems = {
+            name: identities.get("systems", {}).get(
+                name, getattr(self, name, None))
+            for name in subsystem_names
+        }
+        external = {
+            name: identities.get("external", {}).get(
+                name, getattr(self, name, None))
+            for name in ("strategy_memory", "stats_tracker", "card_memory")
+        }
+
+        memo = {id(snapshot): self}
+        memo[id(snapshot.card_db)] = live_card_db
+        if snapshot.p1 is not None and live_p1 is not None:
+            memo[id(snapshot.p1)] = live_p1
+        if snapshot.p2 is not None and live_p2 is not None:
+            memo[id(snapshot.p2)] = live_p2
+        snapshot_ceased_identity = getattr(
+            snapshot, "_ceased_token_cards", None)
+        live_ceased_identity = identities.get("ceased_token_cards")
+        if (snapshot_ceased_identity is not None
+                and live_ceased_identity is not None):
+            memo[id(snapshot_ceased_identity)] = live_ceased_identity
+        for name in subsystem_names:
+            snapshot_system = getattr(snapshot, name, None)
+            live_system = live_systems.get(name)
+            if snapshot_system is not None and live_system is not None:
+                memo[id(snapshot_system)] = live_system
+        for name, service in external.items():
+            snapshot_service = getattr(snapshot, name, None)
+            if snapshot_service is not None and service is not None:
+                memo[id(snapshot_service)] = service
+
+        # Establish every Card identity mapping before copying any one card's
+        # fields, since Card payloads may refer to another live Card.  Use the
+        # identities captured before payment, not the possibly-depleted live
+        # registry (sacrificed tokens are deleted there).
+        restored_cards = {}
+        for card_id, snapshot_card in snapshot.card_db.items():
+            live_card = live_cards.get(card_id)
+            if live_card is None:
+                live_card = copy.copy(snapshot_card)
+            restored_cards[card_id] = live_card
+            memo[id(snapshot_card)] = live_card
+
+        # Establish the same mapping for pre-existing ceased tokens.  They
+        # are not in card_db, and must remain the exact caller-visible Card
+        # objects after a failed transaction.
+        snapshot_ceased_cards = (
+            getattr(snapshot, "_ceased_token_cards", {}) or {})
+        for card_id, snapshot_card in snapshot_ceased_cards.items():
+            live_card = live_ceased_cards.get(card_id)
+            if live_card is not None:
+                memo[id(snapshot_card)] = live_card
+
+        for card_id, snapshot_card in snapshot.card_db.items():
+            live_card = restored_cards[card_id]
+            if live_card is snapshot_card or not hasattr(snapshot_card, "__dict__"):
+                continue
+            live_card.__dict__.clear()
+            for key, value in snapshot_card.__dict__.items():
+                live_card.__dict__[key] = copy.deepcopy(value, memo)
+        restored_card_object_ids = {
+            id(card) for card in restored_cards.values()
+        }
+        for card_id, snapshot_card in snapshot_ceased_cards.items():
+            live_card = live_ceased_cards.get(card_id)
+            if (live_card is None or id(live_card) in restored_card_object_ids
+                    or live_card is snapshot_card
+                    or not hasattr(snapshot_card, "__dict__")):
+                continue
+            live_card.__dict__.clear()
+            for key, value in snapshot_card.__dict__.items():
+                live_card.__dict__[key] = copy.deepcopy(value, memo)
+        live_card_db.clear()
+        live_card_db.update(restored_cards)
+        self.card_db = live_card_db
+        for card in self.card_db.values():
+            if hasattr(card, "game_state"):
+                card.game_state = self
+
+        def restore_player(live_player, snapshot_player):
+            if snapshot_player is None:
+                return None
+            if live_player is None:
+                return copy.deepcopy(snapshot_player, memo)
+            live_player.clear()
+            for key, value in snapshot_player.items():
+                live_player[copy.deepcopy(key, memo)] = copy.deepcopy(
+                    value, memo)
+            return live_player
+
+        self.p1 = restore_player(live_p1, snapshot.p1)
+        self.p2 = restore_player(live_p2, snapshot.p2)
+
+        special_names = {
+            "card_db", "p1", "p2", "delayed_triggers",
+            "_ceased_token_cards",
+            "strategy_memory", "stats_tracker", "card_memory",
+            *subsystem_names,
+        }
+        for name in self.__slots__:
+            if name in special_names:
+                continue
+            if not hasattr(snapshot, name):
+                if hasattr(self, name):
+                    delattr(self, name)
+                continue
+            setattr(self, name, copy.deepcopy(getattr(snapshot, name), memo))
+
+        snapshot_ceased = getattr(snapshot, "_ceased_token_cards", None)
+        live_ceased = identities.get("ceased_token_cards")
+        if live_ceased is None:
+            self._ceased_token_cards = copy.deepcopy(snapshot_ceased, memo)
+        else:
+            if hasattr(live_ceased, "clear"):
+                live_ceased.clear()
+            if isinstance(live_ceased, dict):
+                live_ceased.update({
+                    copy.deepcopy(key, memo): copy.deepcopy(value, memo)
+                    for key, value in (snapshot_ceased or {}).items()
+                })
+            elif isinstance(live_ceased, set):
+                live_ceased.update(
+                    copy.deepcopy(value, memo)
+                    for value in (snapshot_ceased or set()))
+            elif isinstance(live_ceased, list):
+                live_ceased.extend(
+                    copy.deepcopy(value, memo)
+                    for value in (snapshot_ceased or []))
+            self._ceased_token_cards = live_ceased
+
+        # Restore every subsystem into its pre-transaction object.  Replacing
+        # these objects leaves action handlers and callback closures pointing
+        # at stale rule systems even if their visible fields look correct.
+        for name in subsystem_names:
+            live_system = live_systems.get(name)
+            snapshot_system = getattr(snapshot, name, None)
+            setattr(self, name, live_system)
+            if live_system is None or snapshot_system is None:
+                continue
+            source_dict = getattr(snapshot_system, "__dict__", None)
+            target_dict = getattr(live_system, "__dict__", None)
+            if source_dict is None or target_dict is None:
+                continue
+            target_dict.clear()
+            for key, value in source_dict.items():
+                target_dict[key] = copy.deepcopy(value, memo)
+
+        # ``deepcopy`` cannot rewrite closure cells in Python functions.  The
+        # checkpoint deliberately rebound replacement callbacks to the
+        # snapshot so speculative preflight is isolated; after restoring the
+        # subsystem dictionaries, rebind those snapshot captures back to this
+        # live graph and rebuild the index from the very same effect dicts.
+        if self.replacement_effects:
+            active_effects = getattr(
+                self.replacement_effects, "active_effects", [])
+            for effect in active_effects:
+                snapshot._rebind_rule_effect_callbacks(effect, self)
+            effect_index = defaultdict(list)
+            for effect in active_effects:
+                event_type = effect.get("event_type")
+                if event_type:
+                    effect_index[event_type].append(effect)
+            self.replacement_effects.effect_index = effect_index
+        if self.layer_system:
+            for effect in snapshot._iter_layer_effect_data(
+                    self.layer_system):
+                snapshot._rebind_rule_effect_callbacks(effect, self)
+
+        for name, service in external.items():
+            setattr(self, name, service)
+
+        self.delayed_triggers = []
+        for entry in getattr(snapshot, "delayed_triggers", []):
+            restored_entry = snapshot._clone_delayed_trigger_entry(entry, self)
+            if restored_entry is not None:
+                self.delayed_triggers.append(restored_entry)
+
+        if self.mana_system:
+            self.mana_system.game_state = self
+        if self.action_handler:
+            self.action_handler.game_state = self
+            if (hasattr(self.action_handler, "combat_handler")
+                    and self.action_handler.combat_handler):
+                self.action_handler.combat_handler.game_state = self
+        if self.combat_action_handler:
+            self.combat_action_handler.game_state = self
+        if self.card_evaluator:
+            self.card_evaluator.game_state = self
+            self.card_evaluator.stats_tracker = self.stats_tracker
+            self.card_evaluator.card_memory = self.card_memory
+        if self.strategic_planner:
+            self.strategic_planner.game_state = self
+            self.strategic_planner.card_evaluator = self.card_evaluator
+            self.strategic_planner.combat_resolver = self.combat_resolver
+            if hasattr(self.strategic_planner, "strategy_memory"):
+                self.strategic_planner.strategy_memory = self.strategy_memory
+        if self.targeting_system:
+            self.targeting_system.game_state = self
+            self.targeting_system.ability_handler = self.ability_handler
+        if self.ability_handler:
+            self.ability_handler.game_state = self
+            self.ability_handler.targeting_system = self.targeting_system
+        if self.combat_resolver:
+            self.combat_resolver.game_state = self
+            self.combat_resolver.action_handler = self.combat_action_handler
+
+        return True
+
     @staticmethod
     def _make_closure_cell(value):
         """Create a Python closure cell containing value."""
         return (lambda captured: lambda: captured)(value).__closure__[0]
+
+    @staticmethod
+    def _iter_layer_effect_data(layer_system):
+        """Yield effect payload dictionaries from flat and layer-7 buckets."""
+        if layer_system is None:
+            return
+        for layer_bucket in getattr(layer_system, "layers", {}).values():
+            effect_lists = (
+                layer_bucket.values()
+                if isinstance(layer_bucket, dict) else (layer_bucket,))
+            for effects in effect_lists:
+                for entry in effects or ():
+                    if (isinstance(entry, (list, tuple))
+                            and len(entry) >= 2
+                            and isinstance(entry[1], dict)):
+                        yield entry[1]
+
+    def _rebind_rule_effect_callbacks(self, effect_data, cloned_state):
+        """Rebind callback-valued fields in one replacement/layer effect."""
+        if not isinstance(effect_data, dict):
+            return effect_data
+        for key in ("condition", "replacement"):
+            callback = effect_data.get(key)
+            if callable(callback):
+                effect_data[key] = self._clone_legacy_callback(
+                    callback, cloned_state)
+        return effect_data
 
     @staticmethod
     def _clone_card_object(card, cloned_state):

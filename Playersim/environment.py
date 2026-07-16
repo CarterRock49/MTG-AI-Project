@@ -58,6 +58,18 @@ class AlphaZeroMTGEnv(gym.Env):
     DEFAULT_STATE_POTENTIAL_SCALE = 0.40
     OBSERVATION_SCHEMA_VERSION = OBSERVATION_SCHEMA_VERSION
     OBSERVATION_SCHEMA_SHA256 = OBSERVATION_SCHEMA_SHA256
+    EVALUATION_TRACE_MAX_EVENTS = 8_192
+    EVALUATION_TRACE_MAX_BYTES = 8 * 1024 * 1024
+    EVALUATION_TRACE_ENTRY_MAX_BYTES = 512 * 1024
+    EVALUATION_REPLAY_MAX_EVENTS = 4_096
+    EVALUATION_REPLAY_MAX_BYTES = 2 * 1024 * 1024
+    EVALUATION_REPLAY_ENTRY_MAX_BYTES = 64 * 1024
+    EVALUATION_DEBUG_MAX_BYTES = 12 * 1024 * 1024
+    DIAGNOSTIC_MAX_DEPTH = 10
+    DIAGNOSTIC_MAX_NODES = 32_768
+    DIAGNOSTIC_MAX_CONTAINER_ITEMS = 512
+    DIAGNOSTIC_MAX_STRING_LENGTH = 4_096
+    DIAGNOSTIC_MAX_KEY_LENGTH = 256
 
     def __init__(self, decks, card_db, max_turns=30, max_hand_size=7, max_battlefield=20,
                  deck_stats_path="./deck_stats", card_memory_path="./card_memory",
@@ -90,7 +102,10 @@ class AlphaZeroMTGEnv(gym.Env):
         self.evaluation_checkpoint_sha256 = None
         self._fidelity_agg = {"games_recorded": 0, "unimplemented_action": 0,
                               "unparsed_mana": 0, "unparsed_modal": 0,
-                              "unparsed_effects": 0, "unparsed_cards": {}}
+                              "unparsed_effects": 0,
+                              "effect_continuation_failures": 0,
+                              "lost_spell_recoveries": 0,
+                              "unparsed_cards": {}}
         self._stats_artifact_states = {}
         self._current_stats_artifact_entry = None
         self.max_turns = max_turns
@@ -121,6 +136,11 @@ class AlphaZeroMTGEnv(gym.Env):
             if self.strategy_memory_enabled else None)
         self.current_episode_actions = []
         self.replay_actions = []
+        # Successful evaluation traces are intentionally opt-in.  A normal
+        # training environment never pays the state-snapshot or serialization
+        # cost; set_evaluation_checkpoint() is the enablement boundary.
+        self.evaluation_action_trace = []
+        self._reset_evaluation_capture_telemetry()
         self.reset_seed = None
         self.opponent_policy = None
         if opponent_profile not in OPPONENT_PROFILES:
@@ -611,6 +631,17 @@ class AlphaZeroMTGEnv(gym.Env):
         """Attribute evaluator game records to the exact policy snapshot."""
         self.evaluation_timestep = int(timestep)
         self.evaluation_checkpoint_sha256 = str(checkpoint_sha256)
+        evaluator = getattr(self, "card_evaluator", None)
+        enable_diagnostics = getattr(
+            evaluator, "set_diagnostics_enabled", None)
+        if callable(enable_diagnostics):
+            try:
+                enable_diagnostics(True, reset=True)
+            except Exception as error:
+                logging.warning(
+                    "Could not enable evaluation card diagnostics: %s", error)
+                self._note_evaluation_capture_error(
+                    "enable_evaluator_diagnostics", error, scope="trace")
 
     def set_episode_schedule(self, cases):
         """Install an exact reset schedule used by deterministic evaluation."""
@@ -728,6 +759,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.episode_invalid_actions = 0
                 self.current_episode_actions = []
                 self.replay_actions = []
+                self.evaluation_action_trace = []
+                self._reset_evaluation_capture_telemetry()
                 self._game_result_recorded = False
                 self._stats_result_record_attempted = False
                 self._card_memory_result_record_attempted = False
@@ -1242,6 +1275,18 @@ class AlphaZeroMTGEnv(gym.Env):
         if self.card_evaluator:
             self.card_evaluator.stats_tracker = getattr(gs, 'stats_tracker', None)
             self.card_evaluator.card_memory = getattr(gs, 'card_memory', None)
+            enable_diagnostics = getattr(
+                self.card_evaluator, "set_diagnostics_enabled", None)
+            if callable(enable_diagnostics):
+                try:
+                    enable_diagnostics(
+                        self._evaluation_trace_enabled(), reset=True)
+                except Exception as error:
+                    logging.warning(
+                        "Could not configure evaluator diagnostics: %s", error)
+                    self._note_evaluation_capture_error(
+                        "configure_evaluator_diagnostics", error,
+                        scope="trace")
         self.combat_resolver = getattr(gs, 'combat_resolver', None)
 
         self.strategic_planner = None
@@ -1272,6 +1317,8 @@ class AlphaZeroMTGEnv(gym.Env):
             "unparsed_mana": 0,
             "unparsed_modal": 0,
             "unparsed_effects": 0,
+            "effect_continuation_failures": 0,
+            "lost_spell_recoveries": 0,
             "unparsed_cards": {},
         }
 
@@ -1281,7 +1328,8 @@ class AlphaZeroMTGEnv(gym.Env):
         aggregate["games_recorded"] += 1
         for key in (
                 "unimplemented_action", "unparsed_mana", "unparsed_modal",
-                "unparsed_effects"):
+                "unparsed_effects", "effect_continuation_failures",
+                "lost_spell_recoveries"):
             try:
                 count = int(fidelity.get(key, 0) or 0)
             except (TypeError, ValueError, OverflowError):
@@ -1486,6 +1534,19 @@ class AlphaZeroMTGEnv(gym.Env):
                 exc_info=True)
             return False
 
+    def _current_fidelity_counters(self):
+        """Return the complete fidelity schema at every serialization boundary.
+
+        Restored legacy/partial states can predate newly strict counters.  The
+        GameState normalizer is therefore part of the write boundary: omission
+        must never be interpreted downstream as a clean zero.
+        """
+        gs = getattr(self, "game_state", None)
+        ensure = getattr(gs, "_ensure_fidelity_counters", None)
+        counters = ensure() if callable(ensure) else getattr(
+            gs, "fidelity_counters", None)
+        return counters if isinstance(counters, dict) else {}
+
     def _write_stats_artifacts(self):
         """Append this game to the per-game log and refresh the fidelity report.
 
@@ -1504,7 +1565,7 @@ class AlphaZeroMTGEnv(gym.Env):
         base = os.path.abspath(os.fspath(base))
         os.makedirs(base, exist_ok=True)
 
-        fc = getattr(gs, 'fidelity_counters', None) or {}
+        fc = self._current_fidelity_counters()
         per_game_fidelity = {k: (sorted(v) if isinstance(v, set) else v) for k, v in fc.items()}
         fallback_agent_deck = (
             getattr(self, "current_deck_name_p1", "Unknown_P1")
@@ -2127,6 +2188,7 @@ class AlphaZeroMTGEnv(gym.Env):
         # Potential-based shaping is computed from the learned agent's fixed
         # perspective across the complete agent + scripted-opponent transition.
         previous_state_potential = self._calculate_state_potential()
+        learned_trace_sequence = None
         strategy_pattern = None
         if self.strategy_memory is not None:
             try:
@@ -2188,6 +2250,8 @@ class AlphaZeroMTGEnv(gym.Env):
                      self.ensure_game_result_recorded(forced_result="invalid_limit") # Record specific result
                 gs.agent_is_p1 = initial_agent_is_p1 # Ensure perspective before getting obs
                 obs = self._get_obs_safe() # Get current observation
+                self._attach_evaluation_terminal_debug(
+                    env_info, step_reward, done, truncated)
                 return obs, step_reward, done, truncated, env_info
 
             # Reset counter if action is valid
@@ -2207,10 +2271,25 @@ class AlphaZeroMTGEnv(gym.Env):
                  obs = self._get_obs_safe()
                  self.ensure_game_result_recorded(forced_result="error")
                  step_reward = self._failure_transition_reward(
-                     env_info, previous_state_potential)
+                      env_info, previous_state_potential)
+                 self._attach_evaluation_terminal_debug(
+                     env_info, step_reward, True, False)
                  return obs, step_reward, True, False, env_info # done=True
 
+            learned_pre_state = (
+                self._safe_evaluation_state_snapshot("learned_pre_state")
+                if self._evaluation_trace_enabled() else None)
             reward, done, truncated, handler_info = self.action_handler.apply_action(action_idx, context=action_context)
+            if learned_pre_state is not None:
+                learned_trace_sequence = self._record_evaluation_atomic_action(
+                    actor="learned",
+                    actor_is_p1=bool(initial_agent_is_p1),
+                    action_idx=action_idx,
+                    context=action_context,
+                    pre_state=learned_pre_state,
+                    post_state=self._safe_evaluation_state_snapshot(
+                        "learned_post_state"),
+                )
             env_info.update(handler_info) # Merge info
 
             if handler_info.get("execution_failed"):
@@ -2275,7 +2354,21 @@ class AlphaZeroMTGEnv(gym.Env):
                      gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective
                      break # Exit opponent loop
 
+                opponent_pre_state = (
+                    self._safe_evaluation_state_snapshot(
+                        "opponent_pre_state")
+                    if self._evaluation_trace_enabled() else None)
                 _, opp_done, opp_truncated, opp_handler_info = self.action_handler.apply_action(opponent_action_idx, context=opponent_action_context)
+                if opponent_pre_state is not None:
+                    self._record_evaluation_atomic_action(
+                        actor="opponent",
+                        actor_is_p1=bool(opponent_player is gs.p1),
+                        action_idx=opponent_action_idx,
+                        context=opponent_action_context,
+                        pre_state=opponent_pre_state,
+                        post_state=self._safe_evaluation_state_snapshot(
+                            "opponent_post_state"),
+                    )
 
                 # Check if the opponent's action ended the game
                 done = done or opp_done # Update global done flag
@@ -2425,6 +2518,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 "state_potential_previous": float(previous_state_potential),
             }
             env_info["reward_contract"] = self.REWARD_CONTRACT_VERSION
+            self._attach_evaluation_transition_reward(
+                learned_trace_sequence, step_reward, env_info)
 
             # --- 7. Get Final Observation and Mask for the AGENT ---
             # *** Ensure perspective is set to agent BEFORE getting obs and mask ***
@@ -2459,7 +2554,13 @@ class AlphaZeroMTGEnv(gym.Env):
 
             # --- 8. Record History and Finalize ---
             if hasattr(self, 'current_episode_actions'): self.current_episode_actions.append(action_idx)
-            self.replay_actions.append({"action": int(action_idx), "context": dict(action_context)})
+            self._record_learned_replay_action(
+                action_idx, action_context,
+                trace_sequence=learned_trace_sequence,
+                step_reward=step_reward,
+                done=done,
+                truncated=truncated,
+            )
             if hasattr(self, 'episode_rewards'): self.episode_rewards.append(step_reward)
             if self.strategy_memory is not None and strategy_pattern is not None:
                 try:
@@ -2496,13 +2597,15 @@ class AlphaZeroMTGEnv(gym.Env):
                     self.ensure_game_result_recorded(forced_result=env_info.get("game_result"))
                 except Exception as rec_e:
                     logging.error(f"Failed to record game result: {rec_e}")
-                fc = getattr(gs, 'fidelity_counters', None)
+                fc = self._current_fidelity_counters()
                 if fc:
                     env_info["fidelity"] = {k: (sorted(v) if isinstance(v, set) else v)
                                             for k, v in fc.items()}
 
             env_info.setdefault(
                 "policy_state", self._policy_state_diagnostic())
+            self._attach_evaluation_terminal_debug(
+                env_info, step_reward, done, truncated)
 
             return obs, step_reward, done, truncated, env_info
 
@@ -2525,6 +2628,8 @@ class AlphaZeroMTGEnv(gym.Env):
             self.ensure_game_result_recorded(forced_result="error") # Record error result
             step_reward = self._failure_transition_reward(
                 final_info, previous_state_potential)
+            self._attach_evaluation_terminal_debug(
+                final_info, step_reward, True, False)
             return obs, step_reward, True, False, final_info # done=True, truncated=False
 
     # --- ADDED Helper Methods for Opponent Simulation ---
@@ -2922,6 +3027,752 @@ class AlphaZeroMTGEnv(gym.Env):
         raise RuntimeError(
             f"Opponent checkpoint returned mask-invalid action {action}")
 
+    def _evaluation_trace_enabled(self):
+        """Whether this episode belongs to an attributable evaluation."""
+        return (
+            getattr(self, "evaluation_timestep", None) is not None
+            and bool(getattr(self, "evaluation_checkpoint_sha256", None))
+        )
+
+    def _reset_evaluation_capture_telemetry(self):
+        """Reset bounded debug-capture accounting for one episode."""
+        self._evaluation_capture = {
+            "schema_version": 1,
+            "limits": {
+                "trace_events": int(self.EVALUATION_TRACE_MAX_EVENTS),
+                "trace_serialized_bytes": int(
+                    self.EVALUATION_TRACE_MAX_BYTES),
+                "trace_entry_serialized_bytes": int(
+                    self.EVALUATION_TRACE_ENTRY_MAX_BYTES),
+                "replay_events": int(self.EVALUATION_REPLAY_MAX_EVENTS),
+                "replay_serialized_bytes": int(
+                    self.EVALUATION_REPLAY_MAX_BYTES),
+                "replay_entry_serialized_bytes": int(
+                    self.EVALUATION_REPLAY_ENTRY_MAX_BYTES),
+                "debug_payload_serialized_bytes": int(
+                    self.EVALUATION_DEBUG_MAX_BYTES),
+                "sanitizer": {
+                    "max_depth": int(self.DIAGNOSTIC_MAX_DEPTH),
+                    "max_nodes": int(self.DIAGNOSTIC_MAX_NODES),
+                    "max_container_items": int(
+                        self.DIAGNOSTIC_MAX_CONTAINER_ITEMS),
+                    "max_string_length": int(
+                        self.DIAGNOSTIC_MAX_STRING_LENGTH),
+                    "max_key_length": int(self.DIAGNOSTIC_MAX_KEY_LENGTH),
+                },
+            },
+            "trace": {
+                "recorded_events": 0,
+                "dropped_events": 0,
+                # Compact JSON bytes for the complete trace list, including
+                # its opening/closing brackets and inter-entry commas.
+                "serialized_bytes": 2,
+                "sanitization_omissions": 0,
+                "serialization_errors": 0,
+            },
+            "replay": {
+                "recorded_events": 0,
+                "dropped_events": 0,
+                "serialized_bytes": 2,
+                "sanitization_omissions": 0,
+                "serialization_errors": 0,
+            },
+            "terminal": {
+                "serialized_bytes": 0,
+                "sanitization_omissions": 0,
+                "serialization_errors": 0,
+            },
+            "errors": [],
+        }
+
+    @staticmethod
+    def _evaluation_error_text(error):
+        error_type = type(error)
+        type_name = f"{error_type.__module__}.{error_type.__qualname__}"
+        try:
+            message = str(error)
+        except Exception:
+            message = "unprintable error"
+        if len(message) > 512:
+            message = message[:509] + "..."
+        return type_name, message
+
+    @staticmethod
+    def _evaluation_finite_number(value, default=0.0):
+        try:
+            number = float(value)
+        except (TypeError, ValueError, OverflowError):
+            return float(default)
+        return number if math.isfinite(number) else float(default)
+
+    def _note_evaluation_capture_error(self, stage, error, *, scope="trace"):
+        """Record a bounded structured omission without perturbing the game."""
+        capture = getattr(self, "_evaluation_capture", None)
+        if not isinstance(capture, dict):
+            return
+        scope_stats = capture.get(scope)
+        if isinstance(scope_stats, dict):
+            scope_stats["serialization_errors"] = int(
+                scope_stats.get("serialization_errors", 0)) + 1
+        errors = capture.setdefault("errors", [])
+        if len(errors) >= 32:
+            return
+        error_type, message = self._evaluation_error_text(error)
+        errors.append({
+            "stage": str(stage)[:128],
+            "scope": str(scope)[:32],
+            "error_type": error_type,
+            "message": message,
+        })
+
+    def _safe_evaluation_state_snapshot(self, stage):
+        """Capture one state snapshot; return an omission marker on failure."""
+        try:
+            return self._evaluation_state_snapshot()
+        except Exception as error:
+            self._note_evaluation_capture_error(stage, error, scope="trace")
+            return {
+                "__diagnostic_omitted__": {
+                    "reason": "state_snapshot_error",
+                    "stage": str(stage)[:128],
+                    "error_type": self._evaluation_error_text(error)[0],
+                },
+            }
+
+    def _evaluation_player_label(self, player):
+        gs = getattr(self, "game_state", None)
+        if gs is not None:
+            if player is getattr(gs, "p1", None):
+                return "p1"
+            if player is getattr(gs, "p2", None):
+                return "p2"
+        return None
+
+    @staticmethod
+    def _evaluation_zone_snapshot(player, zone_name, *, include_cards=True):
+        """Return a bounded, JSON-oriented zone summary for one player."""
+        raw_cards = player.get(zone_name, ()) if isinstance(player, dict) else ()
+        try:
+            cards = list(raw_cards or ())
+        except TypeError:
+            cards = []
+        snapshot = {"count": len(cards)}
+        if include_cards:
+            # Ordinary games keep these zones small.  The cap prevents a rules
+            # bug from turning one diagnostic trace into an unbounded artifact.
+            snapshot["cards"] = cards[:128]
+            if len(cards) > 128:
+                snapshot["omitted"] = len(cards) - 128
+        return snapshot
+
+    def _evaluation_state_snapshot(self):
+        """Compact state at one atomic action boundary.
+
+        The seed plus learned action/context replay remains authoritative.  The
+        snapshot is deliberately diagnostic rather than a second GameState
+        serializer: libraries retain counts, while the changing zones retain
+        card IDs so a viewer can explain a transition without replaying it.
+        """
+        gs = getattr(self, "game_state", None)
+        if gs is None:
+            return {}
+
+        def player_snapshot(player):
+            if not isinstance(player, dict):
+                return None
+            return {
+                "life": player.get("life"),
+                "poison_counters": player.get("poison_counters", 0),
+                "zones": {
+                    "library": self._evaluation_zone_snapshot(
+                        player, "library", include_cards=False),
+                    "hand": self._evaluation_zone_snapshot(player, "hand"),
+                    "battlefield": self._evaluation_zone_snapshot(
+                        player, "battlefield"),
+                    "graveyard": self._evaluation_zone_snapshot(
+                        player, "graveyard"),
+                    "exile": self._evaluation_zone_snapshot(player, "exile"),
+                },
+            }
+
+        stack = []
+        live_stack = list(getattr(gs, "stack", ()) or ())
+        for item in live_stack[:32]:
+            if isinstance(item, tuple) and len(item) >= 3:
+                stack.append({
+                    "kind": str(item[0]),
+                    "source_id": item[1],
+                    "controller": self._evaluation_player_label(item[2]),
+                })
+            else:
+                stack.append({"kind": type(item).__name__})
+
+        phase = getattr(gs, "phase", None)
+        snapshot = {
+            "turn": getattr(gs, "turn", None),
+            "phase": phase,
+            "phase_name": getattr(gs, "_PHASE_NAMES", {}).get(
+                phase, str(phase) if phase is not None else None),
+            "priority_player": self._evaluation_player_label(
+                getattr(gs, "priority_player", None)),
+            "p1": player_snapshot(getattr(gs, "p1", None)),
+            "p2": player_snapshot(getattr(gs, "p2", None)),
+            "stack": stack,
+        }
+        if len(live_stack) > 32:
+            snapshot["stack_omitted"] = len(live_stack) - 32
+        return self._json_safe_replay_value(snapshot)
+
+    def _evaluation_action_description(self, action_idx, context):
+        """Return stable machine fields plus a concise operator-facing label."""
+        action_type, parameter = "UNKNOWN", None
+        handler = getattr(self, "action_handler", None)
+        try:
+            if handler is not None:
+                action_type, parameter = handler.get_action_info(int(action_idx))
+        except Exception:
+            action_type, parameter = "UNKNOWN", None
+        action_type = str(action_type)
+        parameter = self._json_safe_replay_value(parameter)
+        label = action_type if parameter is None else \
+            f"{action_type} ({parameter})"
+        if isinstance(context, dict):
+            source_id = context.get("card_id", context.get("source_id"))
+            card = None
+            try:
+                if source_id is not None:
+                    card = self.game_state._safe_get_card(source_id)
+            except Exception:
+                card = None
+            card_name = getattr(card, "name", None)
+            if card_name:
+                label = f"{label}: {card_name}"
+        return {
+            "action_type": action_type,
+            "action_parameter": parameter,
+            "label": label,
+        }
+
+    def _record_evaluation_atomic_action(
+            self, *, actor, actor_is_p1, action_idx, context,
+            pre_state, post_state):
+        """Append one learned or opponent action to the contiguous trace."""
+        if not self._evaluation_trace_enabled():
+            return None
+        trace_stats = self._evaluation_capture["trace"]
+        try:
+            trace = getattr(self, "evaluation_action_trace", None)
+            if not isinstance(trace, list):
+                trace = []
+                self.evaluation_action_trace = trace
+            if trace_stats["recorded_events"] \
+                    >= self.EVALUATION_TRACE_MAX_EVENTS:
+                trace_stats["dropped_events"] += 1
+                return None
+            sequence = len(trace)
+            try:
+                context_copy = dict(context or {})
+            except Exception as error:
+                self._note_evaluation_capture_error(
+                    "trace_context_copy", error, scope="trace")
+                context_copy = {
+                    "__diagnostic_omitted__": {
+                        "reason": "context_copy_error",
+                        "error_type": self._evaluation_error_text(error)[0],
+                    },
+                }
+            entry = {
+                "sequence": sequence,
+                "actor": str(actor)[:64],
+                "actor_seat": "p1" if actor_is_p1 else "p2",
+                "action": int(action_idx),
+                "context": context_copy,
+                **self._evaluation_action_description(action_idx, context),
+                "pre": pre_state,
+                "post": post_state,
+            }
+            evaluator_payload = self._drain_evaluator_diagnostics()
+            if evaluator_payload is not None:
+                entry["evaluator"] = evaluator_payload
+            safe_entry, sanitization = self._sanitize_replay_value(
+                entry, max_bytes=self.EVALUATION_TRACE_ENTRY_MAX_BYTES)
+            trace_stats["sanitization_omissions"] += int(
+                sanitization.get("omissions", 0))
+            trace_stats["serialization_errors"] += int(
+                sanitization.get("errors", 0))
+            if not isinstance(safe_entry, dict) \
+                    or "__diagnostic_omitted__" in safe_entry:
+                safe_entry = {
+                    "sequence": sequence,
+                    "actor": str(actor)[:64],
+                    "actor_seat": "p1" if actor_is_p1 else "p2",
+                    "action": int(action_idx),
+                    "context": {
+                        "__diagnostic_omitted__": {
+                            "reason": "trace_entry_byte_budget",
+                        },
+                    },
+                    **self._evaluation_action_description(
+                        action_idx, {}),
+                    "pre": {"__diagnostic_omitted__": {
+                        "reason": "trace_entry_byte_budget"}},
+                    "post": {"__diagnostic_omitted__": {
+                        "reason": "trace_entry_byte_budget"}},
+                    "serialization": sanitization,
+                }
+            elif sanitization.get("omissions") \
+                    or sanitization.get("errors"):
+                safe_entry["serialization"] = sanitization
+            encoded = json.dumps(
+                safe_entry, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8")
+            if len(encoded) > self.EVALUATION_TRACE_ENTRY_MAX_BYTES:
+                trace_stats["dropped_events"] += 1
+                trace_stats["sanitization_omissions"] += 1
+                return None
+            added_bytes = len(encoded) + int(
+                trace_stats["recorded_events"] > 0)
+            if trace_stats["serialized_bytes"] + added_bytes \
+                    > self.EVALUATION_TRACE_MAX_BYTES:
+                trace_stats["dropped_events"] += 1
+                return None
+            trace.append(safe_entry)
+            trace_stats["recorded_events"] += 1
+            trace_stats["serialized_bytes"] += added_bytes
+            return sequence
+        except Exception as error:
+            trace_stats["dropped_events"] += 1
+            self._note_evaluation_capture_error(
+                "record_atomic_action", error, scope="trace")
+            return None
+
+    def _drain_evaluator_diagnostics(self):
+        """Return one non-causal evaluator activity window, if enabled."""
+        evaluator = getattr(self, "card_evaluator", None)
+        drain = getattr(evaluator, "drain_diagnostics", None)
+        if not callable(drain):
+            return None
+        try:
+            payload = drain()
+        except Exception as error:
+            logging.warning(
+                "Could not drain evaluator diagnostics: %s", error)
+            self._note_evaluation_capture_error(
+                "evaluator_drain", error, scope="trace")
+            return {
+                "schema_version": 1,
+                "events": [],
+                "omission": {
+                    "reason": "evaluator_drain_error",
+                    "error_type": self._evaluation_error_text(error)[0],
+                },
+            }
+        if payload is None:
+            return None
+        try:
+            safe, metadata = self._sanitize_replay_value(
+                payload, max_bytes=self.EVALUATION_TRACE_ENTRY_MAX_BYTES)
+            trace_stats = self._evaluation_capture["trace"]
+            trace_stats["sanitization_omissions"] += int(
+                metadata.get("omissions", 0))
+            trace_stats["serialization_errors"] += int(
+                metadata.get("errors", 0))
+            return safe
+        except Exception as error:
+            self._note_evaluation_capture_error(
+                "evaluator_drain_sanitize", error, scope="trace")
+            return {
+                "schema_version": 1,
+                "events": [],
+                "omission": {
+                    "reason": "evaluator_sanitization_error",
+                    "error_type": self._evaluation_error_text(error)[0],
+                },
+            }
+
+    def _evaluator_diagnostic_totals(self):
+        evaluator = getattr(self, "card_evaluator", None)
+        totals = getattr(evaluator, "diagnostic_totals", None)
+        if not callable(totals):
+            return None
+        try:
+            return self._json_safe_replay_value(totals())
+        except Exception as error:
+            logging.warning(
+                "Could not summarize evaluator diagnostics: %s", error)
+            self._note_evaluation_capture_error(
+                "evaluator_summary", error, scope="terminal")
+            return {
+                "omission": {
+                    "reason": "evaluator_summary_error",
+                    "error_type": self._evaluation_error_text(error)[0],
+                },
+            }
+
+    def _attach_evaluation_transition_reward(
+            self, sequence, step_reward, env_info):
+        """Attach PPO-facing reward data to the learned atomic action."""
+        if sequence is None:
+            return
+        try:
+            trace = getattr(self, "evaluation_action_trace", ())
+            if not 0 <= int(sequence) < len(trace):
+                return
+            transition, metadata = self._sanitize_replay_value({
+                    "reward": step_reward,
+                    "components": env_info.get("reward_components"),
+                    "diagnostics": env_info.get("reward_diagnostics"),
+                    "reward_contract": env_info.get("reward_contract"),
+                }, max_bytes=self.EVALUATION_TRACE_ENTRY_MAX_BYTES // 4)
+            trace[int(sequence)]["learned_transition"] = transition
+            trace_stats = self._evaluation_capture["trace"]
+            trace_stats["sanitization_omissions"] += int(
+                metadata.get("omissions", 0))
+            trace_stats["serialization_errors"] += int(
+                metadata.get("errors", 0))
+            # Reward attachment happens after the initial entry accounting.
+            # Recompute exactly so the whole-trace byte ceiling stays true.
+            encoded = json.dumps(
+                trace[int(sequence)], sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8")
+            without_transition = dict(trace[int(sequence)])
+            without_transition.pop("learned_transition", None)
+            prior_size = len(json.dumps(
+                without_transition, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8"))
+            delta = max(0, len(encoded) - prior_size)
+            if len(encoded) > self.EVALUATION_TRACE_ENTRY_MAX_BYTES \
+                    or trace_stats["serialized_bytes"] + delta \
+                    > self.EVALUATION_TRACE_MAX_BYTES:
+                trace[int(sequence)].pop("learned_transition", None)
+                trace_stats["sanitization_omissions"] += 1
+            else:
+                trace_stats["serialized_bytes"] += delta
+        except Exception as error:
+            self._note_evaluation_capture_error(
+                "attach_transition_reward", error, scope="trace")
+
+    def _record_learned_replay_action(
+            self, action_idx, context, *, trace_sequence, step_reward,
+            done, truncated):
+        """Record the learned decision path accepted by :meth:`replay`."""
+        evaluation_enabled = self._evaluation_trace_enabled()
+        try:
+            try:
+                context_copy = dict(context or {})
+            except Exception as error:
+                if not evaluation_enabled:
+                    raise
+                self._note_evaluation_capture_error(
+                    "replay_context_copy", error, scope="replay")
+                context_copy = {"__diagnostic_omitted__": {
+                    "reason": "context_copy_error",
+                    "error_type": self._evaluation_error_text(error)[0],
+                }}
+            entry = {"action": int(action_idx), "context": context_copy}
+            if not evaluation_enabled:
+                self.replay_actions.append(entry)
+                return
+
+            replay_stats = self._evaluation_capture["replay"]
+            if replay_stats["recorded_events"] \
+                    >= self.EVALUATION_REPLAY_MAX_EVENTS:
+                replay_stats["dropped_events"] += 1
+                return
+            gs = getattr(self, "game_state", None)
+            phase = getattr(gs, "phase", None)
+            entry.update(self._evaluation_action_description(action_idx, context))
+            entry["trace_sequence"] = trace_sequence
+            entry["post_step"] = {
+                "episode_step": int(getattr(self, "current_step", 0)),
+                "turn": getattr(gs, "turn", None),
+                "phase": phase,
+                "phase_name": getattr(gs, "_PHASE_NAMES", {}).get(
+                    phase, str(phase) if phase is not None else None),
+                "reward": step_reward,
+                "done": bool(done),
+                "truncated": bool(truncated),
+            }
+            safe_entry, sanitization = self._sanitize_replay_value(
+                entry, max_bytes=self.EVALUATION_REPLAY_ENTRY_MAX_BYTES)
+            replay_stats["sanitization_omissions"] += int(
+                sanitization.get("omissions", 0))
+            replay_stats["serialization_errors"] += int(
+                sanitization.get("errors", 0))
+            if not isinstance(safe_entry, dict) \
+                    or "__diagnostic_omitted__" in safe_entry:
+                safe_entry = {
+                    "action": int(action_idx),
+                    "context": {"__diagnostic_omitted__": {
+                        "reason": "replay_entry_byte_budget"}},
+                    "trace_sequence": trace_sequence,
+                    "post_step": {
+                        "episode_step": int(getattr(self, "current_step", 0)),
+                        "reward": self._json_safe_replay_value(step_reward),
+                        "done": bool(done),
+                        "truncated": bool(truncated),
+                    },
+                    "serialization": sanitization,
+                }
+            elif sanitization.get("omissions") \
+                    or sanitization.get("errors"):
+                safe_entry["serialization"] = sanitization
+            encoded = json.dumps(
+                safe_entry, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8")
+            added_bytes = len(encoded) + int(
+                replay_stats["recorded_events"] > 0)
+            if len(encoded) > self.EVALUATION_REPLAY_ENTRY_MAX_BYTES \
+                    or replay_stats["serialized_bytes"] + added_bytes \
+                    > self.EVALUATION_REPLAY_MAX_BYTES:
+                replay_stats["dropped_events"] += 1
+                return
+            self.replay_actions.append(safe_entry)
+            replay_stats["recorded_events"] += 1
+            replay_stats["serialized_bytes"] += added_bytes
+        except Exception as error:
+            if evaluation_enabled:
+                self._evaluation_capture["replay"]["dropped_events"] += 1
+                self._note_evaluation_capture_error(
+                    "record_replay_action", error, scope="replay")
+                return
+            raise
+
+    def _evaluation_terminal_debug_payload(
+            self, env_info, step_reward, done, truncated):
+        """Build the successful-evaluation game artifact stored in history."""
+        if not self._evaluation_trace_enabled():
+            return None
+        raw_terminal = {
+            "game_result": env_info.get("game_result"),
+            "terminal_reason": env_info.get("terminal_reason"),
+            "reward": step_reward,
+            "done": bool(done),
+            "truncated": bool(truncated),
+            "reward_components": env_info.get("reward_components"),
+            "reward_diagnostics": env_info.get("reward_diagnostics"),
+            "reward_contract": env_info.get("reward_contract"),
+            "policy_state": env_info.get("policy_state"),
+            "fidelity": env_info.get("fidelity"),
+            "final_state": self._safe_evaluation_state_snapshot(
+                "terminal_final_state"),
+        }
+        terminal, terminal_sanitization = self._sanitize_replay_value(
+            raw_terminal, max_bytes=self.EVALUATION_TRACE_ENTRY_MAX_BYTES)
+        terminal_stats = self._evaluation_capture["terminal"]
+        terminal_stats["sanitization_omissions"] += int(
+            terminal_sanitization.get("omissions", 0))
+        terminal_stats["serialization_errors"] += int(
+            terminal_sanitization.get("errors", 0))
+        payload = {
+            "schema_version": 1,
+            "evaluation_timestep": self.evaluation_timestep,
+            "evaluation_checkpoint_sha256":
+                self.evaluation_checkpoint_sha256,
+            "replay": self.export_replay(),
+            "trace": list(getattr(self, "evaluation_action_trace", ())),
+            "terminal": terminal,
+        }
+        unattached = self._drain_evaluator_diagnostics()
+        if unattached is not None:
+            unattached["capture_scope"] = "post-terminal-observation"
+        evaluator_summary = self._evaluator_diagnostic_totals()
+        if evaluator_summary is not None or unattached is not None:
+            payload["evaluator"] = {
+                "summary": evaluator_summary,
+                "unattached": unattached,
+            }
+        return self._enforce_evaluation_debug_payload_budget(payload)
+
+    @staticmethod
+    def _compact_json_bytes(payload):
+        return json.dumps(
+            payload, sort_keys=True, separators=(",", ":"),
+            ensure_ascii=False, allow_nan=False).encode("utf-8")
+
+    def _enforce_evaluation_debug_payload_budget(self, payload):
+        """Publish exact capture accounting under one aggregate byte ceiling."""
+        trace = payload.get("trace")
+        replay = payload.get("replay")
+        replay_actions = replay.get("actions") \
+            if isinstance(replay, dict) else None
+        trace_stats = self._evaluation_capture["trace"]
+        replay_stats = self._evaluation_capture["replay"]
+        terminal_stats = self._evaluation_capture["terminal"]
+
+        def attach_capture_and_encode():
+            capture, metadata = self._sanitize_replay_value(
+                self._evaluation_capture,
+                max_bytes=self.EVALUATION_TRACE_ENTRY_MAX_BYTES)
+            terminal_stats["sanitization_omissions"] += int(
+                metadata.get("omissions", 0))
+            terminal_stats["serialization_errors"] += int(
+                metadata.get("errors", 0))
+            payload["capture"] = capture
+            encoded = self._compact_json_bytes(payload)
+            # The number of decimal digits in serialized_bytes can change the
+            # size. Two passes reach a stable exact fixed point in practice.
+            for _ in range(3):
+                terminal_stats["serialized_bytes"] = len(encoded)
+                capture["terminal"]["serialized_bytes"] = len(encoded)
+                updated = self._compact_json_bytes(payload)
+                if len(updated) == len(encoded):
+                    encoded = updated
+                    break
+                encoded = updated
+            return encoded
+
+        encoded = attach_capture_and_encode()
+        if len(encoded) <= self.EVALUATION_DEBUG_MAX_BYTES:
+            return payload
+
+        # Unattached evaluator observations are the least attributable data.
+        # Remove them before dropping any action/replay event.
+        evaluator = payload.get("evaluator")
+        if isinstance(evaluator, dict) and evaluator.get("unattached") is not None:
+            evaluator["unattached"] = {
+                "omission": {"reason": "debug_payload_byte_budget"}}
+            terminal_stats["sanitization_omissions"] += 1
+            encoded = attach_capture_and_encode()
+
+        while len(encoded) > self.EVALUATION_DEBUG_MAX_BYTES \
+                and isinstance(replay_actions, list) and replay_actions:
+            removed = replay_actions.pop()
+            removed_size = len(self._compact_json_bytes(removed))
+            separator_size = int(replay_stats["recorded_events"] > 1)
+            replay_stats["recorded_events"] = max(
+                0, replay_stats["recorded_events"] - 1)
+            replay_stats["dropped_events"] += 1
+            replay_stats["serialized_bytes"] = max(
+                0, replay_stats["serialized_bytes"] - removed_size)
+            replay_stats["serialized_bytes"] = max(
+                2, replay_stats["serialized_bytes"] - separator_size)
+            encoded = attach_capture_and_encode()
+
+        while len(encoded) > self.EVALUATION_DEBUG_MAX_BYTES \
+                and isinstance(trace, list) and trace:
+            removed = trace.pop()
+            removed_size = len(self._compact_json_bytes(removed))
+            separator_size = int(trace_stats["recorded_events"] > 1)
+            trace_stats["recorded_events"] = max(
+                0, trace_stats["recorded_events"] - 1)
+            trace_stats["dropped_events"] += 1
+            trace_stats["serialized_bytes"] = max(
+                0, trace_stats["serialized_bytes"] - removed_size)
+            trace_stats["serialized_bytes"] = max(
+                2, trace_stats["serialized_bytes"] - separator_size)
+            encoded = attach_capture_and_encode()
+
+        if len(encoded) > self.EVALUATION_DEBUG_MAX_BYTES:
+            # Controlled fields alone should never reach this branch, but keep
+            # the non-interference contract absolute if schemas grow later.
+            terminal_stats["sanitization_omissions"] += 1
+            payload = {
+                "schema_version": 1,
+                "evaluation_timestep": self.evaluation_timestep,
+                "evaluation_checkpoint_sha256":
+                    self.evaluation_checkpoint_sha256,
+                "replay": {"version": 3, "actions": []},
+                "trace": [],
+                "terminal": {
+                    "game_result": payload.get("terminal", {}).get(
+                        "game_result"),
+                    "terminal_reason": payload.get("terminal", {}).get(
+                        "terminal_reason"),
+                    "omission": {
+                        "reason": "debug_payload_byte_budget"},
+                },
+                "capture": self._evaluation_capture,
+            }
+            encoded = self._compact_json_bytes(payload)
+            terminal_stats["serialized_bytes"] = len(encoded)
+            payload["capture"]["terminal"]["serialized_bytes"] = len(
+                self._compact_json_bytes(payload))
+        return payload
+
+    def _safe_evaluation_terminal_debug_payload(
+            self, env_info, step_reward, done, truncated):
+        """Never let debug construction alter a completed game transition."""
+        if not self._evaluation_trace_enabled():
+            return None
+        try:
+            return self._evaluation_terminal_debug_payload(
+                env_info, step_reward, done, truncated)
+        except Exception as error:
+            self._note_evaluation_capture_error(
+                "terminal_debug_payload", error, scope="terminal")
+            try:
+                error_type = self._evaluation_error_text(error)[0]
+                fallback = {
+                    "schema_version": 1,
+                    "evaluation_timestep": self.evaluation_timestep,
+                    "evaluation_checkpoint_sha256":
+                        self.evaluation_checkpoint_sha256,
+                    "replay": {"version": 3, "actions": []},
+                    "trace": [],
+                    "terminal": {
+                        "game_result": env_info.get("game_result"),
+                        "terminal_reason": env_info.get("terminal_reason"),
+                        "reward": self._evaluation_finite_number(step_reward),
+                        "done": bool(done),
+                        "truncated": bool(truncated),
+                        "omission": {
+                            "reason": "terminal_debug_capture_error",
+                            "error_type": error_type,
+                        },
+                    },
+                    "capture": self._evaluation_capture,
+                }
+                self._evaluation_capture["terminal"]["serialized_bytes"] = \
+                    len(self._compact_json_bytes(fallback))
+                return fallback
+            except Exception:
+                # Last-resort literals only; this branch still preserves the
+                # already-computed environment result and reward.
+                return {
+                    "schema_version": 1,
+                    "trace": [],
+                    "replay": {"version": 3, "actions": []},
+                    "terminal": {
+                        "game_result": env_info.get("game_result"),
+                        "terminal_reason": env_info.get("terminal_reason"),
+                        "reward": self._evaluation_finite_number(step_reward),
+                        "done": bool(done),
+                        "truncated": bool(truncated),
+                        "omission": {
+                            "reason": "terminal_debug_capture_error"},
+                    },
+                    "capture": getattr(self, "_evaluation_capture", {
+                        "errors": [{
+                            "stage": "terminal_debug_payload",
+                            "scope": "terminal",
+                            "error_type": "unknown",
+                        }],
+                    }),
+                }
+
+    def _attach_evaluation_terminal_debug(
+            self, env_info, step_reward, done, truncated):
+        """Attach terminal telemetry without changing transition semantics."""
+        if not (done or truncated) or not isinstance(env_info, dict):
+            return env_info
+        try:
+            evaluation_debug = self._safe_evaluation_terminal_debug_payload(
+                env_info, step_reward, done, truncated)
+            if evaluation_debug is not None:
+                env_info["evaluation_debug"] = evaluation_debug
+        except Exception as error:
+            # Telemetry is observational. Even failure of the final attachment
+            # boundary must not alter reward/result/termination.
+            try:
+                self._note_evaluation_capture_error(
+                    "attach_terminal_debug", error, scope="terminal")
+            except Exception:
+                pass
+            logging.warning(
+                "Could not attach evaluation terminal diagnostics: %s", error)
+        return env_info
+
     def export_replay(self, path=None):
         """Return (and optionally persist) a deterministic episode replay."""
         payload = {
@@ -2933,33 +3784,234 @@ class AlphaZeroMTGEnv(gym.Env):
             "actions": list(self.replay_actions),
         }
         if path:
+            header, header_metadata = self._sanitize_replay_value(
+                {key: value for key, value in payload.items()
+                 if key != "actions"},
+                max_bytes=self.EVALUATION_REPLAY_ENTRY_MAX_BYTES)
+            safe_actions = []
+            action_bytes = 2
+            dropped_actions = 0
+            for action in payload["actions"]:
+                if len(safe_actions) >= self.EVALUATION_REPLAY_MAX_EVENTS:
+                    dropped_actions += 1
+                    continue
+                safe_action, _metadata = self._sanitize_replay_value(
+                    action, max_bytes=self.EVALUATION_REPLAY_ENTRY_MAX_BYTES)
+                encoded = self._compact_json_bytes(safe_action)
+                added = len(encoded) + int(bool(safe_actions))
+                if action_bytes + added > self.EVALUATION_REPLAY_MAX_BYTES:
+                    dropped_actions += 1
+                    continue
+                safe_actions.append(safe_action)
+                action_bytes += added
+            safe_payload = dict(header) if isinstance(header, dict) else {
+                "version": 3,
+                "header_omission": header,
+            }
+            safe_payload["actions"] = safe_actions
+            if dropped_actions or header_metadata.get("omissions") \
+                    or header_metadata.get("errors"):
+                safe_payload["serialization"] = {
+                    "dropped_actions": dropped_actions,
+                    "action_event_budget": self.EVALUATION_REPLAY_MAX_EVENTS,
+                    "action_serialized_byte_budget":
+                        self.EVALUATION_REPLAY_MAX_BYTES,
+                    "header": header_metadata,
+                }
             with open(path, 'w', encoding='utf-8') as handle:
                 json.dump(
-                    self._json_safe_replay_value(payload), handle,
-                    indent=2, sort_keys=True)
+                    safe_payload, handle, indent=2, sort_keys=True,
+                    allow_nan=False)
         return payload
 
-    @staticmethod
-    def _json_safe_replay_value(value):
-        """Preserve replay structure while converting NumPy runtime scalars."""
-        if value is None or isinstance(value, (str, int, float, bool)):
-            return value
-        if isinstance(value, np.generic):
-            return value.item()
-        if isinstance(value, np.ndarray):
-            return [AlphaZeroMTGEnv._json_safe_replay_value(item)
-                    for item in value.tolist()]
-        if isinstance(value, dict):
-            return {
-                str(key): AlphaZeroMTGEnv._json_safe_replay_value(item)
-                for key, item in value.items()
-            }
-        if isinstance(value, (list, tuple, set)):
-            return [AlphaZeroMTGEnv._json_safe_replay_value(item)
-                    for item in value]
-        if isinstance(value, os.PathLike):
-            return os.fspath(value)
-        return str(value)
+    @classmethod
+    def _sanitize_replay_value(cls, value, *, max_bytes=None):
+        """Bound arbitrary diagnostic/replay values without address-based reprs."""
+        state = {"nodes": 0, "omissions": 0, "errors": 0, "active": set()}
+
+        def type_name(item):
+            item_type = type(item)
+            return f"{item_type.__module__}.{item_type.__qualname__}"
+
+        def omission(reason, item=None, **details):
+            state["omissions"] += 1
+            payload = {"reason": reason}
+            if item is not None:
+                payload["type"] = type_name(item)
+            payload.update(details)
+            return {"__diagnostic_omitted__": payload}
+
+        def safe_key(key):
+            try:
+                if key is None:
+                    text = "null"
+                elif isinstance(key, (bool, str, int, np.integer)):
+                    if isinstance(key, (int, np.integer)) \
+                            and int(key).bit_length() > 256:
+                        text = f"<int:{int(key).bit_length()}-bits>"
+                    else:
+                        text = str(key)
+                elif isinstance(key, (float, np.floating)):
+                    number = float(key)
+                    text = repr(number) if math.isfinite(number) \
+                        else "nonfinite"
+                else:
+                    text = f"<{type_name(key)}>"
+            except Exception:
+                state["errors"] += 1
+                text = "<unprintable-key>"
+            if len(text) > cls.DIAGNOSTIC_MAX_KEY_LENGTH:
+                state["omissions"] += 1
+                text = text[:cls.DIAGNOSTIC_MAX_KEY_LENGTH - 3] + "..."
+            return text
+
+        def walk(item, depth):
+            state["nodes"] += 1
+            if state["nodes"] > cls.DIAGNOSTIC_MAX_NODES:
+                return omission("node_budget", item)
+            if item is None or isinstance(item, bool):
+                return item
+            if isinstance(item, str):
+                if len(item) > cls.DIAGNOSTIC_MAX_STRING_LENGTH:
+                    state["omissions"] += 1
+                    return item[:cls.DIAGNOSTIC_MAX_STRING_LENGTH - 3] + "..."
+                return item
+            if isinstance(item, (int, np.integer)):
+                number = int(item)
+                if number.bit_length() > 256:
+                    return omission(
+                        "integer_bit_budget", item,
+                        bit_length=number.bit_length())
+                return number
+            if isinstance(item, (float, np.floating)):
+                number = float(item)
+                return number if math.isfinite(number) else str(number)
+            if isinstance(item, os.PathLike):
+                try:
+                    return walk(os.fspath(item), depth + 1)
+                except Exception:
+                    state["errors"] += 1
+                    return omission("path_conversion_error", item)
+            if depth >= cls.DIAGNOSTIC_MAX_DEPTH:
+                return omission("depth_budget", item, depth=depth)
+
+            track_identity = isinstance(
+                item, (dict, list, tuple, set, frozenset, np.ndarray))
+            identity = id(item)
+            if track_identity and identity in state["active"]:
+                return omission("cycle", item)
+            if track_identity:
+                state["active"].add(identity)
+            try:
+                if isinstance(item, np.ndarray):
+                    flat = item.reshape(-1)
+                    limit = cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS
+                    result = [walk(child, depth + 1)
+                              for child in flat[:limit].tolist()]
+                    if flat.size > limit:
+                        result.append(omission(
+                            "container_items", item,
+                            omitted_items=int(flat.size - limit),
+                            shape=list(item.shape)))
+                    return result
+                if isinstance(item, dict):
+                    result = {}
+                    for index, (key, child) in enumerate(item.items()):
+                        if index >= cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS:
+                            result["__omitted_items__"] = max(
+                                0, len(item)
+                                - cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS)
+                            state["omissions"] += 1
+                            break
+                        output_key = safe_key(key)
+                        base_key = output_key
+                        suffix = 2
+                        while output_key in result:
+                            suffix_text = f"#{suffix}"
+                            output_key = base_key[
+                                :cls.DIAGNOSTIC_MAX_KEY_LENGTH
+                                - len(suffix_text)] + suffix_text
+                            suffix += 1
+                        result[output_key] = walk(child, depth + 1)
+                    return result
+                if isinstance(item, (list, tuple)):
+                    result = [walk(child, depth + 1) for child in
+                              item[:cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS]]
+                    if len(item) > cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS:
+                        result.append(omission(
+                            "container_items", item,
+                            omitted_items=len(item)
+                            - cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS))
+                    return result
+                if isinstance(item, (set, frozenset)):
+                    if len(item) > cls.DIAGNOSTIC_MAX_CONTAINER_ITEMS:
+                        return omission(
+                            "set_items", item, item_count=len(item))
+                    sanitized = [walk(child, depth + 1) for child in item]
+                    sanitized.sort(key=lambda child: json.dumps(
+                        child, sort_keys=True, separators=(",", ":"),
+                        ensure_ascii=False, allow_nan=False))
+                    return sanitized
+                scalar = getattr(item, "item", None)
+                if callable(scalar):
+                    try:
+                        resolved = scalar()
+                    except Exception:
+                        state["errors"] += 1
+                    else:
+                        if resolved is not item:
+                            return walk(resolved, depth + 1)
+                summary = {"type": type_name(item)}
+                for attribute in ("card_id", "id", "name"):
+                    try:
+                        attribute_value = getattr(item, attribute, None)
+                    except Exception:
+                        state["errors"] += 1
+                        continue
+                    if isinstance(attribute_value, (
+                            str, int, float, bool, np.generic)):
+                        summary[attribute] = walk(
+                            attribute_value, depth + 1)
+                state["omissions"] += 1
+                return summary
+            except Exception:
+                state["errors"] += 1
+                return omission("sanitization_error", item)
+            finally:
+                if track_identity:
+                    state["active"].discard(identity)
+
+        safe = walk(value, 0)
+        byte_limit = int(max_bytes or cls.EVALUATION_TRACE_ENTRY_MAX_BYTES)
+        try:
+            encoded = json.dumps(
+                safe, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8")
+        except Exception:
+            state["errors"] += 1
+            safe = omission("json_encoding_error", value)
+            encoded = json.dumps(
+                safe, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8")
+        if len(encoded) > byte_limit:
+            original_bytes = len(encoded)
+            safe = omission(
+                "serialized_byte_budget", value,
+                byte_budget=byte_limit, original_bytes=original_bytes)
+            encoded = json.dumps(
+                safe, sort_keys=True, separators=(",", ":"),
+                ensure_ascii=False, allow_nan=False).encode("utf-8")
+        return safe, {
+            "nodes": int(state["nodes"]),
+            "omissions": int(state["omissions"]),
+            "errors": int(state["errors"]),
+            "serialized_bytes": len(encoded),
+        }
+
+    @classmethod
+    def _json_safe_replay_value(cls, value):
+        safe, _metadata = cls._sanitize_replay_value(value)
+        return safe
 
     def _persist_failure_replay(self, diagnostic, action_idx, context):
         """Atomically preserve the action path and terminal diagnostic."""

@@ -13,9 +13,10 @@ Out of scope permanently: multiplayer, Commander, Planechase, and match play
 (best-of-three is a possible late add only if a target format demands it).
 
 The agent is trained with mask-aware PPO (Stable-Baselines3 + SB3-Contrib). The
-current training default plays a scripted opponent; the Harvest protocol supports
-checkpoint-vs-checkpoint evaluation and promotion once a checkpoint beats
-scripted play.
+current `combat-v5` training default progresses from passive goldfish through
+novice/scripted mixtures; fixed evaluation remains scripted. The Harvest
+protocol supports checkpoint-vs-checkpoint evaluation and promotion once a
+checkpoint beats scripted play.
 
 ---
 
@@ -28,8 +29,14 @@ scripted play**, so the statistics are not yet strength-grade.
 
 [ROADMAP.md](ROADMAP.md) is the authoritative status and next-work list;
 [STATS_SCHEMA.md](STATS_SCHEMA.md) is the contract for anything that consumes the
-output statistics. `DeckStats_Viewer/` is a legacy component from a much earlier
-version, does not work, and is not part of the verification gates.
+output statistics. `DeckStats_Viewer/` provides a dependency-free local
+workbench for run provenance, checkpoint trends, every evaluation case and
+debug replay, DeckStats scopes, canonical-ID CardMemory comparisons, safe
+StrategyMemory diagnostics, game logs, fidelity, and Harvest artifacts. New
+evaluation sidecars also expose bounded, explicitly non-causal Enhanced Card
+Evaluator activity beside both players' atomic actions.
+Launch it with
+`.\MTGenv\Scripts\python.exe .\DeckStats_Viewer\MTG_Statistics_Viewer.py`.
 
 > **Statistics collected before July 2026 are unusable** (wrong player, wrong
 > winner, fabricated play turns, and several now-fixed stats-corrupting bugs).
@@ -145,6 +152,21 @@ On Windows the checked-in interpreter can be used directly as
 
 Run these from the repository root before training or changing engine rules. The
 current gate counts are tracked in [ROADMAP.md](ROADMAP.md).
+
+The canonical delivery gate is:
+
+```bash
+python -m unittest discover -s tests -p "*_test.py"
+python tests/scenario_test.py
+python tests/smoke_test.py
+python tests/train_smoke_test.py
+python tests/invariant_fuzz_test.py --profile default
+```
+
+For the current Round 7.92 working tree, those gates are green at 428 unit
+tests, 404 scenarios, 9/9 runtime smoke, 13/13 training smoke, and 8/8 default
+fuzz seeds plus the phase-boundary check. The previously recorded long-fuzz
+result remains historical until that scheduled/manual gate is rerun.
 
 ```bash
 python tests/smoke_test.py                    # engine end-to-end (no training stack)
@@ -283,14 +305,23 @@ full-pool coverage counts are in the ROADMAP status snapshot.
 ## Training
 
 ```bash
-python main.py --timesteps 1000000 --learning-rate 2e-4 --batch-size 256 \
-  --n-steps 1024 --seed 20260715 --run-name round-7.89-active-gates-v1 \
-  --eval-freq 100000 --eval-episodes 64 --n-envs 8 \
-  --curriculum combat-v3
+python main.py --canary-config round-7.92 \
+  --run-name round-7.92-combat-v5-v1
 ```
 
 No format or deck flags are required for the pinned Standard default. Custom
 corpora are available through `--decks`, `--format`, and `--format-dir`.
+The named canary fails closed on its enumerated CLI and complete PPO setting
+tree, reward contract version/scalars, the full resolved curriculum hash,
+Observation/registry/feature/corpus identities, feature-output width, CUDA
+device class, and evaluation-schedule hash. It checks one million timesteps,
+learning rate `2e-4`, batch 256, rollout 1024, eight training environments,
+100k evaluation cadence with 64 games (32 seat-swapped pairs), 50k
+checkpoints, `combat-v5`, training seed `20260715`, and independent evaluation
+seed `21260715`. Git/working-tree provenance, runtime libraries, and the specific
+GPU model are recorded in `training_run.json` for comparison; the canary
+selector does not constrain those audit variables or claim to hash every
+implementation detail.
 
 **Throughput.** Training is CPU-bound (the GPU learner needs seconds per
 multi-minute rollout). Since Round 7.76 periodic evaluation runs
@@ -308,15 +339,23 @@ unpublished snapshots. Training workers batch compressed statistics for ten
 games; close still forces a final flush. Deeper per-step optimizations are
 tracked as the ROADMAP Tier 3 throughput program.
 
-Every periodic evaluation uses the same paired deck/seat/seed cases. The
-64-case Standard schedule has no mirrors and balances learned decks, opponent
-decks, and physical seats.
+Every periodic evaluation uses the same paired deck/seat/seed cases, generated
+from `--eval-seed` independently of training RNG. The 64-game Standard schedule
+contains 32 seat-swapped pairs, has no mirrors, and balances learned decks,
+opponent decks, and physical seats.
 Promotion is ordered by decisive wins, decisive win-minus-loss score, fewer
-turn limits, then shaped return. A candidate is only published as
-`best_model.zip` after its decisive-win plus half non-timeout-draw score reaches
-55%; being merely best-so-far is recorded separately. The exact cases,
+turn limits, then shaped return. A candidate is only promoted to
+`best_model.zip` after the pair-aware 95% lower confidence bound for its
+decisive-win plus half non-timeout-draw score reaches 55%; the point estimate
+alone cannot qualify it, and being merely best-so-far is recorded separately.
+The bound uses a conservative envelope of the episode-level Wilson interval
+and the paired-case t interval. The interval and exact cases,
 per-game outcomes, checkpoint SHA-256, and promotion decisions are published
 atomically to `logs/<run>/evaluation/evaluations.json`.
+
+Strict training/evaluation fidelity also rejects nonzero effect-continuation
+failure or lost-spell-recovery counters and retains their diagnostic contexts;
+these recovery paths are not treated as clean merely because play continued.
 
 Training and evaluation use separate statistics directories and alternate the
 learned policy between P1 and P2 on successive episodes. Each run writes a
@@ -381,23 +420,36 @@ count, rather than deck names or the engine's alternating global turn.
 > deterministic, mastery-gated `combat-v2` opponent curriculum (passive
 > goldfish, gradual passive/novice/scripted mixtures, then the full scripted
 > pool), while evaluation remains a
-> fixed 64-game paired scripted suite. PPO defaults are 2e-4 learning rate,
+> fixed 64-game scripted suite arranged as 32 seat-swapped pairs. PPO defaults
+> are 2e-4 learning rate,
 > 1,024 rollout steps, batch 256, gamma 0.999, lambda 0.98, value coefficient
 > 0.25, and five epochs. Observation v2 and its hash are unchanged for that
 > historical lineage.
-> Round 7.91 introduces `discounted-state-potential-v6` and makes `combat-v4`
-> the fresh-run default: a life lead at the turn limit pays `-8` (all other
-> limit outcomes stay `-10`), the convex damage-progress potential weight
+> Round 7.91 introduced `discounted-state-potential-v6` and made `combat-v4`
+> that round's fresh-run default: a life lead at the turn limit pays `-8` (all
+> other limit outcomes stay `-10`), the convex damage-progress potential weight
 > doubles to `0.80`, race/bridge open against epsilon-handicapped opponents
 > that anneal to full strength on demonstrated win rate, and goldfish/race/
 > bridge play to 20/20/25 turns. Mastery floors count only full-strength
-> episodes, and fixed evaluation is unchanged for cross-round comparability.
-> Round 7.89 makes `combat-v3` the fresh-run default. Race mastery now
+> episodes. Evaluation remained fixed within each run, but Round 7.91 used a
+> different training/evaluation seed, schedule, and worker count from Rounds
+> 7.89/7.90, so its absolute scores are diagnostic rather than a controlled
+> cross-round comparison.
+> Historically, Round 7.89 introduced `combat-v3`. Race mastery
 > requires a novice win-rate floor, bridge requires separate novice and
 > scripted floors, and passive opponents are absent from bridge. Explicit
 > stage deadlines distinguish forced progression from mastery and guarantee
 > entry into `full_pool` by approximately 375k timesteps. `combat-v2` remains
 > available only to reproduce the earlier schedule.
+> Round 7.92 makes `combat-v5` the fresh-run default. Goldfish receives 25
+> turns, and the full-pool scripted profile anneals from epsilon `0.40` to
+> full strength. Its qualifying scripted outcomes use their own rolling
+> window, so the pool's interleaved novice games cannot starve the 24-sample
+> ratchet. The pool is 80% scripted and 20% novice; both profiles were 100%
+> active full-strength before this new scripted handicap. Round 7.92 also
+> adds the enumerated named-canary checks, separates training/evaluation seeds,
+> extends strict fidelity to failed continuations and lost-spell recoveries,
+> and uses a pair-aware 95% lower-bound qualification gate.
 > Stage selection applies on each worker's future reset; activation
 > acknowledgements and stale-stage episode counts prevent old in-flight games
 > from satisfying the next stage's minimum exposure clock.
@@ -428,7 +480,7 @@ python main.py --resume models/<run>/final_model --timesteps 10000 \
 (Only for manifest-verified, lineage-compatible checkpoints — see the boundary
 note above. This command is only valid when the source run also recorded no
 curriculum. Curriculum resume is rejected because per-worker matchup counters
-are not checkpointed; Round 7.89 must start fresh.)
+are not checkpointed; current Observation v3 curriculum runs must start fresh.)
 
 ---
 
@@ -458,7 +510,7 @@ Production Harvest uses isolated worker directories and publishes
 contract. Checkpoints are stamped by filename, size, and SHA-256.
 
 ```bash
-python harvest_protocol.py qualify --games 64 --workers 4 \
+python harvest_protocol.py qualify --games 64 --workers 4 --seed 21260716 \
   --candidate models/candidate.zip --minimum-score 0.55 \
   --output harvest_runs/qualification_001
 
@@ -471,10 +523,13 @@ python harvest_protocol.py promote --games 64 --workers 4 \
   --minimum-score 0.55 --output harvest_runs/promotion_001
 ```
 
+For the paired qualification and promotion commands, `--games 64` means 64
+total games: 32 with the candidate in each physical seat.
+
 Qualification pairs the candidate against the scripted policy from both seats.
 It writes an atomic `qualification.json` after both strict legs validate, counts
-decisive draws as half a point, gives turn-limit life leads zero points, and
-passes only at the default 55% score threshold with
+non-timeout draws as half a point, gives turn-limit life leads zero points, and
+passes its current protocol gate at the default 55% point-score threshold with
 zero fidelity counters and no `unparsed`/`crash` support entries. A completed
 failed gate is recorded for audit and returns a nonzero command status; an
 invalid or incomplete protocol never publishes the qualification manifest.
@@ -483,6 +538,14 @@ and the checkpoint is re-hashed before publication so a changed candidate fails
 closed.
 The command exits `0` for a pass, `2` for a valid completed rejection, and `1`
 for an invalid or incomplete protocol.
+
+Final qualification is a separate held-out decision: use a seed and case suite
+that were not used for training or periodic evaluation, and require the same
+pair-aware 95% lower confidence bound to reach 55%. In this round the periodic
+evaluator computes and persists that interval; `harvest_protocol.py qualify`
+still enforces only its point-score threshold. A Harvest CLI pass is therefore
+necessary but not sufficient final promotion evidence until that interval gate
+is added to the protocol.
 
 Promotion evaluates the candidate in both seats and requires both the score
 threshold and a clean fidelity/severe-support manifest. `--decks`/`--format`/
@@ -512,15 +575,17 @@ artifacts for 14 days.
 | Flag | Meaning | Default |
 |---|---|---|
 | `--timesteps` | Total training timesteps | `1000000` |
-| `--seed` | Base seed (Python, NumPy, Torch, workers, evaluation) | `42` |
+| `--seed` | Training seed (Python, NumPy, Torch, workers) | `20260715` |
+| `--eval-seed` | Independent fixed-evaluation schedule seed | `21260715` |
+| `--canary-config` | Validate the named, enumerated Round 7.92 launch contract | none |
 | `--resume` | Path to a lineage-compatible checkpoint to continue | — |
 | `--learning-rate` | Initial learning rate | `2e-4` |
 | `--batch-size` | Batch size | `256` |
 | `--n-steps` | Rollout steps before an update | `1024` |
-| `--n-envs` | Parallel training environments (`0` = auto) | `0` |
-| `--eval-freq` / `--eval-episodes` | Periodic cadence / fixed paired cases | `100000` / `64` |
+| `--n-envs` | Parallel training environments (`0` = auto when explicitly supplied) | `8` |
+| `--eval-freq` / `--eval-episodes` | Periodic cadence / games in fixed seat-swapped pairs | `100000` / `64` (32 pairs) |
 | `--checkpoint-freq` | Checkpoint cadence (timesteps) | `50000` |
-| `--curriculum` | Training opponent schedule (`combat-v3`, `combat-v2`, `combat-v1`, or `none`) | `combat-v3` |
+| `--curriculum` | Training opponent schedule (`combat-v5`, older reproducibility versions, or `none`) | `combat-v5` |
 | `--format` / `--decks` / `--format-dir` | Format legality + corpus / deck dir / frozen namespace | pinned Standard |
 | `--optimize-hp` | Run Optuna hyperparameter search | off |
 | `--record-network` / `--record-freq` | Record network parameters / cadence | off / `5000` |
