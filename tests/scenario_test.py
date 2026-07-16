@@ -4050,16 +4050,22 @@ def s_stats_draw_result_is_canonical():
 @scenario("training reward", "position shaping is potential-based and terminal rewards are centralized")
 def s_training_reward_contract():
     gs = fresh(); env = get_env()
-    timeout_rewards = {
-        env._terminal_outcome_reward("turn_limit", result)
-        for result in ("win", "loss", "draw")}
-    assert timeout_rewards == {-10.0}, \
-        f"life-based timeout labels changed the training reward: {timeout_rewards}"
+    # Contract v6 grades the turn-limit penalty: a life lead at the limit is
+    # still strictly worse than any decisive win or draw, but no longer worth
+    # exactly as much as losing.
+    assert env._terminal_outcome_reward("turn_limit", "win") == -8.0
+    assert env._terminal_outcome_reward("turn_limit", "win_turn_limit") == -8.0
+    assert env._terminal_outcome_reward("turn_limit", "loss") == -10.0
+    assert env._terminal_outcome_reward("turn_limit", "draw") == -10.0
+    assert env._terminal_outcome_reward("turn_limit", "win") \
+        < env._terminal_outcome_reward("life_total", "draw"), \
+        "a turn-limit life lead must stay worse than a decisive draw"
+    assert env._terminal_outcome_reward("episode_step_limit", "win") == -10.0
     assert env._terminal_outcome_reward("life_total", "win") == 10.0
     assert env._terminal_outcome_reward("life_total", "loss") == -10.0
     assert env.DEFAULT_ACTION_REWARD_SCALE == 0.0 \
         and env.action_reward_scale == 0.0
-    assert env.REWARD_CONTRACT_VERSION == "discounted-state-potential-v5"
+    assert env.REWARD_CONTRACT_VERSION == "discounted-state-potential-v6"
     baseline = env._calculate_state_potential()
     assert env._calculate_state_potential() == baseline, \
         "unchanged state produced a changing board potential"
@@ -12196,7 +12202,7 @@ def scenario_environment_enforces_episode_step_limit():
         assert np.isclose(reward, sum(components.values())), \
             f"step-limit reward did not match its components: {components}"
         assert info.get("reward_contract") == \
-            "discounted-state-potential-v5"
+            "discounted-state-potential-v6"
         assert os.path.isfile(info.get("failure_replay_path", "")), \
             "the step-limit failure did not retain its action replay"
         assert isinstance(env.reset_seed, int)

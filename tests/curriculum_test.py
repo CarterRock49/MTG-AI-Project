@@ -3,11 +3,14 @@
 import random
 import unittest
 
+from copy import deepcopy
+
 import numpy as np
 
 from Playersim.curriculum import (
     COMBAT_CURRICULUM_V1, COMBAT_CURRICULUM_V2, COMBAT_CURRICULUM_V3,
-    CurriculumScheduler, derive_matchup_seed, resolve_curriculum,
+    COMBAT_CURRICULUM_V4, CurriculumScheduler, derive_matchup_seed,
+    resolve_curriculum,
 )
 
 
@@ -158,6 +161,78 @@ class CurriculumSchedulerTest(unittest.TestCase):
             gate = stage["advance_when"]
             self.assertGreaterEqual(
                 gate["max_stage_timesteps"], gate["min_stage_timesteps"])
+
+    def test_v4_adds_annealed_handicaps_and_stage_turn_limits(self):
+        spec = resolve_curriculum("combat-v4", DECKS)
+        self.assertEqual(spec["id"], "combat-v4")
+        self.assertEqual(spec["version"], 4)
+        goldfish, race, bridge, full_pool = spec["stages"]
+
+        # V3's gates and deadlines are preserved; only the ramps are new.
+        self.assertEqual(
+            sum(stage["advance_when"]["max_stage_timesteps"]
+                for stage in spec["stages"][:-1]),
+            375_000)
+        self.assertIsNone(goldfish.get("handicap"))
+        self.assertEqual(race["handicap"]["profiles"], ["novice"])
+        self.assertEqual(bridge["handicap"]["profiles"], ["scripted"])
+        for stage in (race, bridge):
+            handicap = stage["handicap"]
+            self.assertGreater(handicap["start"], 0.0)
+            self.assertGreater(handicap["step"], 0.0)
+            self.assertGreater(handicap["window_episodes"], 0)
+            self.assertLessEqual(
+                handicap["min_decisive_win_rate"],
+                stage["advance_when"]["min_decisive_win_rate"])
+
+        # Early stages shorten the turn limit; full_pool keeps the default.
+        self.assertEqual(goldfish["max_turns"], 20)
+        self.assertEqual(race["max_turns"], 20)
+        self.assertEqual(bridge["max_turns"], 25)
+        self.assertIsNone(full_pool.get("max_turns"))
+
+        scheduler = CurriculumScheduler(spec, 42)
+        self.assertEqual(scheduler.peek(True)["max_turns"], 20)
+        scheduler.set_timestep(150_000)
+        self.assertIsNone(scheduler.peek(True)["max_turns"])
+
+    def test_v4_handicap_and_turn_limit_validation_fails_closed(self):
+        def broken(mutate):
+            spec = deepcopy(COMBAT_CURRICULUM_V4)
+            mutate(spec)
+            return spec
+
+        def race_stage(spec):
+            return spec["stages"][1]
+
+        cases = {
+            "passive profiles cannot be handicapped": lambda spec:
+                race_stage(spec)["handicap"].__setitem__(
+                    "profiles", ["passive"]),
+            "handicap profiles must be in the stage bag": lambda spec:
+                race_stage(spec)["handicap"].__setitem__(
+                    "profiles", ["scripted"]),
+            "handicap start must be within (0, 1]": lambda spec:
+                race_stage(spec)["handicap"].__setitem__("start", 1.5),
+            "handicap step must be positive": lambda spec:
+                race_stage(spec)["handicap"].__setitem__("step", 0.0),
+            "handicap window must be positive": lambda spec:
+                race_stage(spec)["handicap"].__setitem__(
+                    "window_episodes", 0),
+            "stage max_turns must be sane": lambda spec:
+                race_stage(spec).__setitem__("max_turns", 2),
+        }
+        import Playersim.curriculum as curriculum_module
+        for label, mutate in cases.items():
+            with self.subTest(label):
+                spec = broken(mutate)
+                original = curriculum_module.COMBAT_CURRICULUM_V4
+                curriculum_module.COMBAT_CURRICULUM_V4 = spec
+                try:
+                    with self.assertRaises(ValueError):
+                        resolve_curriculum("combat-v4", DECKS)
+                finally:
+                    curriculum_module.COMBAT_CURRICULUM_V4 = original
 
 
 if __name__ == "__main__":

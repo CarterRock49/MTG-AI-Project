@@ -385,6 +385,13 @@ count, rather than deck names or the engine's alternating global turn.
 > 1,024 rollout steps, batch 256, gamma 0.999, lambda 0.98, value coefficient
 > 0.25, and five epochs. Observation v2 and its hash are unchanged for that
 > historical lineage.
+> Round 7.91 introduces `discounted-state-potential-v6` and makes `combat-v4`
+> the fresh-run default: a life lead at the turn limit pays `-8` (all other
+> limit outcomes stay `-10`), the convex damage-progress potential weight
+> doubles to `0.80`, race/bridge open against epsilon-handicapped opponents
+> that anneal to full strength on demonstrated win rate, and goldfish/race/
+> bridge play to 20/20/25 turns. Mastery floors count only full-strength
+> episodes, and fixed evaluation is unchanged for cross-round comparability.
 > Round 7.89 makes `combat-v3` the fresh-run default. Race mastery now
 > requires a novice win-rate floor, bridge requires separate novice and
 > scripted floors, and passive opponents are absent from bridge. Explicit

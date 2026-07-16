@@ -28,7 +28,7 @@ from collections import defaultdict
 from .deck_stats_tracker import DeckStatsTracker
 from .card_memory import CardMemory
 from .ability_types import ManaAbility
-from .curriculum import CurriculumScheduler, OPPONENT_PROFILES
+from .curriculum import CurriculumScheduler, OPPONENT_PROFILES, _stable_seed
 from .observation_schema import (
     OBSERVATION_SCHEMA_SHA256, OBSERVATION_SCHEMA_VERSION,
     SEMANTIC_IDENTITY_MAX,
@@ -52,7 +52,7 @@ class AlphaZeroMTGEnv(gym.Env):
     Updated for improved reward shaping, richer observations, modularity, and detailed logging.
     """
     ACTION_SPACE_SIZE = 480 # Moved constant here
-    REWARD_CONTRACT_VERSION = "discounted-state-potential-v5"
+    REWARD_CONTRACT_VERSION = "discounted-state-potential-v6"
     DEFAULT_REWARD_DISCOUNT = 0.999
     DEFAULT_ACTION_REWARD_SCALE = 0.0
     DEFAULT_STATE_POTENTIAL_SCALE = 0.40
@@ -127,6 +127,13 @@ class AlphaZeroMTGEnv(gym.Env):
             raise ValueError(f"Unknown opponent profile: {opponent_profile}")
         self.default_opponent_profile = opponent_profile
         self.active_opponent_profile = opponent_profile
+        # Annealed opponent strength: the trainer stages (epsilon, profiles)
+        # via set_opponent_handicap and the value commits at the next reset so
+        # opponent strength never changes mid-episode.
+        self.active_opponent_handicap = 0.0
+        self._pending_opponent_handicap = 0.0
+        self._pending_handicap_profiles = frozenset()
+        self._opponent_handicap_rng = random.Random(0)
         self.curriculum = curriculum
         self.curriculum_scheduler = (
             CurriculumScheduler(curriculum, matchup_seed)
@@ -577,6 +584,25 @@ class AlphaZeroMTGEnv(gym.Env):
         if self.curriculum_scheduler is not None:
             self.curriculum_scheduler.set_stage(stage_index, timestep)
 
+    def set_opponent_handicap(self, epsilon, profiles=()):
+        """Stage a pass-probability handicap for future scripted opponents.
+
+        With probability ``epsilon`` a handicapped opponent takes the passive
+        (goldfish) baseline for one priority decision instead of attacking,
+        blocking, or developing.  The trainer anneals ``epsilon`` toward zero
+        as the policy earns wins; the value commits at the next reset so an
+        episode never changes opponent strength mid-game.
+        """
+        epsilon = float(epsilon)
+        if not math.isfinite(epsilon) or not 0.0 <= epsilon <= 1.0:
+            raise ValueError("Opponent handicap must be within [0, 1]")
+        profiles = frozenset(str(profile) for profile in (profiles or ()))
+        unknown = sorted(profiles - OPPONENT_PROFILES)
+        if unknown:
+            raise ValueError(f"Unknown handicap profiles: {unknown}")
+        self._pending_opponent_handicap = epsilon
+        self._pending_handicap_profiles = profiles
+
     def set_training_timestep(self, timestep):
         """Stamp subsequent game records with their rollout's lower bound."""
         self.training_timestep = int(timestep)
@@ -627,6 +653,11 @@ class AlphaZeroMTGEnv(gym.Env):
                 self, "current_curriculum_stage_index", None),
             "opponent_profile": getattr(
                 self, "active_opponent_profile", "scripted"),
+            "opponent_handicap": float(getattr(
+                self, "active_opponent_handicap", 0.0) or 0.0),
+            "max_turns": int(getattr(
+                getattr(self, "game_state", None), "max_turns", None)
+                or getattr(self, "max_turns", 0) or 0) or None,
             "agent_deck": getattr(self, "current_agent_deck", None),
             "opponent_deck": getattr(self, "current_opponent_deck", None),
             "matchup_episode_index": getattr(
@@ -749,6 +780,19 @@ class AlphaZeroMTGEnv(gym.Env):
                     raise ValueError(
                         f"Unknown opponent profile: {requested_profile}")
                 self.active_opponent_profile = requested_profile
+                # Fixed evaluation always faces full-strength opponents; the
+                # annealed training handicap commits here so opponent strength
+                # stays constant within an episode.  The handicap RNG stream
+                # is derived from the reset seed but independent of the game
+                # and matchmaking streams.
+                self.active_opponent_handicap = (
+                    self._pending_opponent_handicap
+                    if (scheduled_case is None
+                        and requested_profile
+                        in self._pending_handicap_profiles)
+                    else 0.0)
+                self._opponent_handicap_rng = random.Random(
+                    _stable_seed(seed, "opponent-handicap"))
 
                 # --- Deck Selection ---
                 if not self.decks:
@@ -815,6 +859,13 @@ class AlphaZeroMTGEnv(gym.Env):
                     selected_case.get("opponent_deck")
                     or (self.current_deck_name_p2 if seat_is_p1
                         else self.current_deck_name_p1))
+                # Curriculum stages may shorten episodes to buy more terminal
+                # outcomes per timestep.  The environment ceiling still bounds
+                # the observation space, so the stage limit never exceeds it.
+                stage_max_turns = selected_case.get("max_turns")
+                if stage_max_turns:
+                    gs.max_turns = min(
+                        int(stage_max_turns), int(self.max_turns))
 
                 # --- Link Subsystems to Environment ---
                 # 1. External Systems
@@ -2741,6 +2792,15 @@ class AlphaZeroMTGEnv(gym.Env):
 
         # 4. Handle Standard Priority
         if phase_ctx == "priority":
+            # Annealed-strength opponents take the goldfish baseline for this
+            # one priority decision with probability epsilon: no attacks,
+            # blocks, or development.  Mandatory game transactions above stay
+            # full fidelity, so the handicap can never deadlock a choice.
+            handicap = float(getattr(
+                self, "active_opponent_handicap", 0.0) or 0.0)
+            if (handicap > 0.0 and profile != "passive"
+                    and self._opponent_handicap_rng.random() < handicap):
+                profile = "passive"
             # Complete combat declarations before ordinary priority choices.
             if gs.phase == gs.PHASE_DECLARE_ATTACKERS:
                 if profile != "passive":
@@ -3291,13 +3351,18 @@ class AlphaZeroMTGEnv(gym.Env):
 
     @staticmethod
     def _terminal_outcome_reward(terminal_reason, result):
-        """Map a terminal category/result to reward contract v5.
+        """Map a terminal category/result to reward contract v6.
 
-        Life leads at the turn limit are diagnostic labels, not wins. Engine
-        safety terminations are likewise fail-closed instead of silently
-        receiving the draw fallback.
+        Life leads at the turn limit are still diagnostic labels, not wins,
+        and remain strictly worse than every decisive outcome except a loss.
+        Grading the penalty (-8 ahead versus -10 behind) restores a gradient
+        toward pressure without making stalling attractive: v5's flat -10
+        taught that being ahead at the limit was worth exactly as much as
+        losing.  Engine safety terminations stay fail-closed.
         """
-        if terminal_reason in ("turn_limit", "episode_step_limit"):
+        if terminal_reason == "turn_limit":
+            return -8.0 if str(result).startswith("win") else -10.0
+        if terminal_reason == "episode_step_limit":
             return -10.0
         if str(result).startswith(("error", "invalid")):
             return -10.0
@@ -3445,6 +3510,12 @@ class AlphaZeroMTGEnv(gym.Env):
         2-3x a point of own life) and the damage term is convex, so the
         marginal value of damage RISES as the opponent approaches lethal
         instead of paying out linearly and stalling short of the kill.
+
+        Contract v6 rebalance (July 16): rounds 7.88-7.90 still raced too
+        slowly — decisive wins averaged turn 25 while losses averaged turn
+        17.  The damage-progress weight doubles (0.40 -> 0.80) so pushing
+        the opponent toward lethal pays enough to matter against the +-10
+        terminal rewards while the total potential stays clipped at +-2.
         """
         gs = self.game_state
         me = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -3478,7 +3549,7 @@ class AlphaZeroMTGEnv(gym.Env):
         damage_taken = np.clip(
             (20.0 - float(opp.get('life', 20))) / 20.0, 0.0, 1.0)
         # Convex: slope grows from 0.5x at full life to 1.5x near lethal.
-        damage_progress = 0.40 * (
+        damage_progress = 0.80 * (
             0.5 * damage_taken + 0.5 * damage_taken ** 2)
         return float(np.clip(
             life_component + board_component + card_component + damage_progress,

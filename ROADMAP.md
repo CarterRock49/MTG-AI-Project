@@ -1,4 +1,4 @@
-# Playersim roadmap — current as of July 15, 2026
+# Playersim roadmap — current as of July 16, 2026
 
 ## Mission and scope
 
@@ -79,6 +79,59 @@ perspective are recomputed for each decision.
   and replacement-system defects and must be re-harvested.
 - Any future policy-observation change creates another explicit schema and
   checkpoint boundary.
+
+---
+
+## Round 7.91 — climbable curriculum ramps and reward contract v6
+
+Analysis of `round-7.90-memory-redundancy-v1` (stopped at ~188k steps)
+confirmed the 7.89/7.90 canary behaved exactly as designed — goldfish mastered
+at 47,488 in both runs, race fell to its deadline at 147,488 in both, and the
+100k evaluations matched (9-44, qualification 0.141) — so the memory-redundancy
+refactor is behavior-neutral. The agent, however, showed the same plateau as
+Round 7.88's full million-step run:
+
+- ~60% decisive wins against passive opponents collapsing to ~5% against
+  novice, flat from 57k to 188k timesteps. There was no gradient between the
+  two difficulty levels to climb.
+- Decisive wins averaged turn 25 while losses averaged turn 17: the policy's
+  clock was slower than every active opponent's, and ~250-step episodes meant
+  only ~750 games in the whole run — starvation-level sample counts.
+- The critic's explained variance collapsed (0.84 → 0.11) at each stage
+  transition, and 6 of 15 evaluation "wins" were life-lead timeouts scored
+  exactly like losses.
+
+Round 7.91 lands four repairs (opponent-profile observation features were
+deliberately rejected to keep the policy deck- and opponent-agnostic):
+
+1. **`combat-v4` annealed handicap.** Race and bridge open with weakened
+   active profiles: with probability epsilon the opponent takes the passive
+   baseline for one priority decision. The trainer ratchets epsilon toward
+   zero each time a rolling window of decisive wins at the current epsilon
+   clears the stage target (race: novice 0.75 start, 0.25 step; bridge:
+   scripted 0.60 start, 0.20 step). Mastery requires the anneal to finish and
+   the profile floors are now satisfied only by full-strength episodes;
+   `opponent_handicap` is recorded in every game log and mastery record.
+2. **Stage turn limits.** Goldfish/race play to 20 turns and bridge to 25
+   (full pool keeps the engine default), buying more terminal outcomes per
+   timestep without moving the observation-space bound; the per-episode limit
+   is recorded as `max_turns` in game logs.
+3. **Reward contract v6** (`discounted-state-potential-v6`): a life lead at
+   the turn limit now pays -8 instead of -10 (all other limit outcomes stay
+   -10), so "almost won" is no longer worth exactly as much as losing while
+   remaining strictly worse than every decisive outcome. The convex
+   damage-progress potential weight doubles (0.40 → 0.80). Resume remains
+   version-gated, so v5 checkpoints cannot enter this lineage.
+4. **Paired-seat observation audit.** The 7.90 evaluation's 5-27 (P1) versus
+   10-20-2 (P2) split motivated a standing regression
+   (`tests/seat_parity_test.py`) proving my_*/opp_* extraction is a pure
+   viewpoint on a shared state. It passes — the split is not an observation
+   perspective bug.
+
+`combat-v4` is the fresh-run default; `combat-v3` remains resolvable for
+reproducibility. Fixed evaluation is unchanged (full-strength scripted
+opponents, engine-default turn limit) so qualification scores stay comparable
+across rounds.
 
 ---
 
@@ -508,6 +561,8 @@ mistake. The practical rule is: **start this policy fresh from Round 7.89.**
 | 7.87 | Correct opponent-terminal perspective, reward v5, fixed outcome evaluation, deterministic combat curriculum, and PPO canary defaults |
 | 7.88 | Mastery-gated curriculum, asynchronous evaluation lifecycle, qualification-based promotion, and batched training statistics |
 | 7.89 | Observation v3 semantic corrections, profile-specific mastery gates, bounded full-pool entry, balanced evaluation exposure, and the renewed combat audit |
+| 7.90 | Analytics memory-redundancy refactor, validated behavior-neutral against the 7.89 canary trajectory |
+| 7.91 | Annealed opponent handicap (`combat-v4`), stage turn limits, graded turn-limit reward v6, doubled damage-progress potential, and the paired-seat observation audit |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing

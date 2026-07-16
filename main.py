@@ -2553,6 +2553,12 @@ class CurriculumProgressCallback(BaseCallback):
         self._transition_history = []
         self._pending_activation_workers = set()
         self._stale_stage_episodes = 0
+        # Annealed opponent handicap: None means "initialize from the active
+        # stage's configured start on the next broadcast".
+        self._handicap_epsilon = None
+        self._handicap_enabled = any(
+            stage.get("handicap")
+            for stage in (curriculum.get("stages") or ()))
 
     def _stage_index(self):
         selected = 0
@@ -2587,6 +2593,9 @@ class CurriculumProgressCallback(BaseCallback):
             "pending_activation_workers": sorted(
                 self._pending_activation_workers),
             "stale_stage_episodes": int(self._stale_stage_episodes),
+            "handicap_epsilon": (
+                None if self._handicap_epsilon is None
+                else float(self._handicap_epsilon)),
         })
 
     @staticmethod
@@ -2596,10 +2605,13 @@ class CurriculumProgressCallback(BaseCallback):
                 "outcome": str(record.get("outcome") or "unknown"),
                 "opponent_profile": str(
                     record.get("opponent_profile") or "unknown"),
+                "opponent_handicap": float(
+                    record.get("opponent_handicap") or 0.0),
             }
         # Older callback state stored only the aggregate outcome.  It remains
         # useful for aggregate gates but cannot satisfy a profile requirement.
-        return {"outcome": str(record), "opponent_profile": "unknown"}
+        return {"outcome": str(record), "opponent_profile": "unknown",
+                "opponent_handicap": 0.0}
 
     def _restore_mastery_state(self):
         state = getattr(self.model, self.MODEL_STATE_ATTRIBUTE, None)
@@ -2614,6 +2626,7 @@ class CurriculumProgressCallback(BaseCallback):
             self._transition_history = []
             self._pending_activation_workers = set()
             self._stale_stage_episodes = 0
+            self._handicap_epsilon = None
             self._persist_mastery_state()
             return
         maximum = len(self.curriculum["stages"]) - 1
@@ -2639,6 +2652,9 @@ class CurriculumProgressCallback(BaseCallback):
             state.get("pending_activation_workers") or ()}
         self._stale_stage_episodes = max(
             0, int(state.get("stale_stage_episodes", 0)))
+        restored_handicap = state.get("handicap_epsilon")
+        self._handicap_epsilon = (
+            None if restored_handicap is None else float(restored_handicap))
 
     def _training_environment_count(self):
         count = getattr(self.training_env, "num_envs", None)
@@ -2647,12 +2663,18 @@ class CurriculumProgressCallback(BaseCallback):
             count = len(dones) if dones is not None else 1
         return max(1, int(count))
 
-    def _outcome_rates(self, opponent_profile=None):
+    def _outcome_rates(self, opponent_profile=None, full_strength_only=False):
         records = list(self._recent_outcomes)
         if opponent_profile is not None:
             records = [
                 record for record in records
                 if record["opponent_profile"] == opponent_profile]
+        if full_strength_only:
+            # Wins earned against a handicapped opponent are ramp progress,
+            # not mastery evidence.
+            records = [
+                record for record in records
+                if not float(record.get("opponent_handicap", 0.0))]
         episodes = len(records)
         denominator = max(1, episodes)
         return {
@@ -2698,6 +2720,8 @@ class CurriculumProgressCallback(BaseCallback):
                 "outcome": outcome,
                 "opponent_profile": str(
                     info.get("opponent_profile") or "unknown"),
+                "opponent_handicap": float(
+                    info.get("opponent_handicap") or 0.0),
             })
             changed = True
         if (self._stage_entry_timestep is None
@@ -2713,6 +2737,73 @@ class CurriculumProgressCallback(BaseCallback):
             changed = True
         if changed:
             self._persist_mastery_state()
+
+    def _stage_handicap(self, stage_index=None):
+        selected = self._active_stage_index if stage_index is None \
+            else int(stage_index)
+        if selected is None:
+            return None
+        return self.curriculum["stages"][selected].get("handicap")
+
+    def _handicap_rates(self):
+        """Rolling outcomes against the handicapped profiles at the live
+        epsilon; records from earlier ratchet levels no longer count."""
+        config = self._stage_handicap()
+        if config is None:
+            return None
+        current = float(self._handicap_epsilon or 0.0)
+        profiles = set(config["profiles"])
+        records = [
+            record for record in self._recent_outcomes
+            if record["opponent_profile"] in profiles
+            and float(record.get("opponent_handicap", 0.0)) == current]
+        window = int(config["window_episodes"])
+        records = records[-window:]
+        episodes = len(records)
+        return {
+            "episodes": episodes,
+            "decisive_win_rate": sum(
+                record["outcome"] == "win" for record in records)
+                / max(1, episodes),
+            "window": window,
+            "target": float(config["min_decisive_win_rate"]),
+            "step": float(config["step"]),
+            "profiles": sorted(profiles),
+        }
+
+    def _broadcast_handicap(self):
+        """Send the live (epsilon, profiles) pair to every training worker."""
+        if self.progression != "mastery" or not self._handicap_enabled:
+            return
+        config = self._stage_handicap()
+        if config is None:
+            self._handicap_epsilon = 0.0
+        elif self._handicap_epsilon is None:
+            self._handicap_epsilon = float(config["start"])
+        self.training_env.env_method(
+            "set_opponent_handicap", float(self._handicap_epsilon),
+            list(config["profiles"]) if config else [])
+
+    def _maybe_ratchet_handicap(self):
+        if (self.progression != "mastery" or not self._handicap_enabled
+                or not float(self._handicap_epsilon or 0.0)):
+            return
+        rates = self._handicap_rates()
+        if (rates is None or rates["episodes"] < rates["window"]
+                or rates["decisive_win_rate"] < rates["target"]):
+            return
+        previous = float(self._handicap_epsilon)
+        self._handicap_epsilon = max(0.0, round(previous - rates["step"], 6))
+        self.training_env.env_method(
+            "set_opponent_handicap", float(self._handicap_epsilon),
+            rates["profiles"])
+        self._persist_mastery_state()
+        logging.info(
+            "Opponent handicap ratcheted from %.2f to %.2f for profiles %s "
+            "at timestep %s (win rate %.2f over %s episodes)",
+            previous, self._handicap_epsilon, rates["profiles"],
+            self.num_timesteps, rates["decisive_win_rate"],
+            rates["episodes"])
 
     def _mastery_ready(self):
         if self._active_stage_index >= len(self.curriculum["stages"]) - 1:
@@ -2735,9 +2826,15 @@ class CurriculumProgressCallback(BaseCallback):
         )
         if not aggregate_ready:
             return False
+        # A handicapped stage cannot be mastered until its anneal completes;
+        # profile floors then only count full-strength episodes.
+        if (self._stage_handicap() is not None
+                and float(self._handicap_epsilon or 0.0) > 0.0):
+            return False
         for profile, requirement in (
                 gate.get("profile_requirements") or {}).items():
-            profile_rates = self._outcome_rates(profile)
+            profile_rates = self._outcome_rates(
+                profile, full_strength_only=True)
             if (profile_rates["episodes"]
                     < int(requirement["min_episodes"])
                     or profile_rates["decisive_win_rate"]
@@ -2781,7 +2878,8 @@ class CurriculumProgressCallback(BaseCallback):
                 self._active_stage_index].get("advance_when") or {}
             for profile in sorted(
                     (gate.get("profile_requirements") or {}).keys()):
-                profile_rates = self._outcome_rates(profile)
+                profile_rates = self._outcome_rates(
+                    profile, full_strength_only=True)
                 requirement = gate["profile_requirements"][profile]
                 prefix = f"curriculum/mastery_{profile}"
                 self.logger.record(
@@ -2821,6 +2919,18 @@ class CurriculumProgressCallback(BaseCallback):
             "curriculum/mastery_ready", float(self._mastery_ready()))
         self.logger.record(
             "curriculum/deadline_ready", float(self._deadline_ready()))
+        if self._handicap_enabled:
+            self.logger.record(
+                "curriculum/handicap_epsilon",
+                float(self._handicap_epsilon or 0.0))
+            handicap_rates = self._handicap_rates()
+            if handicap_rates is not None:
+                self.logger.record(
+                    "curriculum/handicap_window_episodes",
+                    handicap_rates["episodes"])
+                self.logger.record(
+                    "curriculum/handicap_decisive_win_rate",
+                    handicap_rates["decisive_win_rate"])
 
     def _broadcast(self, force=False, stage_index=None):
         if stage_index is None:
@@ -2837,6 +2947,7 @@ class CurriculumProgressCallback(BaseCallback):
             self.training_env.env_method(
                 "set_curriculum_timestep", int(self.num_timesteps))
         self._active_stage_index = stage_index
+        self._broadcast_handicap()
         stage = self.curriculum["stages"][stage_index]
         self.logger.record("curriculum/stage_index", stage_index)
         logging.info(
@@ -2856,6 +2967,7 @@ class CurriculumProgressCallback(BaseCallback):
             self._broadcast()
             return True
         self._record_mastery_outcomes()
+        self._maybe_ratchet_handicap()
         self._record_mastery_metrics()
         advance_reason = self._advance_reason()
         if advance_reason is not None:
@@ -2878,6 +2990,8 @@ class CurriculumProgressCallback(BaseCallback):
             self._stale_stage_episodes = 0
             self._recent_outcomes = deque(
                 maxlen=self._window_size(self._active_stage_index))
+            # Each stage anneals from its own configured start.
+            self._handicap_epsilon = None
             self._persist_mastery_state()
             transition_logger = (
                 logging.warning if advance_reason == "deadline"
@@ -2893,6 +3007,7 @@ class CurriculumProgressCallback(BaseCallback):
                 "curriculum/advance_via_deadline",
                 float(advance_reason == "deadline"))
             self._broadcast(force=True, stage_index=self._active_stage_index)
+            self._persist_mastery_state()
         return True
 
 
@@ -3750,8 +3865,8 @@ def main():
                              "(default: formats/<format> when --format is given)")
     parser.add_argument(
         "--curriculum",
-        choices=("combat-v3", "combat-v2", "combat-v1", "none"),
-        default="combat-v3",
+        choices=("combat-v4", "combat-v3", "combat-v2", "combat-v1", "none"),
+        default="combat-v4",
         help="Deterministic training opponent curriculum (evaluation stays fixed)")
     args = parser.parse_args()
     if args.resume and args.optimize_hp:

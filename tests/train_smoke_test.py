@@ -443,7 +443,8 @@ def check_mask_aware_evaluation():
                 mastery_callback.model,
                 m.CurriculumProgressCallback.MODEL_STATE_ATTRIBUTE)
             assert persisted_window["recent_outcomes"][0] == {
-                "outcome": "win", "opponent_profile": "passive"}
+                "outcome": "win", "opponent_profile": "passive",
+                "opponent_handicap": 0.0}
 
             # Profile-tagged rolling outcomes survive callback restoration.
             restored_callback = m.CurriculumProgressCallback(
@@ -953,7 +954,7 @@ def check_runtime_configuration():
         "activation_fn": torch.nn.Tanh,
         "action_reward_scale": 0.0,
         "state_potential_scale": 0.40,
-        "reward_contract_version": "discounted-state-potential-v5",
+        "reward_contract_version": "discounted-state-potential-v6",
     }
 
     try:

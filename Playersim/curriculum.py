@@ -199,6 +199,114 @@ COMBAT_CURRICULUM_V3 = {
 }
 
 
+# Round 7.91: rounds 7.88-7.90 all showed the same cliff — ~60% decisive wins
+# against passive opponents collapsing to ~5% against novice, flat for 100k+
+# timesteps, so race always fell to its deadline.  V4 keeps the V3 gates and
+# deadlines but gives each active stage a climbable slope:
+# - "handicap": the stage's active profiles open weakened.  With probability
+#   epsilon a handicapped opponent takes the goldfish (passive) baseline for
+#   one priority decision instead of attacking/blocking/developing.  The
+#   trainer ratchets epsilon toward zero each time the rolling decisive win
+#   rate against the handicapped profile clears the stage target; mastery
+#   still demands full-strength (epsilon-zero) evidence.
+# - "max_turns": early stages shorten the turn limit.  Wins under the 31-turn
+#   limit averaged turn 25 while losses averaged turn 17, so long stalls were
+#   starving the learner of episodes; shorter games buy more terminal
+#   outcomes per timestep and tighten credit assignment.
+COMBAT_CURRICULUM_V4 = {
+    "id": "combat-v4",
+    "version": 4,
+    "progression": "mastery",
+    "allow_mirrors": False,
+    "stages": [
+        {
+            "name": "goldfish",
+            "start_timestep": 0,
+            "decks": ["Selesnya Ouroboroid", "Mono-Green Landfall"],
+            "profile_bag": ["passive"] * 10,
+            "max_turns": 20,
+            "advance_when": {
+                "window_episodes": 64,
+                "min_stage_timesteps": 30_000,
+                "max_stage_timesteps": 75_000,
+                "min_decisive_win_rate": 0.60,
+                "max_decisive_loss_rate": 0.25,
+                "max_timeout_rate": 0.35,
+            },
+        },
+        {
+            "name": "race",
+            "start_timestep": 30_000,
+            "decks": ["Selesnya Ouroboroid", "Mono-Green Landfall"],
+            "profile_bag": ["passive"] * 4 + ["novice"] * 6,
+            "max_turns": 20,
+            "handicap": {
+                "profiles": ["novice"],
+                "start": 0.75,
+                "step": 0.25,
+                "window_episodes": 24,
+                "min_decisive_win_rate": 0.40,
+            },
+            "advance_when": {
+                "window_episodes": 96,
+                "min_stage_timesteps": 45_000,
+                "max_stage_timesteps": 100_000,
+                "min_decisive_win_rate": 0.40,
+                "max_decisive_loss_rate": 0.45,
+                "max_timeout_rate": 0.25,
+                "profile_requirements": {
+                    "novice": {
+                        "min_episodes": 48,
+                        "min_decisive_win_rate": 0.20,
+                    },
+                },
+            },
+        },
+        {
+            "name": "bridge",
+            "start_timestep": 75_000,
+            "decks": [
+                "Selesnya Ouroboroid", "Mono-Green Landfall",
+                "Izzet Prowess", "Azorius Momo",
+            ],
+            "profile_bag": ["novice"] * 6 + ["scripted"] * 4,
+            "max_turns": 25,
+            "handicap": {
+                "profiles": ["scripted"],
+                "start": 0.60,
+                "step": 0.20,
+                "window_episodes": 24,
+                "min_decisive_win_rate": 0.25,
+            },
+            "advance_when": {
+                "window_episodes": 128,
+                "min_stage_timesteps": 75_000,
+                "max_stage_timesteps": 200_000,
+                "min_decisive_win_rate": 0.25,
+                "max_decisive_loss_rate": 0.60,
+                "max_timeout_rate": 0.25,
+                "profile_requirements": {
+                    "novice": {
+                        "min_episodes": 64,
+                        "min_decisive_win_rate": 0.20,
+                    },
+                    "scripted": {
+                        "min_episodes": 40,
+                        "min_decisive_win_rate": 0.15,
+                    },
+                },
+            },
+        },
+        {
+            "name": "full_pool",
+            "start_timestep": 150_000,
+            "decks": "*",
+            "profile_bag": ["novice"] * 2 + ["scripted"] * 8,
+        },
+    ],
+}
+
+
 def _stable_seed(*parts) -> int:
     payload = ":".join(str(part) for part in parts).encode("utf-8")
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
@@ -217,6 +325,7 @@ def resolve_curriculum(name, decks):
         "combat-v1": COMBAT_CURRICULUM_V1,
         "combat-v2": COMBAT_CURRICULUM_V2,
         "combat-v3": COMBAT_CURRICULUM_V3,
+        "combat-v4": COMBAT_CURRICULUM_V4,
     }
     if name not in presets:
         raise ValueError(f"Unknown curriculum: {name}")
@@ -260,6 +369,44 @@ def resolve_curriculum(name, decks):
         if not bag or unknown:
             raise ValueError(
                 f"Curriculum stage {stage_name} has invalid profiles: {unknown}")
+        max_turns = stage.get("max_turns")
+        if max_turns is not None:
+            max_turns = int(max_turns)
+            if not 5 <= max_turns <= 100:
+                raise ValueError(
+                    f"Curriculum stage {stage_name} has an invalid max_turns")
+            stage["max_turns"] = max_turns
+        handicap = stage.get("handicap")
+        if handicap is not None:
+            if not isinstance(handicap, dict):
+                raise ValueError(
+                    f"Curriculum stage {stage_name} has an invalid handicap")
+            handicap_profiles = [
+                str(profile) for profile in (handicap.get("profiles") or [])]
+            invalid_handicap_profiles = sorted(
+                set(handicap_profiles) - (OPPONENT_PROFILES & set(bag))
+                | ({"passive"} & set(handicap_profiles)))
+            if not handicap_profiles or invalid_handicap_profiles:
+                raise ValueError(
+                    f"Curriculum stage {stage_name} handicaps profiles that "
+                    f"are passive, unknown, or absent from its bag: "
+                    f"{invalid_handicap_profiles}")
+            start = float(handicap.get("start", -1.0))
+            step = float(handicap.get("step", -1.0))
+            handicap_window = int(handicap.get("window_episodes", 0))
+            target = float(handicap.get("min_decisive_win_rate", -1.0))
+            if (not 0.0 < start <= 1.0 or not 0.0 < step <= 1.0
+                    or handicap_window <= 0 or not 0.0 <= target <= 1.0):
+                raise ValueError(
+                    f"Curriculum stage {stage_name} has invalid handicap "
+                    "parameters")
+            stage["handicap"] = {
+                "profiles": handicap_profiles,
+                "start": start,
+                "step": step,
+                "window_episodes": handicap_window,
+                "min_decisive_win_rate": target,
+            }
         gate = stage.get("advance_when")
         if progression == "mastery" and stage is not stages[-1]:
             if not isinstance(gate, dict):
@@ -403,6 +550,7 @@ class CurriculumScheduler:
             "p2_deck": opponent_deck if agent_is_p1 else agent_deck,
             "agent_is_p1": bool(agent_is_p1),
             "opponent_profile": profile,
+            "max_turns": stage.get("max_turns"),
         }
 
     def commit(self, stage_index):

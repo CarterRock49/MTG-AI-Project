@@ -39,6 +39,8 @@ The primary join table. Append-only; each line:
 | `agent_version` | str    | run id / checkpoint tag (see caveats) |
 | `curriculum_stage` / `curriculum_stage_index` | str/null, int/null | training curriculum stage; null for fixed evaluation and non-curriculum games |
 | `opponent_profile` | str | `passive`, `novice`, or `scripted` |
+| `opponent_handicap` | float | pass-probability the annealed opponent played under; `0.0` means full strength (always `0.0` for fixed evaluation) |
+| `max_turns` | int | the turn limit this game was played under (curriculum stages may shorten it below the engine default) |
 | `agent_deck` / `opponent_deck` | str | semantic deck roles independent of physical P1/P2 seat |
 | `matchup_episode_index` | int/null | deterministic stage/schedule episode index |
 | `fidelity`      | object | per-game fidelity counters (below) |
