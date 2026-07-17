@@ -83,7 +83,7 @@ class GiftTargetParityTest(unittest.TestCase):
         game_state.action_handler = handler
         return game_state, handler, caster
 
-    def test_mask_valid_gift_spell_starts_one_target_cast(self):
+    def test_mask_valid_gift_spell_decline_starts_one_target_cast(self):
         game_state, handler, caster = self._state()
         flood_maw = game_state._safe_get_card(0)
 
@@ -104,6 +104,13 @@ class GiftTargetParityTest(unittest.TestCase):
         self.assertFalse(done)
         self.assertFalse(truncated)
         self.assertFalse(info.get("execution_failed", False), info)
+        self.assertEqual(game_state.phase, game_state.PHASE_CHOOSE)
+        self.assertEqual(game_state.choice_context.get("type"), "gift")
+        gift_mask = handler.generate_valid_actions()
+        self.assertTrue(gift_mask[353], "promise Gift was not policy-visible")
+        self.assertTrue(gift_mask[11], "decline Gift was not policy-visible")
+        _, success = handler._handle_pass_priority(None)
+        self.assertTrue(success)
         self.assertEqual(game_state.phase, game_state.PHASE_TARGETING)
         self.assertEqual(game_state.targeting_context["required_count"], 1)
         self.assertEqual(game_state.targeting_context["min_targets"], 1)
@@ -119,6 +126,15 @@ class GiftTargetParityTest(unittest.TestCase):
         self.assertEqual(game_state.stack[-1][1], 0)
         self.assertEqual(
             game_state.stack[-1][3].get("targeting_text"), active_text)
+
+        self.assertTrue(game_state.resolve_top_of_stack())
+        opponent = game_state.p1
+        self.assertIn(1, opponent["hand"])
+        fish_tokens = [
+            card_id for card_id in opponent["battlefield"]
+            if getattr(game_state._safe_get_card(card_id), "name", "")
+            == "Fish Token"]
+        self.assertEqual(fish_tokens, [])
 
 
 if __name__ == "__main__":

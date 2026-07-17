@@ -150,9 +150,50 @@ select:focus, input:focus { border-color: rgba(84,216,195,.6); box-shadow: 0 0 0
 .detail-tags { display: flex; flex-wrap: wrap; gap: 6px; margin: 10px 0; }
 .trace-list { display: grid; gap: 7px; margin-top: 8px; }
 .trace-step { display: grid; grid-template-columns: 34px 1fr; gap: 8px; padding: 8px; border: 1px solid var(--border-soft); border-radius: 7px; background: #0e141b; }
+.trace-step.actor-learned { border-left: 2px solid var(--teal); }
+.trace-step.actor-opponent { border-left: 2px solid var(--purple); }
 .trace-step .seq { color: var(--subtle); font: 10px ui-monospace, monospace; }
 .trace-step strong { display: block; font-size: 10px; }
 .trace-step small { color: var(--muted); font-size: 9px; }
+.trace-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.trace-heading .chip { flex: 0 0 auto; font-size: 8px; }
+.timeline-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 12px; margin-bottom: 8px; padding: 10px; border: 1px solid var(--border-soft); border-radius: 8px; background: var(--surface); }
+.timeline-toolbar > div { display: grid; gap: 3px; }
+.timeline-toolbar strong { font-size: 10px; }
+.timeline-toolbar span { color: var(--muted); font-size: 9px; }
+.timeline-filter { display: grid; gap: 4px; min-width: 150px; color: var(--subtle); font-size: 8px; }
+.timeline-filter select { width: 100%; }
+.action-identities { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 7px; }
+.action-identities span { padding: 4px 6px; border-radius: 5px; color: #b9d5cf; background: rgba(84,216,195,.07); font-size: 8px; overflow-wrap: anywhere; }
+.decision-snapshot { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 4px; margin-top: 7px; }
+.decision-snapshot > span { min-width: 0; padding: 5px 6px; border: 1px solid rgba(84,216,195,.14); border-radius: 5px; color: var(--muted); background: rgba(84,216,195,.04); font-size: 8px; line-height: 1.4; overflow-wrap: anywhere; }
+.decision-snapshot b { display: block; margin-bottom: 2px; color: #b9d8d3; font-size: 7px; letter-spacing: .04em; text-transform: uppercase; }
+.decision-snapshot small { display: block; margin-top: 2px; color: var(--subtle); font: 7px ui-monospace, monospace; }
+.decision-snapshot .decision-mask { grid-column: 1 / -1; }
+.state-delta { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 4px; margin-top: 7px; }
+.state-delta span { min-width: 0; padding: 5px 6px; border: 1px solid rgba(117,167,255,.12); border-radius: 5px; color: var(--muted); background: rgba(117,167,255,.04); font-size: 8px; line-height: 1.4; overflow-wrap: anywhere; }
+.state-delta b { display: block; margin-bottom: 2px; color: #b9cae8; font-size: 7px; letter-spacing: .04em; text-transform: uppercase; }
+.replay-notice { display: grid; gap: 4px; padding: 10px; border-left: 2px solid var(--blue); border-radius: 6px; color: var(--muted); background: rgba(117,167,255,.06); font-size: 9px; }
+.replay-notice strong { color: var(--text); font-size: 10px; }
+.replay-list { display: grid; gap: 6px; margin-top: 8px; }
+.replay-step { display: grid; grid-template-columns: 34px 1fr; gap: 8px; padding: 8px; border: 1px solid var(--border-soft); border-radius: 7px; background: #0d1319; }
+.replay-step .seq { color: var(--subtle); font: 9px ui-monospace, monospace; }
+.replay-step strong { display: block; font-size: 10px; }
+.replay-step small { color: var(--muted); font-size: 8px; }
+.capture-health { display: grid; gap: 9px; margin-top: 12px; padding: 11px; border: 1px solid rgba(101,213,139,.24); border-radius: 8px; background: rgba(101,213,139,.04); }
+.capture-health.has-warning { border-color: rgba(242,184,75,.3); background: rgba(242,184,75,.04); }
+.capture-health > div:first-child { display: flex; justify-content: space-between; gap: 10px; font-size: 10px; }
+.capture-health > div:first-child span { color: var(--muted); font-size: 9px; }
+.capture-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 5px; }
+.capture-scope { padding: 7px; border-radius: 6px; background: var(--surface); color: var(--subtle); font-size: 8px; text-transform: uppercase; }
+.capture-scope.has-warning { box-shadow: inset 2px 0 var(--amber); }
+.capture-scope strong, .capture-scope small { display: block; margin-top: 3px; text-transform: none; }
+.capture-scope strong { color: var(--text); font-size: 10px; }
+.capture-scope small { color: var(--muted); font-size: 7px; line-height: 1.4; }
+.terminal-summary { display: grid; gap: 9px; }
+.terminal-state { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 5px; }
+.terminal-state span { padding: 7px; border-radius: 6px; color: var(--muted); background: var(--surface); font-size: 9px; overflow-wrap: anywhere; }
+.terminal-state b { display: block; margin-bottom: 3px; color: var(--subtle); font-size: 7px; text-transform: uppercase; }
 .legacy-notice { padding: 12px; border: 1px solid rgba(242,184,75,.25); border-radius: 8px; color: #e9c97f; background: rgba(242,184,75,.06); font-size: 10px; line-height: 1.55; }
 .evaluator-activity { display: grid; gap: 10px; }
 .evaluator-notice { display: grid; gap: 4px; padding: 12px; border: 1px solid rgba(117,167,255,.28); border-radius: 8px; color: #cddcff; background: rgba(117,167,255,.07); font-size: 10px; line-height: 1.55; }
@@ -216,6 +257,9 @@ tbody tr.selected { box-shadow: inset 2px 0 var(--teal); }
 .memory-mode.recorded_only { border-left-color: var(--blue); background: rgba(117,167,255,.06); }
 .memory-mode.adaptive_input { border-left-color: var(--purple); background: rgba(174,139,255,.07); }
 .memory-mode.unknown { border-left-color: var(--amber); background: rgba(242,184,75,.06); }
+.metric-contract { display: grid; gap: 4px; margin-top: 10px; padding: 10px; border: 1px solid rgba(84,216,195,.2); border-radius: 7px; color: var(--muted); background: rgba(84,216,195,.045); font-size: 9px; line-height: 1.5; }
+.metric-contract strong { color: var(--teal); font-size: 10px; }
+.metric-contract b { color: var(--text); }
 .memory-file { display: grid; grid-template-columns: auto minmax(0,1fr); gap: 8px; margin: 10px 0 0; font-size: 9px; }
 .memory-file dt { color: var(--subtle); }
 .memory-file dd { margin: 0; color: var(--muted); overflow-wrap: anywhere; }

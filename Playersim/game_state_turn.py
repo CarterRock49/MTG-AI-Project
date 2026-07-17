@@ -412,6 +412,9 @@ class GameStateTurnMixin:
                 if choice_type == "bargain":
                     self.complete_bargain_choice(None)
                     return
+                if choice_type == "gift":
+                    self.complete_gift_choice(False)
+                    return
                 if choice_type == "choose_mode":
                     self.finalize_modal_spell_choice()
                     return
@@ -1101,6 +1104,16 @@ class GameStateTurnMixin:
             for _cid in list(_impulse):
                 _castable.discard(_cid)
             self.impulse_until_eot = set()
+
+        # "Until the end of your next turn" survives the intervening turn and
+        # expires during cleanup of the controller's next turn.
+        _next_turn_impulse = getattr(self, 'impulse_until_next_turn', None)
+        if _next_turn_impulse:
+            _castable = getattr(self, 'cards_castable_from_exile', set())
+            for _cid, _expires_turn in list(_next_turn_impulse.items()):
+                if int(_expires_turn) <= self.turn:
+                    _castable.discard(_cid)
+                    del _next_turn_impulse[_cid]
 
         # "Until the end of your next turn" graveyard Adventure permissions
         # remain usable through that turn's cleanup, then expire.

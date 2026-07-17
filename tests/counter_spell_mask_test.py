@@ -35,7 +35,7 @@ def snare(gs, player):
     }, "hand")
 
 
-def opponent_spell(gs, opponent, name, mana_cost, cmc):
+def opponent_spell(gs, opponent, name, mana_cost, cmc, stack_context=None):
     spell_id = inject_into_zone(gs, opponent, {
         "name": name, "mana_cost": mana_cost, "cmc": cmc,
         "type_line": "Sorcery",
@@ -43,9 +43,11 @@ def opponent_spell(gs, opponent, name, mana_cost, cmc):
         "color_identity": ["W"],
     }, "hand")
     opponent["hand"].remove(spell_id)
-    gs.stack.append(("SPELL", spell_id, opponent, {
+    context = {
         "card_id": spell_id, "controller_id": "p2", "was_cast": True,
-    }))
+    }
+    context.update(stack_context or {})
+    gs.stack.append(("SPELL", spell_id, opponent, context))
     return spell_id
 
 
@@ -117,6 +119,29 @@ class CounterSpellMaskRiderTest(unittest.TestCase):
             gs.stack[target_idx][1], legal_id,
             "the mask context must aim at the legal target, not the first "
             "opponent spell on the stack")
+
+    def test_snare_uses_the_announced_x_in_stack_mana_value(self):
+        for seed, x_value, expected in (
+                (97303, 0, False), (97304, 1, True), (97305, 2, False)):
+            with self.subTest(X=x_value):
+                gs = fresh(seed)
+                env = get_env()
+                handler = env.action_handler
+                me, opp = gs.p1, gs.p2
+                gs.agent_is_p1 = True
+                gs.stack.clear()
+                snare(gs, me)
+                opponent_spell(
+                    gs, opp, "Variable Bait", "{X}{U}", 1,
+                    {"X": x_value})
+                priority_with_untapped_island(gs, me)
+
+                mask = np.asarray(
+                    handler.generate_valid_actions(), dtype=bool)
+                self.assertEqual(
+                    bool(mask[430]), expected,
+                    "Spell Snare must use printed mana value plus the value "
+                    "chosen for X while the spell is on the stack")
 
 
 if __name__ == "__main__":

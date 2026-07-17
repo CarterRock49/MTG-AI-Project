@@ -79,6 +79,111 @@ class EvaluationDebugReplayTest(unittest.TestCase):
         self.assertEqual(terminal.get("done"), done)
         self.assertEqual(terminal.get("truncated"), truncated)
 
+    def test_card_catalog_names_outside_sideboard_stack_and_trace_cards(self):
+        with tempfile.TemporaryDirectory() as root:
+            env = self._environment(root, "catalog-sources")
+            try:
+                env.reset(seed=19)
+                gs = env.game_state
+
+                def add_card(card_id, name):
+                    card = Card({
+                        "name": name,
+                        "mana_cost": "{1}",
+                        "type_line": "Instant",
+                        "cmc": 1,
+                        "oracle_text": "Draw a card.",
+                    })
+                    card.card_id = card_id
+                    gs.card_db[card_id] = card
+                    return card_id
+
+                outside_id = add_card(
+                    "NORTH_WIND_WISH_DEBUG", "North Wind Wish")
+                sideboard_id = add_card(
+                    "SIDEBOARD_WISH_DEBUG", "Sideboard Wish")
+                stack_id = add_card("STACK_ONLY_DEBUG", "Stack Source")
+                trace_id = add_card("TRACE_ONLY_DEBUG", "Earlier Source")
+                gs.p1["outside_game"] = [outside_id]
+                gs.p2["sideboard"] = [sideboard_id]
+                gs.stack.append(("spell", stack_id, gs.p1, {}))
+                permanent_id = gs.p1["hand"].pop()
+                gs.p1["battlefield"].append(permanent_id)
+                gs.p1["mana_pool"]["R"] = 2
+                gs.p1["snow_mana_pool"]["U"] = 1
+                gs.p1["phase_restricted_mana"]["G"] = 1
+                gs.p1["conditional_mana"] = {
+                    "cast_creatures": {"C": 2},
+                }
+                gs.p1["tapped_permanents"].add(permanent_id)
+                gs.p1["lands_played_this_turn"] = 1
+                gs.p1["land_played"] = True
+                gs.p1["damage_counters"][permanent_id] = 3
+                gs.card_db[permanent_id].counters = {"+1/+1": 2}
+                gs.choice_context = {
+                    "type": "resolution_choice",
+                    "choice_kind": "outside_game",
+                    "player": gs.p1,
+                    "options": [outside_id],
+                    "optional": True,
+                    "source_id": trace_id,
+                }
+                env.evaluation_action_trace = [{
+                    "context": {"source_id": trace_id},
+                }]
+
+                valid_mask = np.zeros(env.ACTION_SPACE_SIZE, dtype=bool)
+                valid_mask[[11, 353]] = True
+                snapshot = env._evaluation_state_snapshot(
+                    valid_mask=valid_mask)
+                p1 = snapshot["p1"]
+                self.assertEqual(p1["mana"]["normal"]["R"], 2)
+                self.assertEqual(p1["mana"]["snow"]["U"], 1)
+                self.assertEqual(
+                    p1["mana"]["phase_restricted"]["G"], 1)
+                self.assertEqual(
+                    p1["mana"]["conditional"]["cast_creatures"]["C"],
+                    2,
+                )
+                self.assertIn(permanent_id, p1["tapped_permanents"])
+                self.assertEqual(p1["lands_played_this_turn"], 1)
+                self.assertTrue(p1["land_played"])
+                self.assertEqual(
+                    p1["damage_marked"][0],
+                    {"card_id": permanent_id, "amount": 3},
+                )
+                self.assertEqual(
+                    p1["permanent_counters"][0]["counters"]["+1/+1"],
+                    2,
+                )
+                self.assertEqual(
+                    snapshot["decision_context"]["choice"]["choice_kind"],
+                    "outside_game",
+                )
+                self.assertEqual(
+                    snapshot["decision_context"]["choice"]["options"],
+                    [outside_id],
+                )
+                self.assertEqual(
+                    snapshot["valid_actions"]["indices"], [11, 353])
+
+                catalog = env._evaluation_card_catalog()
+                entries = {
+                    str(item["runtime_id"]): item
+                    for item in catalog["entries"]
+                }
+                self.assertEqual(
+                    entries[outside_id]["name"], "North Wind Wish")
+                self.assertEqual(entries[outside_id]["owner"], "p1")
+                self.assertEqual(
+                    entries[sideboard_id]["name"], "Sideboard Wish")
+                self.assertEqual(entries[sideboard_id]["owner"], "p2")
+                self.assertEqual(entries[stack_id]["name"], "Stack Source")
+                self.assertEqual(entries[trace_id]["name"], "Earlier Source")
+                self.assertFalse(catalog["candidate_scan_truncated"])
+            finally:
+                env.close()
+
     def test_evaluation_terminal_contains_complete_atomic_trace_and_replay(self):
         with tempfile.TemporaryDirectory() as root:
             env = self._environment(root, "evaluation")
@@ -108,6 +213,23 @@ class EvaluationDebugReplayTest(unittest.TestCase):
                 # diagnostics crossed the worker boundary safely.
                 json.dumps(debug, allow_nan=False)
 
+                catalog = debug.get("card_catalog")
+                self.assertIsInstance(catalog, dict)
+                self.assertEqual(catalog["recorded_entries"], 120)
+                self.assertEqual(catalog["omitted_entries"], 0)
+                identities = {
+                    str(entry["runtime_id"]): entry
+                    for entry in catalog["entries"]
+                }
+                self.assertEqual(
+                    {entry["owner"] for entry in catalog["entries"]},
+                    {"p1", "p2"},
+                )
+                self.assertTrue(all(
+                    entry["name"] == "Evaluation Plains"
+                    for entry in catalog["entries"]
+                ))
+
                 trace = debug["trace"]
                 self.assertEqual(
                     [item["sequence"] for item in trace],
@@ -121,8 +243,30 @@ class EvaluationDebugReplayTest(unittest.TestCase):
                     self.assertIn("label", item)
                     self.assertIn("pre", item)
                     self.assertIn("post", item)
+                    self.assertIn("valid_actions", item["pre"])
+                    self.assertIn(
+                        item["action"],
+                        item["pre"]["valid_actions"]["indices"],
+                    )
                     self.assertIn("zones", item["post"]["p1"])
                     self.assertIn("stack", item["post"])
+                    for seat in ("p1", "p2"):
+                        player_state = item["pre"][seat]
+                        self.assertIn("mana", player_state)
+                        self.assertIn("normal", player_state["mana"])
+                        self.assertIn("snow", player_state["mana"])
+                        self.assertIn(
+                            "phase_restricted", player_state["mana"])
+                        self.assertIn("tapped_permanents", player_state)
+                        self.assertIn("lands_played_this_turn", player_state)
+                        self.assertIn("damage_marked", player_state)
+                        self.assertIn("permanent_counters", player_state)
+                    for seat in ("p1", "p2"):
+                        for zone in ("hand", "battlefield", "graveyard",
+                                     "exile"):
+                            for runtime_id in item["post"][seat]["zones"][
+                                    zone].get("cards", []):
+                                self.assertIn(str(runtime_id), identities)
                 # Evaluator activity is an observed pre/during-action window,
                 # never a claim that the heuristic caused the PPO choice.
                 for item in trace[:2]:
@@ -518,6 +662,14 @@ class EvaluationDebugReplayTest(unittest.TestCase):
             self.assertNotIn("..", stored["debug_path"].split("/"))
             self.assertEqual(stored["trace_event_count"], 3)
             self.assertEqual(stored["replay_action_count"], 2)
+            self.assertEqual(
+                stored["debug_summary"]["trace_actor_counts"],
+                {"learned": 2, "opponent": 1},
+            )
+            self.assertEqual(
+                stored["debug_summary"]["capture_status"],
+                "not_recorded",
+            )
 
             sidecar_path = os.path.join(
                 os.path.dirname(history_path),

@@ -65,6 +65,10 @@ class AlphaZeroMTGEnv(gym.Env):
     EVALUATION_REPLAY_MAX_BYTES = 2 * 1024 * 1024
     EVALUATION_REPLAY_ENTRY_MAX_BYTES = 64 * 1024
     EVALUATION_DEBUG_MAX_BYTES = 12 * 1024 * 1024
+    # One ordinary game has 120 materialized deck cards.  Leave ample room
+    # for tokens/copies while keeping a rules bug from producing an unbounded
+    # identity table in every evaluation sidecar.
+    EVALUATION_CARD_CATALOG_MAX_ENTRIES = 512
     DIAGNOSTIC_MAX_DEPTH = 10
     DIAGNOSTIC_MAX_NODES = 32_768
     DIAGNOSTIC_MAX_CONTAINER_ITEMS = 512
@@ -2289,7 +2293,8 @@ class AlphaZeroMTGEnv(gym.Env):
                  return obs, step_reward, True, False, env_info # done=True
 
             learned_pre_state = (
-                self._safe_evaluation_state_snapshot("learned_pre_state")
+                self._safe_evaluation_state_snapshot(
+                    "learned_pre_state", valid_mask=current_mask)
                 if self._evaluation_trace_enabled() else None)
             reward, done, truncated, handler_info = self.action_handler.apply_action(action_idx, context=action_context)
             if learned_pre_state is not None:
@@ -2368,7 +2373,7 @@ class AlphaZeroMTGEnv(gym.Env):
 
                 opponent_pre_state = (
                     self._safe_evaluation_state_snapshot(
-                        "opponent_pre_state")
+                        "opponent_pre_state", valid_mask=opponent_mask)
                     if self._evaluation_trace_enabled() else None)
                 _, opp_done, opp_truncated, opp_handler_info = self.action_handler.apply_action(opponent_action_idx, context=opponent_action_context)
                 if opponent_pre_state is not None:
@@ -3137,10 +3142,10 @@ class AlphaZeroMTGEnv(gym.Env):
             "message": message,
         })
 
-    def _safe_evaluation_state_snapshot(self, stage):
+    def _safe_evaluation_state_snapshot(self, stage, *, valid_mask=None):
         """Capture one state snapshot; return an omission marker on failure."""
         try:
-            return self._evaluation_state_snapshot()
+            return self._evaluation_state_snapshot(valid_mask=valid_mask)
         except Exception as error:
             self._note_evaluation_capture_error(stage, error, scope="trace")
             return {
@@ -3177,7 +3182,103 @@ class AlphaZeroMTGEnv(gym.Env):
                 snapshot["omitted"] = len(cards) - 128
         return snapshot
 
-    def _evaluation_state_snapshot(self):
+    @staticmethod
+    def _evaluation_bounded_pool(raw_pool, limit=16):
+        """Copy one small mana pool using deterministic bounded keys."""
+        if not isinstance(raw_pool, dict):
+            return {}
+        items = sorted(raw_pool.items(), key=lambda item: str(item[0]))
+        return {str(key): value for key, value in items[:limit]}
+
+    def _evaluation_mana_snapshot(self, player):
+        if not isinstance(player, dict):
+            return {}
+
+        def restricted_buckets(name):
+            raw = player.get(name, {}) or {}
+            if not isinstance(raw, dict):
+                return {}
+            items = sorted(raw.items(), key=lambda item: str(item[0]))[:32]
+            return {
+                str(restriction): self._evaluation_bounded_pool(pool)
+                for restriction, pool in items if isinstance(pool, dict)
+            }
+
+        return {
+            "normal": self._evaluation_bounded_pool(
+                player.get("mana_pool")),
+            "snow": self._evaluation_bounded_pool(
+                player.get("snow_mana_pool")),
+            "phase_restricted": self._evaluation_bounded_pool(
+                player.get("phase_restricted_mana")),
+            "phase_restricted_snow": self._evaluation_bounded_pool(
+                player.get("phase_restricted_snow_mana")),
+            "conditional": restricted_buckets("conditional_mana"),
+            "conditional_snow": restricted_buckets(
+                "conditional_snow_mana"),
+        }
+
+    def _evaluation_decision_context_snapshot(self):
+        """Summarize active multi-step choice state without serializing code."""
+        gs = getattr(self, "game_state", None)
+        if gs is None:
+            return None
+        scalar_keys = (
+            "type", "choice_kind", "stage", "optional", "required_type",
+            "min_targets", "max_targets", "required_count", "outside_zone",
+            "resume_phase", "source_id", "card_id", "target_id",
+            "attacker_id", "blocker_id", "effect_text", "prompt", "reason",
+            "targeting_text",
+        )
+        sequence_keys = (
+            "options", "selected_targets", "valid_targets", "targets",
+            "selected", "cards", "card_ids", "target_ids",
+        )
+        result = {}
+        for label, attribute in (
+                ("targeting", "targeting_context"),
+                ("choice", "choice_context"),
+                ("sacrifice", "sacrifice_context")):
+            raw = getattr(gs, attribute, None)
+            if not isinstance(raw, dict):
+                continue
+            summary = {
+                key: raw.get(key) for key in scalar_keys
+                if key in raw and raw.get(key) is not None
+            }
+            for controller_key in ("player", "controller", "target_player"):
+                if controller_key not in raw:
+                    continue
+                controller = raw.get(controller_key)
+                summary[f"{controller_key}_seat"] = (
+                    self._evaluation_player_label(controller)
+                    or (controller
+                        if isinstance(controller, (str, int)) else None))
+            for key in sequence_keys:
+                if key not in raw:
+                    continue
+                value = raw.get(key)
+                if isinstance(value, (list, tuple, set, frozenset)):
+                    values = list(value)
+                    summary[key] = values[:32]
+                    summary[f"{key}_count"] = len(values)
+                    if len(values) > 32:
+                        summary[f"{key}_omitted"] = len(values) - 32
+                elif isinstance(value, dict):
+                    items = sorted(
+                        value.items(), key=lambda item: str(item[0]))
+                    summary[key] = {
+                        str(key_item): value_item
+                        for key_item, value_item in items[:32]
+                    }
+                    summary[f"{key}_count"] = len(items)
+                    if len(items) > 32:
+                        summary[f"{key}_omitted"] = len(items) - 32
+            summary["raw_key_count"] = len(raw)
+            result[label] = summary
+        return result or None
+
+    def _evaluation_state_snapshot(self, *, valid_mask=None):
         """Compact state at one atomic action boundary.
 
         The seed plus learned action/context replay remains authoritative.  The
@@ -3192,9 +3293,36 @@ class AlphaZeroMTGEnv(gym.Env):
         def player_snapshot(player):
             if not isinstance(player, dict):
                 return None
-            return {
+            battlefield = list(player.get("battlefield", ()) or ())[:128]
+            tapped = list(player.get("tapped_permanents", ()) or ())
+            damage_items = list(
+                (player.get("damage_counters", {}) or {}).items())[:128]
+            permanent_counters = []
+            for card_id in battlefield:
+                card = getattr(gs, "card_db", {}).get(card_id)
+                counters = getattr(card, "counters", None)
+                if isinstance(counters, dict) and counters:
+                    permanent_counters.append({
+                        "card_id": card_id,
+                        "counters": self._evaluation_bounded_pool(
+                            counters, limit=32),
+                    })
+            result = {
                 "life": player.get("life"),
                 "poison_counters": player.get("poison_counters", 0),
+                "energy_counters": player.get("energy_counters", 0),
+                "experience_counters": player.get(
+                    "experience_counters", 0),
+                "mana": self._evaluation_mana_snapshot(player),
+                "lands_played_this_turn": player.get(
+                    "lands_played_this_turn", 0),
+                "land_played": bool(player.get("land_played", False)),
+                "tapped_permanents": tapped[:128],
+                "damage_marked": [
+                    {"card_id": card_id, "amount": amount}
+                    for card_id, amount in damage_items
+                ],
+                "permanent_counters": permanent_counters[:128],
                 "zones": {
                     "library": self._evaluation_zone_snapshot(
                         player, "library", include_cards=False),
@@ -3204,8 +3332,18 @@ class AlphaZeroMTGEnv(gym.Env):
                     "graveyard": self._evaluation_zone_snapshot(
                         player, "graveyard"),
                     "exile": self._evaluation_zone_snapshot(player, "exile"),
+                    "outside_game": self._evaluation_zone_snapshot(
+                        player, "outside_game"),
+                    "sideboard": self._evaluation_zone_snapshot(
+                        player, "sideboard"),
                 },
             }
+            if len(tapped) > 128:
+                result["tapped_permanents_omitted"] = len(tapped) - 128
+            raw_damage = player.get("damage_counters", {}) or {}
+            if isinstance(raw_damage, dict) and len(raw_damage) > 128:
+                result["damage_marked_omitted"] = len(raw_damage) - 128
+            return result
 
         stack = []
         live_stack = list(getattr(gs, "stack", ()) or ())
@@ -3231,6 +3369,19 @@ class AlphaZeroMTGEnv(gym.Env):
             "p2": player_snapshot(getattr(gs, "p2", None)),
             "stack": stack,
         }
+        decision_context = self._evaluation_decision_context_snapshot()
+        if decision_context is not None:
+            snapshot["decision_context"] = decision_context
+        if valid_mask is not None:
+            mask = np.asarray(valid_mask, dtype=bool).reshape(-1)
+            valid_indices = np.flatnonzero(mask).tolist()
+            limit = int(self.ACTION_SPACE_SIZE)
+            snapshot["valid_actions"] = {
+                "indices": valid_indices[:limit],
+                "count": len(valid_indices),
+                "omitted": max(0, len(valid_indices) - limit),
+                "mask_size": int(mask.size),
+            }
         if len(live_stack) > 32:
             snapshot["stack_omitted"] = len(live_stack) - 32
         return self._json_safe_replay_value(snapshot)
@@ -3581,6 +3732,7 @@ class AlphaZeroMTGEnv(gym.Env):
             "evaluation_timestep": self.evaluation_timestep,
             "evaluation_checkpoint_sha256":
                 self.evaluation_checkpoint_sha256,
+            "card_catalog": self._evaluation_card_catalog(),
             "replay": self.export_replay(),
             "trace": list(getattr(self, "evaluation_action_trace", ())),
             "terminal": terminal,
@@ -3595,6 +3747,194 @@ class AlphaZeroMTGEnv(gym.Env):
                 "unattached": unattached,
             }
         return self._enforce_evaluation_debug_payload_budget(payload)
+
+    def _evaluation_card_catalog(self):
+        """Return a bounded runtime-ID identity map for trace inspection.
+
+        State snapshots intentionally store physical runtime IDs so repeated
+        copies remain distinguishable.  Persisting the matching names here
+        lets a debugger explain hand/zone/stack deltas without loading the
+        full card database or guessing from evaluator calls.  This is
+        diagnostic metadata only and never participates in replay.
+        """
+        gs = getattr(self, "game_state", None)
+        if gs is None:
+            return {
+                "schema_version": 1,
+                "entries": [],
+                "recorded_entries": 0,
+                "omitted_entries": 0,
+            }
+
+        printings = dict(
+            getattr(gs, "card_instance_printings", {}) or {})
+        owners = dict(getattr(gs, "card_instance_owners", {}) or {})
+        card_db = getattr(gs, "card_db", {}) or {}
+        ceased_tokens = getattr(gs, "_ceased_token_cards", {}) or {}
+
+        limit = int(self.EVALUATION_CARD_CATALOG_MAX_ENTRIES)
+        candidate_limit = limit * 4
+        ordered_ids = []
+        seen_ids = set()
+        candidate_scan_truncated = False
+
+        def add_id(card_id, *, force=False):
+            nonlocal candidate_scan_truncated
+            if isinstance(card_id, Card):
+                card_id = getattr(card_id, "card_id", None)
+            try:
+                if card_id is None or card_id in seen_ids:
+                    return
+                resolvable = (
+                    force or card_id in printings or card_id in card_db
+                    or card_id in ceased_tokens)
+            except (TypeError, ValueError):
+                return
+            if not resolvable:
+                return
+            if len(ordered_ids) >= candidate_limit:
+                candidate_scan_truncated = True
+                return
+            seen_ids.add(card_id)
+            ordered_ids.append(card_id)
+
+        # Physical deck instances remain first so normal game cards cannot be
+        # displaced by pathological choice/trace data.
+        for card_id in printings:
+            add_id(card_id, force=True)
+
+        zone_names = (
+            "library", "hand", "battlefield", "graveyard", "exile",
+            "outside_game", "sideboard", "command_zone", "tokens")
+        for player in (getattr(gs, "p1", None), getattr(gs, "p2", None)):
+            if not isinstance(player, dict):
+                continue
+            for zone_name in zone_names:
+                raw_cards = player.get(zone_name, ()) or ()
+                if isinstance(raw_cards, dict):
+                    raw_cards = raw_cards.keys()
+                try:
+                    for card_id in raw_cards:
+                        add_id(card_id)
+                except TypeError:
+                    continue
+
+        for item in list(getattr(gs, "stack", ()) or ())[:128]:
+            if isinstance(item, tuple) and len(item) > 1:
+                add_id(item[1])
+
+        identity_keys = {
+            "card_id", "source_id", "target_id", "target_card_id",
+            # Canonical IDs are database identities, not physical runtime
+            # references, and can numerically collide with runtime IDs.
+            "runtime_card_id", "attacker_id",
+            "blocker_id", "land_id", "permanent_id", "creature_id",
+            "connive_creature_id", "discard_card_id", "sacrifice_card_id",
+        }
+        identity_collections = {
+            # Generic options/targets are deliberately excluded: mode,
+            # player, and battlefield-slot numbers can coincidentally equal a
+            # live card ID.  Only collections whose key promises card IDs are
+            # safe to resolve here; scalar source/target card-ID keys are
+            # handled by ``identity_keys`` above.
+            "cards", "card_ids", "target_ids", "selected_target_ids",
+            "valid_target_ids", "tapped_permanents",
+        }
+
+        def collect_references(value, key_hint=None, depth=0):
+            if depth > 8 or candidate_scan_truncated:
+                return
+            if isinstance(value, dict):
+                for key, item in value.items():
+                    key_text = str(key).casefold()
+                    if (key_text in identity_keys
+                            or (key_text != "canonical_card_id"
+                                and key_text.endswith(
+                                    ("_card_id", "_source_id")))):
+                        if isinstance(item, (list, tuple, set, frozenset)):
+                            for card_id in item:
+                                add_id(card_id)
+                        else:
+                            add_id(item)
+                    else:
+                        collect_references(item, key_text, depth + 1)
+                return
+            if isinstance(value, (list, tuple, set, frozenset)):
+                for item in value:
+                    if key_hint in identity_collections \
+                            and not isinstance(item, (dict, list, tuple,
+                                                       set, frozenset)):
+                        add_id(item)
+                    else:
+                        collect_references(item, key_hint, depth + 1)
+                return
+            if key_hint in identity_collections:
+                add_id(value)
+
+        # Earlier cards may no longer be in a live zone at terminal time.
+        # Trace contexts/snapshots retain their IDs, so use them as a second
+        # bounded source of identity candidates.
+        collect_references(getattr(self, "evaluation_action_trace", ()))
+        collect_references(getattr(gs, "targeting_context", None))
+        collect_references(getattr(gs, "choice_context", None))
+        collect_references(getattr(gs, "sacrifice_context", None))
+
+        # Tokens are additive and include ceased objects so earlier trace
+        # transitions remain nameable after state-based actions remove them.
+        token_ids = {
+            card_id for card_id in (*card_db.keys(), *ceased_tokens.keys())
+            if isinstance(card_id, str) and card_id.startswith("TOKEN_")
+        }
+        for card_id in sorted(token_ids, key=str):
+            add_id(card_id)
+        selected_ids = ordered_ids[:limit]
+
+        def player_owner(card_id):
+            owner = owners.get(card_id)
+            if owner in ("p1", "p2"):
+                return owner
+            for label, player in (
+                    ("p1", getattr(gs, "p1", None)),
+                    ("p2", getattr(gs, "p2", None))):
+                if not isinstance(player, dict):
+                    continue
+                if any(card_id in (player.get(zone, ()) or ()) for zone in (
+                        "library", "hand", "battlefield", "graveyard",
+                        "exile", "outside_game", "sideboard",
+                        "command_zone", "tokens")):
+                    return label
+            last_location = getattr(gs, "_last_card_locations", {}).get(
+                card_id)
+            if isinstance(last_location, tuple) and last_location:
+                return self._evaluation_player_label(last_location[0])
+            return None
+
+        entries = []
+        for runtime_id in selected_ids:
+            card = card_db.get(runtime_id)
+            if card is None:
+                card = ceased_tokens.get(runtime_id)
+            canonical_id = printings.get(runtime_id, runtime_id)
+            entry = {
+                "runtime_id": self._json_safe_replay_value(runtime_id),
+                "canonical_id": self._json_safe_replay_value(canonical_id),
+                "name": str(getattr(
+                    card, "name", f"Unknown Card {runtime_id}")),
+                "owner": player_owner(runtime_id),
+            }
+            type_line = getattr(card, "type_line", None)
+            if type_line:
+                entry["type_line"] = str(type_line)
+            entries.append(entry)
+        return {
+            "schema_version": 1,
+            "entries": entries,
+            "recorded_entries": len(entries),
+            "omitted_entries": max(0, len(ordered_ids) - len(entries)),
+            "entry_limit": limit,
+            "candidate_limit": candidate_limit,
+            "candidate_scan_truncated": candidate_scan_truncated,
+        }
 
     @staticmethod
     def _compact_json_bytes(payload):

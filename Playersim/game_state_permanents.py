@@ -734,7 +734,8 @@ class GameStatePermanentsMixin:
         if not hasattr(self, 'haste_until_eot'): self.haste_until_eot = set()
         self.haste_until_eot.add(card_id)
 
-    def create_token(self, controller, token_data, attach_to_target=None):
+    def create_token(self, controller, token_data, attach_to_target=None,
+                     enters_tapped=False):
         """
         Create a token and add it to the battlefield.
         
@@ -788,8 +789,13 @@ class GameStatePermanentsMixin:
 
             # Add token to the card database
             self.card_db[token_id] = token
-            move_context = ({"attach_to_target": attach_to_target}
-                            if attach_to_target is not None else {})
+            move_context = {}
+            if attach_to_target is not None:
+                move_context["attach_to_target"] = attach_to_target
+            if enters_tapped:
+                # This is a battlefield-entry modifier, so install it before
+                # move_card performs ETB setup and emits enter triggers.
+                move_context["enters_tapped"] = True
             if not self.move_card(
                     token_id, controller, "nonexistent_zone", controller,
                     "battlefield", cause="token_creation", context=move_context):

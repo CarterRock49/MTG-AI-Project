@@ -206,7 +206,7 @@
       "name": "Day of Judgment",
       "oracle_id": "d057289d-5e28-43d5-8ff3-4a1bc723477d",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "verified"
     },
     {
       "abilities_registered": 3,
@@ -223,7 +223,7 @@
       "layout": "normal",
       "name": "Deep-Cavern Bat",
       "oracle_id": "e46f6644-6bf1-47b1-817c-906bd3eca99f",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "verified"
     },
     {
@@ -410,7 +410,7 @@
       "layout": "normal",
       "name": "Floodpits Drowner",
       "oracle_id": "43c69d19-c06c-470a-bdba-a0335ff2d655",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "verified"
     },
     {
@@ -834,7 +834,7 @@
       "layout": "normal",
       "name": "Oildeep Gearhulk",
       "oracle_id": "aff0740f-51d5-41c7-ac13-97c298cfd743",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "verified"
     },
     {
@@ -976,7 +976,7 @@
       "layout": "normal",
       "name": "Preacher of the Schism",
       "oracle_id": "74947e47-c4ff-4f47-9845-befa7403cbde",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -1126,7 +1126,7 @@
       "layout": "normal",
       "name": "Sentinel of the Nameless City",
       "oracle_id": "a5bbfe32-2fb9-48a0-bc8a-e9899aac1fda",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -1609,7 +1609,7 @@
       "layout": "normal",
       "name": "Aang, the Last Airbender",
       "oracle_id": "70564c3a-858f-498e-8b92-acb3ca54ae7e",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -1751,7 +1751,7 @@
       "layout": "normal",
       "name": "Abigale, Eloquent First-Year",
       "oracle_id": "48a773d0-c433-4463-b50f-b6d4604a042c",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -1884,7 +1884,7 @@
       "layout": "normal",
       "name": "Absorbing Man",
       "oracle_id": "ec8e310f-e871-498f-8d80-c3617c5e1433",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -1913,6 +1913,11 @@
         {
           "count": 1,
           "reason": "unparsed clause: Exile another target creature or artifact you control",
+          "severity": "partial"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed clause: Return it to the battlefield under its owner's control",
           "severity": "partial"
         }
       ],
@@ -1978,19 +1983,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 140,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Abzan Monument",
       "oracle_id": "93563b7b-5685-4832-b164-0701dbf3cf18",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -2036,7 +2035,7 @@
       "layout": "transform",
       "name": "Aclazotz, Deepest Betrayal // Temple of the Dead",
       "oracle_id": "fcdfe9d5-2743-4d3e-ab57-bf0f96beaa15",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -2107,7 +2106,7 @@
       "layout": "normal",
       "name": "Action News Crew",
       "oracle_id": "a9d68cf5-3055-4ec9-9893-244bfd7046be",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -2207,7 +2206,7 @@
       "layout": "normal",
       "name": "Adelbert Steiner",
       "oracle_id": "657a4500-4b47-4c78-945b-a7791af7d10e",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -2402,7 +2401,7 @@
       "layout": "normal",
       "name": "Aerith Gainsborough",
       "oracle_id": "dd9a6f6b-f9b7-4292-bc80-b7da326de032",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -2484,7 +2483,7 @@
       "layout": "normal",
       "name": "Aetherjacket",
       "oracle_id": "062c8e40-dea7-4df7-bcaa-f1d696fe61c3",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -2750,7 +2749,7 @@
       "layout": "normal",
       "name": "Agent Phil Coulson",
       "oracle_id": "dae20bcd-dc24-4f9d-9400-a6f013b49f14",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -2888,7 +2887,7 @@
       "layout": "normal",
       "name": "Agrus Kos, Spirit of Justice",
       "oracle_id": "11b7ee78-fca6-4b34-93e4-e60492583d50",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -2957,7 +2956,7 @@
       "layout": "normal",
       "name": "Air Response Unit",
       "oracle_id": "18a22d9f-81bc-4ed5-bd83-e3f8ec5e38c8",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -3251,7 +3250,7 @@
       "layout": "normal",
       "name": "Alacrian Jaguar",
       "oracle_id": "caeb4ec1-a8ba-4ac4-ad32-edbc671e5a39",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -3299,7 +3298,7 @@
       "layout": "normal",
       "name": "Alchemist's Assistant",
       "oracle_id": "2844d274-cb60-46c1-a73b-e763c633e496",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -3532,7 +3531,7 @@
       "layout": "normal",
       "name": "Alquist Proft, Master Sleuth",
       "oracle_id": "dd79a994-7dad-49d4-8d8f-62dbedde4a38",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -3832,7 +3831,7 @@
       "layout": "normal",
       "name": "Ancient Adamantoise",
       "oracle_id": "e6873252-653a-47a8-99b7-b2ef70aa1f7f",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -4280,7 +4279,7 @@
       "layout": "normal",
       "name": "Apocalypse Runner",
       "oracle_id": "0ca1f76d-ae77-490a-8b32-d30ad33afc2d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -4297,7 +4296,7 @@
       "layout": "normal",
       "name": "Apothecary Stomper",
       "oracle_id": "6a381121-9134-489c-8c7e-44be1936b0e2",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -4698,7 +4697,7 @@
       "name": "Archdruid's Charm",
       "oracle_id": "3c1ef404-e2c6-486d-a5a2-d5779c71d498",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "verified"
     },
     {
       "abilities_registered": 0,
@@ -4712,7 +4711,7 @@
       "layout": "normal",
       "name": "Archenemy's Charm",
       "oracle_id": "edcb0248-e7c9-4df9-8dba-982048654fd2",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -4797,7 +4796,7 @@
       "layout": "normal",
       "name": "Archon's Glory",
       "oracle_id": "bc5631ae-494e-4987-8d17-57674bfbdb9f",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -4837,7 +4836,7 @@
       "layout": "normal",
       "name": "Ardyn, the Usurper",
       "oracle_id": "9ae13026-960a-4d31-b775-d47209a1e313",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -4943,7 +4942,7 @@
       "layout": "normal",
       "name": "Armasaur Guide",
       "oracle_id": "1d4e7422-2e26-49ce-beef-08f61583089a",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -5437,7 +5436,7 @@
       "layout": "normal",
       "name": "Atlantean Cavalry",
       "oracle_id": "e929b730-9aa2-49e1-9a65-50afc0fbe3e0",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -5498,13 +5497,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 336,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: if you do, sacrifice it",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Attack-in-the-Box",
       "oracle_id": "f0fd78bb-cb83-4dfa-a910-0334d225f87c",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 1,
@@ -5623,7 +5628,7 @@
       "layout": "normal",
       "name": "Aurelia's Vindicator",
       "oracle_id": "4f452ce7-1166-4810-afed-ea5e156a6f52",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -5642,7 +5647,7 @@
       "layout": "normal",
       "name": "Aurelia, the Law Above",
       "oracle_id": "2a800427-ff8c-4b3c-baee-85211b70656d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -5661,7 +5666,7 @@
       "layout": "normal",
       "name": "Aurelia, the Warleader",
       "oracle_id": "0f5a3a09-2f07-4774-9e0f-e99d9a444166",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -6210,7 +6215,7 @@
       "layout": "normal",
       "name": "Azure Beastbinder",
       "oracle_id": "7bb51602-60e8-4730-b11c-2870d6b42e20",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -6729,7 +6734,7 @@
       "layout": "normal",
       "name": "Baron Bertram Graywater",
       "oracle_id": "e25b516c-bf95-42bc-8b1e-04617a3d28df",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -6860,7 +6865,7 @@
       "layout": "normal",
       "name": "Barrow Naughty",
       "oracle_id": "95664c29-9801-4dfc-9dbd-465abf6bb4ee",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -6963,7 +6968,7 @@
       "layout": "normal",
       "name": "Basilisk Collar",
       "oracle_id": "f5f4dd28-f4ae-4d39-b9b8-6ebfd63c93fe",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -6998,7 +7003,7 @@
       "layout": "normal",
       "name": "Basri, Tomorrow's Champion",
       "oracle_id": "d8e1e9ba-708c-4f54-abc3-817004a2f2ac",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -7309,7 +7314,7 @@
       "layout": "normal",
       "name": "Beatrix, Loyal General",
       "oracle_id": "2f24637d-8d8e-49de-b229-4cdb97595ed7",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -8143,7 +8148,7 @@
       "layout": "normal",
       "name": "Bishop's Soldier",
       "oracle_id": "84487586-4f71-457a-b983-4f1f7a71deef",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -9594,7 +9599,7 @@
       "layout": "normal",
       "name": "Boulderborn Dragon",
       "oracle_id": "1654cab1-0697-4547-b1fe-2d0a61385199",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -9869,7 +9874,7 @@
       "layout": "normal",
       "name": "Brave Brawler",
       "oracle_id": "a1a791be-71e6-4c1f-8717-08ca62d40de2",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -9883,11 +9888,6 @@
         {
           "count": 1,
           "reason": "unparsed clause: Bargain If this spell was bargained",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
           "severity": "partial"
         }
       ],
@@ -9993,7 +9993,7 @@
       "layout": "normal",
       "name": "Bre of Clan Stoutarm",
       "oracle_id": "59384481-3ca0-49dd-b94f-d3680b336f1e",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -10189,7 +10189,7 @@
       "layout": "normal",
       "name": "Bridled Bighorn",
       "oracle_id": "6a1ad848-6fda-46dd-aad8-2f6a5c71a696",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -10207,7 +10207,7 @@
       "layout": "normal",
       "name": "Brightblade Stoat",
       "oracle_id": "f1d2f437-d474-4617-aea6-102daa5e5a15",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -10225,7 +10225,7 @@
       "layout": "normal",
       "name": "Brightfield Glider",
       "oracle_id": "acff6e5c-7f25-4ae1-8672-8672450ad844",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -10279,7 +10279,7 @@
       "layout": "normal",
       "name": "Brightspear Zealot",
       "oracle_id": "31a0c9a2-c9bd-47f7-872b-a43fb64d873c",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -11224,7 +11224,7 @@
       "layout": "normal",
       "name": "Buzz Bots",
       "oracle_id": "434e720f-2bfa-49b6-a5ac-fe0c0b24764d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -11282,7 +11282,7 @@
       "layout": "normal",
       "name": "Byrke, Long Ear of the Law",
       "oracle_id": "e9c6e4e6-0c3f-4048-93e6-161a1221ea36",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "partial"
     },
     {
@@ -11469,12 +11469,17 @@
         {
           "count": 1,
           "reason": "unparsed clause: attacking token that's a copy of it. repeat this process once",
-          "severity": "partial"
+          "severity": "unparsed"
         },
         {
           "count": 1,
           "reason": "unparsed clause: create a tapped",
-          "severity": "partial"
+          "severity": "unparsed"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed effect text: sacrifice that token",
+          "severity": "unparsed"
         }
       ],
       "keywords": [
@@ -11485,7 +11490,7 @@
       "name": "Calamity, Galloping Inferno",
       "oracle_id": "eb37496e-374f-41b9-bd52-f52f37bdac31",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 0,
@@ -11524,13 +11529,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 663,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -11538,7 +11537,7 @@
       "name": "Call the Mountain Chocobo",
       "oracle_id": "a0dd3eb4-f6f1-4bfb-935c-032dd5af3811",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -11864,7 +11863,7 @@
       "layout": "normal",
       "name": "Captain America, Living Legend",
       "oracle_id": "67aa946d-e694-494e-ba0c-44880d5bc03e",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -11947,7 +11946,7 @@
       "layout": "normal",
       "name": "Captain Mar-Vell, Space-Born",
       "oracle_id": "b74c072d-77ac-460d-9d9c-75b25874f58b",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -11973,7 +11972,7 @@
       "layout": "normal",
       "name": "Captain Marvel, Earth's Protector",
       "oracle_id": "2e665a03-bece-43df-bd15-b4496e233f2e",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -12013,19 +12012,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 689,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Caradora, Heart of Alacria",
       "oracle_id": "a9d60d80-bcef-45e0-8ded-d70bd3c2780f",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -12076,7 +12069,7 @@
       "layout": "normal",
       "name": "Cargo Ship",
       "oracle_id": "93e336e3-2be7-4581-8ab3-9bea422d81c3",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -12285,7 +12278,7 @@
       "layout": "case",
       "name": "Case of the Gorgon's Kiss",
       "oracle_id": "a89f9072-cf06-429f-a9b8-c11b5731ddd3",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unparsed"
     },
     {
@@ -12363,11 +12356,6 @@
           "count": 1,
           "reason": "unclassified ability clause: Solved \u2014 At the beginning of combat on your turn, target creature you control ga",
           "severity": "unparsed"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "unparsed"
         }
       ],
       "keywords": [
@@ -12386,13 +12374,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 708,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Solved",
         "Suspect"
@@ -12401,7 +12383,7 @@
       "name": "Case of the Stashed Skeleton",
       "oracle_id": "64219e17-1302-4a43-85d2-8a6214448890",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -12533,7 +12515,7 @@
       "layout": "normal",
       "name": "Cat-Gator",
       "oracle_id": "349e6b9e-40a8-49bc-9cd3-4a22f5363fa5",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -12774,7 +12756,7 @@
       "layout": "transform",
       "name": "Cecil, Dark Knight // Cecil, Redeemed Paladin",
       "oracle_id": "e4719557-d94e-490f-8a56-c1867a01d2ef",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unparsed"
     },
     {
@@ -12803,11 +12785,6 @@
       "faces_audited": 1,
       "index": 730,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: put that card onto the battlefield instead of putting it into your hand",
@@ -12862,13 +12839,7 @@
       "effect_probes": 2,
       "faces_audited": 2,
       "index": 733,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Surveil"
       ],
@@ -12876,7 +12847,7 @@
       "name": "Central Elevator // Promising Stairs",
       "oracle_id": "927fa223-69a3-4563-80b1-b578f3d031f1",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -13162,13 +13133,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 749,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Changeling"
       ],
@@ -13176,7 +13141,7 @@
       "name": "Changeling Wayfinder",
       "oracle_id": "93409d98-93c8-4742-a635-2a4408e66c32",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -13303,7 +13268,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 756,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: return it to the battlefield under your control",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Scry"
       ],
@@ -13311,7 +13282,7 @@
       "name": "Charming Prince",
       "oracle_id": "c48d844c-3976-4fa5-8e0d-3f0e535e7619",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -13688,13 +13659,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 777,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: Sacrifice it",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Chrome Dome",
       "oracle_id": "3dc71e16-b935-4ad7-b3f7-945ac2c179a7",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -13795,7 +13772,7 @@
       "layout": "normal",
       "name": "Circle of Power",
       "oracle_id": "2d41fd1f-4a98-45dd-a3c5-f7c5e0152109",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -13883,7 +13860,7 @@
       "layout": "normal",
       "name": "Claim Jumper",
       "oracle_id": "18f0cd0b-3e4f-4637-a62e-75dd1b2f3fce",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -14025,13 +14002,7 @@
       "effect_probes": 2,
       "faces_audited": 2,
       "index": 795,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Craft",
         "Transform"
@@ -14040,7 +14011,7 @@
       "name": "Clay-Fired Bricks // Cosmium Kiln",
       "oracle_id": "90e1bcef-53af-4c08-b713-bf10dfcbd577",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -14056,7 +14027,7 @@
       "layout": "normal",
       "name": "Clement, the Worrywort",
       "oracle_id": "57ce5ebd-cfac-4bb9-b010-04d0c285be27",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -14177,7 +14148,7 @@
       "layout": "normal",
       "name": "Cloak and Dagger, Entwined",
       "oracle_id": "64132f93-66ac-4794-8c07-a88f9ed0e22b",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "partial"
     },
     {
@@ -14243,19 +14214,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 805,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Cloud, Midgar Mercenary",
       "oracle_id": "33d2584b-bf29-4c22-bd45-14ba2fb98c0e",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -14390,7 +14355,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 813,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: exile that creature",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Deathtouch",
         "Menace"
@@ -14399,7 +14370,7 @@
       "name": "Coalstoke Gearhulk",
       "oracle_id": "2cdbaa4e-8907-49dc-9fa9-0df70db3bf23",
       "replacement_effects_registered": 1,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 0,
@@ -14802,7 +14773,12 @@
         {
           "count": 1,
           "reason": "unparsed clause: return it to the battlefield under your control",
-          "severity": "partial"
+          "severity": "unparsed"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed effect text: Sacrifice it",
+          "severity": "unparsed"
         }
       ],
       "keywords": [],
@@ -14810,7 +14786,7 @@
       "name": "Come Back Wrong",
       "oracle_id": "2a9783c5-084b-4cd3-b7fa-ae9d7fed51d1",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -14826,7 +14802,7 @@
       "layout": "normal",
       "name": "Comet Crawler",
       "oracle_id": "0c1b6305-8863-43e0-b50d-ae1c5e31be55",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -15141,7 +15117,7 @@
       "layout": "normal",
       "name": "Congregation Gryff",
       "oracle_id": "376cbc85-2941-4d97-b031-bffff86550e7",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -15436,7 +15412,7 @@
       "name": "Cori Mountain Monastery",
       "oracle_id": "35c60b66-8c85-432e-90fe-99c19d21ed15",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "verified"
     },
     {
       "abilities_registered": 1,
@@ -15645,7 +15621,7 @@
       "layout": "normal",
       "name": "Cosmic Spider-Man",
       "oracle_id": "0334a2f8-a74a-44c9-ba64-d9b7fabe160c",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -15835,11 +15811,6 @@
       "faces_audited": 1,
       "index": 892,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: shuffle. if you don't put a card into your hand this way",
@@ -16216,7 +16187,7 @@
       "layout": "normal",
       "name": "Crossway Troublemakers",
       "oracle_id": "1a362e4d-6c02-4b67-ab63-c6622e505195",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -16563,7 +16534,7 @@
       "layout": "normal",
       "name": "Cryptid Inspector",
       "oracle_id": "c36f787e-d8d4-4bd5-9790-64766878fe46",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -16664,7 +16635,7 @@
       "layout": "normal",
       "name": "Cult Healer",
       "oracle_id": "c51da69b-7fd7-43a3-be29-c44fc0c36130",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -16926,7 +16897,7 @@
       "layout": "normal",
       "name": "Cursed Courtier",
       "oracle_id": "17916cf9-1e6c-41bd-96ce-2b050d828838",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -17092,7 +17063,7 @@
       "layout": "normal",
       "name": "Daggermaw Megalodon",
       "oracle_id": "dc638413-c4f8-4f6a-a003-5ce8a10a8f94",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -17183,13 +17154,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 964,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: Sacrifice them",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Dalkovan Encampment",
       "oracle_id": "33a90122-7280-4481-9b97-5879194cae40",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -17206,7 +17183,7 @@
       "layout": "normal",
       "name": "Dalkovan Packbeasts",
       "oracle_id": "cdd1a043-bd47-4197-be26-e2f7d3f1d209",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -17276,7 +17253,7 @@
       "layout": "normal",
       "name": "Daredevil, Man Without Fear",
       "oracle_id": "88aadf60-91f9-4932-a2bc-63365a139d36",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -17554,7 +17531,7 @@
       "layout": "normal",
       "name": "Dashing Bloodsucker",
       "oracle_id": "211dca11-b633-4deb-9d51-210fd3843995",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -17731,7 +17708,7 @@
       "layout": "normal",
       "name": "Dawnstrike Vanguard",
       "oracle_id": "69892dc7-4087-447c-a41c-99cf3d5c0c12",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -18614,13 +18591,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1044,
-      "issues": [
-        {
-          "count": 2,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Delirium"
       ],
@@ -18628,7 +18599,7 @@
       "name": "Demonic Counsel",
       "oracle_id": "712e3479-722c-40a1-9b61-d5bdde93042b",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -18877,7 +18848,7 @@
       "layout": "normal",
       "name": "Desperate Bloodseeker",
       "oracle_id": "de8d7cad-02c7-43f1-896e-eaa73f016ada",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -18958,13 +18929,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1062,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: Sacrifice them",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Devastating Onslaught",
       "oracle_id": "2e17cd4c-ebf0-40d0-b52d-b4d84bbcf7b3",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -19653,7 +19630,7 @@
       "layout": "normal",
       "name": "Dissection Tools",
       "oracle_id": "50de5faa-d22e-4909-a1ff-3810cfcfcb1a",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unparsed"
     },
     {
@@ -20007,7 +19984,7 @@
       "layout": "normal",
       "name": "Dog Walker",
       "oracle_id": "10d24900-cd40-4c98-bb1e-b9e66113f703",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -20045,7 +20022,7 @@
       "layout": "normal",
       "name": "Don & Leo, Problem Solvers",
       "oracle_id": "a4ae71c8-ea1b-4fa4-9e47-cf00ab60c5ee",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -20470,7 +20447,7 @@
       "layout": "normal",
       "name": "Dragon Sniper",
       "oracle_id": "913dbce2-6805-453f-a9c3-64f1cc658627",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -20550,7 +20527,7 @@
       "layout": "normal",
       "name": "Dragonbroods' Relic",
       "oracle_id": "61822bbe-0407-4425-b8d7-0263a8c521ec",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -20681,19 +20658,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1159,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Dragonstorm Forecaster",
       "oracle_id": "02de8fa3-ac8d-47e5-b137-d5a0b7d8e951",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -20767,7 +20738,7 @@
       "layout": "normal",
       "name": "Drake Hatcher",
       "oracle_id": "4de0ccab-bb5d-4c7c-827e-36aa1d00b182",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -21083,7 +21054,7 @@
       "layout": "normal",
       "name": "Drogskol Reaver",
       "oracle_id": "68175b49-f1e6-4b34-aad9-20d61a43d427",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -21267,7 +21238,7 @@
       "layout": "normal",
       "name": "Duelist of the Mind",
       "oracle_id": "ff78f166-cca2-44bc-abe3-3a338bf543be",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -21351,7 +21322,7 @@
       "layout": "normal",
       "name": "Dust Animus",
       "oracle_id": "494f8c29-7626-43ed-b0b8-fb9afd4cd5d3",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -21612,7 +21583,7 @@
       "layout": "normal",
       "name": "Earth Kingdom Protectors",
       "oracle_id": "3bfb3913-808d-444b-97c3-a90af3bc585b",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -21629,7 +21600,7 @@
       "layout": "normal",
       "name": "Earth Kingdom Soldier",
       "oracle_id": "4289f2d4-3db2-4dd1-9c18-af3f78309844",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -21788,7 +21759,7 @@
       "layout": "normal",
       "name": "Earthrumbler",
       "oracle_id": "ba5982a9-e8c1-4e7c-9a73-c4caad0f7336",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -21824,7 +21795,7 @@
       "layout": "normal",
       "name": "East Wind Avatar",
       "oracle_id": "e2ef355a-2472-47e0-9b2e-987994291921",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -21874,7 +21845,7 @@
       "layout": "normal",
       "name": "Echo of Dusk",
       "oracle_id": "fd0980ae-eabf-45da-98e7-23d81bfa185a",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -21897,7 +21868,7 @@
       "layout": "normal",
       "name": "Echo, Perceptive Prodigy",
       "oracle_id": "1091c83a-a4b9-457f-a69a-9a44a7e10759",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -22257,7 +22228,7 @@
       "layout": "normal",
       "name": "Effortless Master",
       "oracle_id": "185e0892-194f-43ac-853f-1e142bf8476e",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -22297,7 +22268,7 @@
       "layout": "transform",
       "name": "Eirdu, Carrier of Dawn // Isilu, Carrier of Twilight",
       "oracle_id": "36af3c2c-49d7-46ea-ab02-c254b332448e",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -22425,7 +22396,7 @@
       "layout": "normal",
       "name": "Elegy Acolyte",
       "oracle_id": "f7d52eac-edc9-464b-a163-07c136aa6e4c",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -22461,7 +22432,7 @@
       "layout": "normal",
       "name": "Elemental Mascot",
       "oracle_id": "882f30e4-4ce1-4581-8d2d-d763aa13befe",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -22524,7 +22495,7 @@
       "layout": "normal",
       "name": "Elenda, Saint of Dusk",
       "oracle_id": "bfd614d5-4c7f-416b-9cb2-bb167c0893a0",
-      "replacement_effects_registered": 3,
+      "replacement_effects_registered": 2,
       "status": "unseen"
     },
     {
@@ -22889,7 +22860,7 @@
       "layout": "prepare",
       "name": "Emeritus of Abundance // Regrowth",
       "oracle_id": "e5152e8d-9f55-493d-a0fc-753cc72ee299",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -22970,11 +22941,6 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: put that card into your hand",
-          "severity": "unparsed"
-        },
-        {
-          "count": 1,
           "reason": "unparsed effect text: this creature becomes prepared",
           "severity": "unparsed"
         }
@@ -23004,7 +22970,7 @@
       "layout": "transform",
       "name": "Emet-Selch, Unsundered // Hades, Sorcerer of Eld",
       "oracle_id": "3b102ccc-7629-457c-aba6-e9b00fd50c85",
-      "replacement_effects_registered": 3,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -23256,7 +23222,7 @@
       "layout": "normal",
       "name": "Enduring Innocence",
       "oracle_id": "98a389f4-2905-47f3-b60e-3d4afb3e5cb0",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -23294,7 +23260,7 @@
       "layout": "normal",
       "name": "Enduring Vitality",
       "oracle_id": "3577c47e-76d3-4659-b922-31c4b74be3a0",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -23358,6 +23324,11 @@
           "count": 1,
           "reason": "unparsed clause: exile up to one other target creature you control",
           "severity": "partial"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed clause: return that card to the battlefield under its owner's control",
+          "severity": "partial"
         }
       ],
       "keywords": [],
@@ -23396,7 +23367,7 @@
       "layout": "normal",
       "name": "Enter the Avatar State",
       "oracle_id": "4e552be1-0702-4e18-822f-98611f8a8e70",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -23473,19 +23444,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1311,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Environmental Scientist",
       "oracle_id": "f30aa897-7027-47e7-ae58-73cbc448c1f0",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -23657,7 +23622,7 @@
       "layout": "normal",
       "name": "Eriette, the Beguiler",
       "oracle_id": "710a3499-64f8-4d2c-8c9c-d58950e47ea7",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -23708,7 +23673,7 @@
       "layout": "normal",
       "name": "Erratic Apparition",
       "oracle_id": "23d5d43c-ec78-42dd-a53e-a1ee91c94b1d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -23780,7 +23745,7 @@
       "layout": "normal",
       "name": "Eshki Dragonclaw",
       "oracle_id": "85d87087-48ee-4dc8-a1c0-9c9ccb885adc",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -24128,19 +24093,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 1347,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Everything Pizza",
       "oracle_id": "aa481983-8f1a-4519-9371-5e7edcd3274f",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -24233,7 +24192,7 @@
       "layout": "normal",
       "name": "Exalted Sunborn",
       "oracle_id": "43febbcd-ecbe-4edb-ad90-7fc6dc381d05",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -24404,19 +24363,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1362,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Expedition Map",
       "oracle_id": "8fcf50cd-e6d0-4516-850f-d42ee75dcc3a",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -24495,13 +24448,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1367,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: Return it to the battlefield under its owner's control",
+          "severity": "partial"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Explosive Getaway",
       "oracle_id": "c844cc98-b8b9-447d-92ee-64f4a4906e7c",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 0,
@@ -24688,7 +24647,7 @@
       "layout": "normal",
       "name": "Ezrim, Agency Chief",
       "oracle_id": "ddcd8a0a-7ac3-4400-a16f-8bb5aa50994e",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -25436,7 +25395,7 @@
       "layout": "normal",
       "name": "Fear of Infinity",
       "oracle_id": "018327d1-a3ba-4912-9c88-f0f0c54a1750",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -25469,7 +25428,7 @@
       "layout": "normal",
       "name": "Fear of Surveillance",
       "oracle_id": "52478437-bb6c-48bb-855d-54a8a4d42d18",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -25548,11 +25507,6 @@
       "faces_audited": 1,
       "index": 1424,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: you may put it onto the battlefield tapped. otherwise",
@@ -25710,7 +25664,7 @@
       "layout": "normal",
       "name": "Felidar Savior",
       "oracle_id": "2bee2508-cd5d-4c62-a205-12d8bbb3143d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -25743,7 +25697,7 @@
       "layout": "normal",
       "name": "Fell Gravship",
       "oracle_id": "1a82be68-3b74-4dfc-9068-3abea61db709",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -25983,19 +25937,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1449,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Fierce Empath",
       "oracle_id": "5104053a-d394-4b00-82a4-60fd9f051a6e",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -26183,7 +26131,7 @@
       "layout": "normal",
       "name": "Finneas, Ace Archer",
       "oracle_id": "69924636-138e-4baa-a378-0fd7df5b847d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -26402,7 +26350,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1470,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: sacrifice that token",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [
         "Defender",
         "Reach"
@@ -26411,7 +26365,7 @@
       "name": "Fire Navy Trebuchet",
       "oracle_id": "1f018a8c-6ceb-4d03-94a7-8713467c9cf5",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -26965,7 +26919,7 @@
       "layout": "normal",
       "name": "Flexible Waterbender",
       "oracle_id": "8cf88fa8-2f47-4125-a59d-9c2b2d4765a7",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -27259,7 +27213,7 @@
       "layout": "normal",
       "name": "Foggy Swamp Hunters",
       "oracle_id": "1941cf7a-ad53-4bce-beea-104951619a30",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -27276,7 +27230,7 @@
       "layout": "normal",
       "name": "Foggy Swamp Spirit Keeper",
       "oracle_id": "faecfb8d-2f63-4b98-a842-b11448f0d538",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -27307,7 +27261,12 @@
         {
           "count": 1,
           "reason": "unparsed clause: waterbend {X}. Exile X target creature cards from graveyards. For each creature ",
-          "severity": "partial"
+          "severity": "unparsed"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed effect text: sacrifice those tokens",
+          "severity": "unparsed"
         }
       ],
       "keywords": [
@@ -27317,7 +27276,7 @@
       "name": "Foggy Swamp Visions",
       "oracle_id": "16af0a22-833e-47c6-ac27-002702194595",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 0,
@@ -27474,7 +27433,7 @@
       "layout": "normal",
       "name": "Foot Mystic",
       "oracle_id": "2043fbde-48c4-4a77-8911-8991d77de1eb",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -28727,7 +28686,7 @@
       "layout": "normal",
       "name": "Gaelicat",
       "oracle_id": "34bdeca4-b1e0-4fa3-afe4-bec743a080b8",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -28777,7 +28736,7 @@
       "layout": "normal",
       "name": "Galewind Moose",
       "oracle_id": "b0747a4f-d041-4750-aef5-a5d101696f65",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -28945,7 +28904,7 @@
       "layout": "normal",
       "name": "Gargantuan Leech",
       "oracle_id": "073f12d1-eaa1-4d08-bc1d-b216a3dc0c67",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -29002,7 +28961,7 @@
       "layout": "normal",
       "name": "Garnet, Princess of Alexandria",
       "oracle_id": "8c709873-84b5-46c2-bb29-85b041a6df88",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -29549,7 +29508,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1642,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: Return it to the battlefield under its owner's control",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Spree"
       ],
@@ -29557,7 +29522,7 @@
       "name": "Getaway Glamer",
       "oracle_id": "98eac0f7-3f4d-46ef-9575-680c52e967cf",
       "replacement_effects_registered": 1,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 3,
@@ -29777,7 +29742,7 @@
       "layout": "normal",
       "name": "Giada, Font of Hope",
       "oracle_id": "48e6d3d8-2f27-4017-acdd-40bce8cdbc02",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -29795,7 +29760,7 @@
       "layout": "normal",
       "name": "Giant Beaver",
       "oracle_id": "2a4b42b3-6a95-41e1-9741-b35723d8da73",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -30126,7 +30091,7 @@
       "layout": "normal",
       "name": "Gishath, Sun's Avatar",
       "oracle_id": "a311daab-40dc-4433-9ed8-feab7c558bbf",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -30141,7 +30106,7 @@
       "layout": "normal",
       "name": "Give In to Violence",
       "oracle_id": "2bf4811f-3462-4542-acb0-101e772bfec9",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -30680,13 +30645,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1702,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Lifelink",
         "Saddle"
@@ -30694,8 +30653,8 @@
       "layout": "normal",
       "name": "Gloryheath Lynx",
       "oracle_id": "28673657-f05f-4b0a-b80c-939773abdefb",
-      "replacement_effects_registered": 1,
-      "status": "partial"
+      "replacement_effects_registered": 0,
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -31197,7 +31156,7 @@
       "layout": "normal",
       "name": "Goldvein Hydra",
       "oracle_id": "2b62543f-a475-457a-a96b-b5d070383d3c",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -31535,7 +31494,7 @@
       "layout": "normal",
       "name": "Granite Witness",
       "oracle_id": "37f2ec12-d703-40cd-a155-053ae2e4ddcc",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -31607,7 +31566,7 @@
       "layout": "transform",
       "name": "Grasping Shadows // Shadows' Lair",
       "oracle_id": "522a4b02-24c7-45d2-9097-2803cc9fffad",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "partial"
     },
     {
@@ -31686,7 +31645,7 @@
       "layout": "normal",
       "name": "Gravelgill Scoundrel",
       "oracle_id": "6d7f7e6e-5076-4af7-afe3-3e500835c4aa",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -32393,7 +32352,7 @@
       "layout": "normal",
       "name": "Guarded Heir",
       "oracle_id": "63e79a6f-ed98-480a-a740-d44e111046f7",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -32516,7 +32475,7 @@
       "layout": "normal",
       "name": "Guidelight Pathmaker",
       "oracle_id": "f8103865-5086-4f16-a35a-a56acdab1547",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -32557,7 +32516,7 @@
       "layout": "adventure",
       "name": "Gumdrop Poisoner // Tempt with Treats",
       "oracle_id": "4f5ebbb8-f49b-488f-bb85-888aaa918bdd",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -32715,7 +32674,7 @@
       "layout": "modal_dfc",
       "name": "Gwen Stacy // Ghost-Spider",
       "oracle_id": "5f143d87-35fb-40e3-94ae-f85cfff9adb5",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -32739,7 +32698,7 @@
       "layout": "normal",
       "name": "Gwenom, Remorseless",
       "oracle_id": "c48cf135-b280-4e9f-a9d9-225104870741",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unparsed"
     },
     {
@@ -32817,7 +32776,7 @@
       "layout": "normal",
       "name": "Hakoda, Selfless Commander",
       "oracle_id": "de3a469a-e38b-456b-994d-abec1b010e42",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -33049,7 +33008,7 @@
       "layout": "normal",
       "name": "Hardened Academic",
       "oracle_id": "921252df-6679-4f70-ae26-d4956c90b7df",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -33219,13 +33178,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 1840,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: sacrifice it",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Harried Dronesmith",
       "oracle_id": "a6e2d8bd-8fe7-4de0-af25-7ad3e9dcb81b",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -33575,7 +33540,7 @@
       "layout": "normal",
       "name": "Healer's Hawk",
       "oracle_id": "28a52ba1-95da-44e1-8ac5-0dc23c902394",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -33628,7 +33593,7 @@
       "layout": "adventure",
       "name": "Heartflame Duelist // Heartflame Slash",
       "oracle_id": "3ca07da2-29a1-40ce-a7f3-4838e95ca1d9",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -34169,7 +34134,7 @@
       "layout": "normal",
       "name": "Hermitic Nautilus",
       "oracle_id": "6bda307b-1508-4582-952b-c690db85e045",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -34469,6 +34434,11 @@
         {
           "count": 1,
           "reason": "unparsed clause: Exile X target artifacts and/or creatures",
+          "severity": "partial"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed clause: Return the exiled cards to the battlefield under their owners' control",
           "severity": "partial"
         }
       ],
@@ -35141,7 +35111,7 @@
       "layout": "normal",
       "name": "Hope Estheim",
       "oracle_id": "187a110c-032a-42e1-be2d-3cfaaa9495f8",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -35313,13 +35283,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 1955,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Max speed",
         "Start your engines!"
@@ -35328,7 +35292,7 @@
       "name": "Hour of Victory",
       "oracle_id": "eb100b3b-bc3f-48f3-8f28-bb2d80225ea9",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -35444,7 +35408,7 @@
       "layout": "normal",
       "name": "Howling Galefang",
       "oracle_id": "f12c2b65-4a04-4fab-ae77-973fe5cc823d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -35491,11 +35455,6 @@
         {
           "count": 1,
           "reason": "unparsed clause: Exile Huatli",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
           "severity": "partial"
         },
         {
@@ -35597,7 +35556,7 @@
       "layout": "normal",
       "name": "Hulkling, Burgeoning Bruiser",
       "oracle_id": "03c934a6-be57-480d-8c84-4e46d9ccb406",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -36197,7 +36156,7 @@
       "layout": "normal",
       "name": "Icewrought Sentry",
       "oracle_id": "0828d891-f7c3-4e51-b42e-6ce88d48ac8b",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -36259,7 +36218,7 @@
       "layout": "normal",
       "name": "Iguana Parrot",
       "oracle_id": "edd3a3ea-6bde-408c-8b16-85ed3cc312b2",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -36493,7 +36452,7 @@
       "layout": "normal",
       "name": "Imperious Inkmage",
       "oracle_id": "fcd31653-4964-46a6-820c-f17e8cbaa1fa",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -36818,7 +36777,7 @@
       "layout": "normal",
       "name": "Informed Inkwright",
       "oracle_id": "d2a372d8-3eb2-4ba4-a75f-7951654de383",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -36892,7 +36851,7 @@
       "layout": "normal",
       "name": "Inkshape Demonstrator",
       "oracle_id": "4993651f-f161-4007-b485-a0c66a02f91b",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -37371,7 +37330,7 @@
       "name": "Into the Flood Maw",
       "oracle_id": "8cb36a67-9206-4665-a03f-64f52ba559c4",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "verified"
     },
     {
       "abilities_registered": 1,
@@ -37506,7 +37465,7 @@
       "layout": "normal",
       "name": "Intruding Soulrager",
       "oracle_id": "7673d0db-07d6-4b40-a32e-f2c98d7ea7c1",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -37622,7 +37581,7 @@
       "layout": "normal",
       "name": "Invisible Woman, Sue Storm",
       "oracle_id": "e9d20b6d-fa4f-473b-9866-230fd92a1319",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -37774,7 +37733,7 @@
       "layout": "normal",
       "name": "Iron Giant",
       "oracle_id": "325b4288-fe1b-4e29-ae13-72924b4db3dd",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -37798,7 +37757,7 @@
       "layout": "normal",
       "name": "Iron Lad, Diverging Destiny",
       "oracle_id": "3e715032-0d21-441b-b2d4-c91084728718",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -37833,7 +37792,7 @@
       "layout": "normal",
       "name": "Iron Man, Master of Machines",
       "oracle_id": "94bc796d-8c04-4835-8a99-7e5dce9540ee",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -37850,7 +37809,7 @@
       "layout": "normal",
       "name": "Iron Spider, Stark Upgrade",
       "oracle_id": "e123fd7d-ace9-48a4-9510-eedcc837d8e8",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -38376,7 +38335,7 @@
       "layout": "normal",
       "name": "Jem Lightfoote, Sky Explorer",
       "oracle_id": "5802aa98-a9b7-4b0d-9d7c-c3938701870d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -38544,19 +38503,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2133,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Jeskai Monument",
       "oracle_id": "0b2b7d04-73f3-43f6-86e0-fa00cbbc6469",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -38882,7 +38835,7 @@
       "layout": "transform",
       "name": "Joshua, Phoenix's Dominant // Phoenix, Warden of Fire",
       "oracle_id": "f4629329-a79b-4460-a1bc-9ae0f59adf5a",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -38944,7 +38897,7 @@
       "layout": "normal",
       "name": "Judith, Carnage Connoisseur",
       "oracle_id": "e86c965b-ac10-4fff-b682-dddd6d9747c6",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -39328,7 +39281,7 @@
       "layout": "normal",
       "name": "Karakyk Guardian",
       "oracle_id": "41129dc1-be88-4198-94f9-032817a79bc7",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -39360,7 +39313,7 @@
       "layout": "normal",
       "name": "Karlov Watchdog",
       "oracle_id": "73f44500-fe83-40fa-b6f2-ed5673d0edcc",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -39457,7 +39410,7 @@
       "layout": "normal",
       "name": "Katara, Water Tribe's Hope",
       "oracle_id": "234fb291-0b62-4092-9071-81311c71bd53",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -39602,7 +39555,7 @@
       "layout": "normal",
       "name": "Keen Buccaneer",
       "oracle_id": "8cadf9c0-9a63-4cde-a6be-0ae86890c831",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -39758,7 +39711,7 @@
       "layout": "adventure",
       "name": "Kellan, Inquisitive Prodigy // Tail the Suspect",
       "oracle_id": "2f2d75a0-d751-4c74-b357-8f92a992447f",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -39783,13 +39736,7 @@
       "effect_probes": 1,
       "faces_audited": 2,
       "index": 2198,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Double strike"
       ],
@@ -39797,7 +39744,7 @@
       "name": "Kellan, the Fae-Blooded // Birthright Boon",
       "oracle_id": "10c48d19-d91f-4674-b186-477acaf08e5a",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -39820,7 +39767,7 @@
       "layout": "normal",
       "name": "Kellan, the Kid",
       "oracle_id": "afacc200-16ff-40f3-9d43-268438131d24",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -39845,7 +39792,7 @@
       "layout": "normal",
       "name": "Ketramose, the New Dawn",
       "oracle_id": "de41ad94-b9d7-4c2b-bfa6-394d18737228",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -39856,11 +39803,6 @@
       "faces_audited": 1,
       "index": 2201,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "unparsed"
-        },
         {
           "count": 1,
           "reason": "unparsed effect text: Lock or unlock a door of target Room you control. Activate only as a sorcery",
@@ -40008,7 +39950,7 @@
       "layout": "normal",
       "name": "Kin-Tree Nurturer",
       "oracle_id": "ad28a1f9-8893-4693-9464-c32ed760f6b1",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -40145,7 +40087,7 @@
       "layout": "normal",
       "name": "Kingpin's Enforcers",
       "oracle_id": "342df67f-44d8-4b0a-b1d7-4241966d0598",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -40204,7 +40146,7 @@
       "layout": "normal",
       "name": "Kinscaer Sentry",
       "oracle_id": "fdf0fba8-f335-419c-b96b-e99037727c43",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -40419,7 +40361,7 @@
       "layout": "normal",
       "name": "Kitsa, Otterball Elite",
       "oracle_id": "16414460-11ce-481d-ab54-6f0e0ea7d83d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -40460,7 +40402,7 @@
       "layout": "normal",
       "name": "Kitsune, Dragon's Daughter",
       "oracle_id": "9be19bdf-db1e-433e-8be4-8b985a568211",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -40634,7 +40576,7 @@
       "layout": "normal",
       "name": "Knowledge Seeker",
       "oracle_id": "bdc2d980-ca14-4040-a9a1-786d724dc65c",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -40780,12 +40722,17 @@
         {
           "count": 1,
           "reason": "unparsed clause: exile up to one other target creature. if you don't",
-          "severity": "partial"
+          "severity": "unparsed"
         },
         {
           "count": 1,
           "reason": "unparsed clause: return that card to the battlefield under its owner's control",
-          "severity": "partial"
+          "severity": "unparsed"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed effect text: you may pay {3}{b}",
+          "severity": "unparsed"
         }
       ],
       "keywords": [
@@ -40795,7 +40742,7 @@
       "name": "Koya, Death from Above",
       "oracle_id": "e7cd87d4-028c-49d9-9416-69f57e7dfec5",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -40961,7 +40908,7 @@
       "layout": "normal",
       "name": "Kraven, Proud Predator",
       "oracle_id": "12b8b4bf-ba85-419c-8005-1ec34b2b1deb",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -40980,7 +40927,7 @@
       "layout": "normal",
       "name": "Kree Commandos",
       "oracle_id": "09eb988a-e2eb-42e1-a786-01be63d2263f",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -41973,7 +41920,7 @@
       "layout": "normal",
       "name": "Leonardo, Cutting Edge",
       "oracle_id": "933fe6e5-8d00-4411-aa54-7780382c1ea6",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -42309,7 +42256,7 @@
       "name": "Lightning Helix",
       "oracle_id": "800c258a-cfc4-4a54-a667-065ea8dea69e",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "verified"
     },
     {
       "abilities_registered": 3,
@@ -42335,7 +42282,7 @@
       "layout": "normal",
       "name": "Lightning, Army of One",
       "oracle_id": "585eb5bc-5a3d-44d8-b593-1ff0d67f96a7",
-      "replacement_effects_registered": 3,
+      "replacement_effects_registered": 2,
       "status": "unparsed"
     },
     {
@@ -42421,7 +42368,7 @@
       "layout": "normal",
       "name": "Lightstall Inquisitor",
       "oracle_id": "57012049-06d7-4354-8125-9ea9e742f14d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -42600,7 +42547,7 @@
       "layout": "normal",
       "name": "Linden, the Steadfast Queen",
       "oracle_id": "dbc56f3b-83b3-41c8-a8ae-d3774fe6ee01",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -42917,19 +42864,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2362,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Lo and Li, Twin Tutors",
       "oracle_id": "ad643992-eb9f-4a4a-9b74-a5aee2337f30",
-      "replacement_effects_registered": 1,
-      "status": "partial"
+      "replacement_effects_registered": 0,
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -42995,7 +42936,7 @@
       "layout": "normal",
       "name": "Locke Cole",
       "oracle_id": "bdcb7aed-3595-4c7e-b9da-543e92de919a",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -43261,7 +43202,7 @@
       "layout": "normal",
       "name": "Loot, the Pathfinder",
       "oracle_id": "68c7e459-0932-4644-a3c0-9a1eae1db7a3",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -43504,7 +43445,7 @@
       "layout": "normal",
       "name": "Lotusguard Disciple",
       "oracle_id": "1139ee31-cb6e-4ae6-a08b-252c46b2db97",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -43527,7 +43468,7 @@
       "layout": "normal",
       "name": "Lotuslight Dancers",
       "oracle_id": "83c8f1ca-194e-4cb6-9d5f-029133c1edbc",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -43683,7 +43624,7 @@
       "layout": "normal",
       "name": "Lumen-Class Frigate",
       "oracle_id": "3aa0cda4-fb2d-4fd4-84f6-482089a85547",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -43735,7 +43676,7 @@
       "layout": "normal",
       "name": "Lumra, Bellow of the Woods",
       "oracle_id": "97a84e9d-bfc4-4ca2-b1e8-908dba56ccdb",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -43887,7 +43828,7 @@
       "layout": "normal",
       "name": "Lyra Dawnbringer",
       "oracle_id": "592c91fc-6430-4c76-9460-65f047350f67",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -43942,7 +43883,7 @@
       "layout": "normal",
       "name": "M.O.D.O.K.",
       "oracle_id": "fe7cc414-42d0-4dad-8516-7a0be0860a67",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "verified"
     },
     {
@@ -44159,19 +44100,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2433,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Maelstrom of the Spirit Dragon",
       "oracle_id": "49e9fba7-8465-4bbb-95db-73a7e149f494",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -44811,13 +44746,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2468,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: If you control a Wizard, add an amount of {C} equal to the amount of mana spent ",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Mana Sculpt",
       "oracle_id": "35e2f82e-7ca3-4a92-9134-b7999eef5337",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 0,
@@ -44989,7 +44930,7 @@
       "layout": "normal",
       "name": "Marauding Sphinx",
       "oracle_id": "70bea459-f6e9-411a-bd33-339bf95ea47a",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -45046,19 +44987,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2481,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Mardu Monument",
       "oracle_id": "5f662383-1684-4bd3-be05-e696d301e26c",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 4,
@@ -45071,7 +45006,12 @@
         {
           "count": 1,
           "reason": "unparsed clause: exile up to one other target creature you control until this creature leaves the",
-          "severity": "partial"
+          "severity": "unparsed"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed effect text: sacrifice those tokens",
+          "severity": "unparsed"
         }
       ],
       "keywords": [
@@ -45082,7 +45022,7 @@
       "name": "Mardu Siegebreaker",
       "oracle_id": "1f82e4b9-e67f-4f34-ac4c-57b0b300ee42",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -45205,13 +45145,7 @@
       "effect_probes": 3,
       "faces_audited": 1,
       "index": 2489,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Crew",
         "Exhaust"
@@ -45220,7 +45154,7 @@
       "name": "Marshals' Pathcruiser",
       "oracle_id": "60f20f32-b6db-4ee7-a0aa-535647e6fcd5",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -45731,7 +45665,12 @@
         {
           "count": 1,
           "reason": "unparsed clause: You may put a creature card with total power",
-          "severity": "partial"
+          "severity": "unparsed"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed effect text: sacrifice that creature",
+          "severity": "unparsed"
         }
       ],
       "keywords": [],
@@ -45739,7 +45678,7 @@
       "name": "Meek Attack",
       "oracle_id": "b9fff42d-31cf-4edf-8353-4a3b996bb77b",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 1,
@@ -46032,7 +45971,7 @@
       "layout": "normal",
       "name": "Merciless Enforcers",
       "oracle_id": "b32a7b97-0883-4c9f-a23d-ad269efd8cc3",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -46091,7 +46030,7 @@
       "layout": "normal",
       "name": "Merrow Skyswimmer",
       "oracle_id": "d709f396-021f-49eb-adb5-374aa790eaae",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -46362,19 +46301,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2553,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Micromancer",
       "oracle_id": "d2605782-09f1-4d52-b3e7-5ec1442bd9b5",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -46420,7 +46353,7 @@
       "layout": "normal",
       "name": "Midnight Mayhem",
       "oracle_id": "5236a6b5-0a96-4470-ba03-37b6d7a889bb",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -46873,7 +46806,7 @@
       "layout": "normal",
       "name": "Miner's Guidewing",
       "oracle_id": "eb161d0b-e534-463c-b1d1-7210bfba5d28",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -46926,7 +46859,7 @@
       "layout": "normal",
       "name": "Minwu, White Mage",
       "oracle_id": "31ca9e12-8ad0-472e-8b2a-b7df26370d8c",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -47166,7 +47099,7 @@
       "layout": "normal",
       "name": "Mister Negative",
       "oracle_id": "c8da3262-826d-4ea8-bb22-06374bebefe5",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -47493,13 +47426,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2616,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: Sacrifice it",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Molten Duplication",
       "oracle_id": "92b91910-9b65-4421-8eef-a33793161089",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 1,
@@ -47693,7 +47632,7 @@
       "layout": "normal",
       "name": "Momo, Playful Pet",
       "oracle_id": "85ee8ab6-8db5-45d7-85ae-64838771146a",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -47734,7 +47673,7 @@
       "layout": "normal",
       "name": "Monastery Messenger",
       "oracle_id": "325b88e1-ec7f-4d22-887c-a7f18a868bb0",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -47911,7 +47850,7 @@
       "layout": "normal",
       "name": "Moogles' Valor",
       "oracle_id": "9627ed9a-5ade-412d-bf8d-f0705b1c9405",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -48113,7 +48052,7 @@
       "layout": "normal",
       "name": "Morbius the Living Vampire",
       "oracle_id": "1a947e4d-8a14-45f1-bb80-760a317b1ed0",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -48168,7 +48107,7 @@
       "layout": "normal",
       "name": "Morlun, Devourer of Spiders",
       "oracle_id": "273ad15c-366a-4691-978b-d6028b57005a",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -48182,6 +48121,11 @@
         {
           "count": 1,
           "reason": "unparsed clause: Exile any number of target creatures. Until your next turn",
+          "severity": "partial"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed clause: return those cards to the battlefield tapped under their owners' control",
           "severity": "partial"
         }
       ],
@@ -48439,7 +48383,7 @@
       "layout": "normal",
       "name": "Ms. Marvel, Kamala Khan",
       "oracle_id": "ebedff30-ae43-4861-aab2-afe1fc88337e",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -48860,7 +48804,7 @@
       "layout": "normal",
       "name": "Mysterio's Phantasm",
       "oracle_id": "99419378-8a23-44f3-aebe-e62d6e20e877",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -48915,13 +48859,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2694,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flashback"
       ],
@@ -48929,7 +48867,7 @@
       "name": "Mystical Teachings",
       "oracle_id": "81d72511-88b4-45ec-a5a9-e722caf55577",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -49230,13 +49168,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2711,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Disguise"
       ],
@@ -49244,7 +49176,7 @@
       "name": "Nervous Gardener",
       "oracle_id": "15dca6a7-8367-4b86-a86c-e44f10fb3c53",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -49553,7 +49485,7 @@
       "layout": "normal",
       "name": "Night Nurse, Healer of Heroes",
       "oracle_id": "e3559565-0512-4525-addb-bf27903bcd13",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -49625,7 +49557,7 @@
       "layout": "normal",
       "name": "Nightmare Sower",
       "oracle_id": "4121b7d9-5fbe-40e2-a2a6-d7633f423b5f",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -49643,7 +49575,7 @@
       "layout": "normal",
       "name": "Nightwhorl Hermit",
       "oracle_id": "99007c40-1eb5-4c3a-9889-6d12417d8191",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -49653,7 +49585,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2733,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: Return it to the battlefield under its owner's control",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Scry"
       ],
@@ -49661,7 +49599,7 @@
       "name": "Niko, Light of Hope",
       "oracle_id": "f153e369-1d5b-4d8b-a2f6-d93b849cabb5",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -49700,13 +49638,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2736,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: return it to the battlefield with one fewer revival counter on it",
+          "severity": "partial"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Nine-Lives Familiar",
       "oracle_id": "5049da27-f38b-4fe6-a387-51510bd1f44e",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -49899,7 +49843,7 @@
       "layout": "normal",
       "name": "Noctis, Prince of Lucis",
       "oracle_id": "2d44bdd2-aa31-415a-be71-d9e98ef12334",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -50067,7 +50011,7 @@
       "name": "North Wind Avatar",
       "oracle_id": "b408c345-b308-4920-8494-4f204d856aa3",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "verified"
     },
     {
       "abilities_registered": 3,
@@ -50244,7 +50188,7 @@
       "layout": "normal",
       "name": "Nullpriest of Oblivion",
       "oracle_id": "c1111228-ef88-4b64-91e0-66ee32a1f5e4",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -50299,7 +50243,7 @@
       "layout": "normal",
       "name": "Oaken Siren",
       "oracle_id": "a06a35a9-a23e-4a0a-90bc-84e7a52d2cef",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -50382,7 +50326,7 @@
       "layout": "normal",
       "name": "Obsessive Pursuit",
       "oracle_id": "7e7abb44-47b0-4d80-b8a1-36f0c1032aa3",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -50625,7 +50569,7 @@
       "layout": "transform",
       "name": "Ojer Taq, Deepest Foundation // Temple of Civilization",
       "oracle_id": "486bb9a5-73f1-4cec-b097-fb07ac80b72e",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "partial"
     },
     {
@@ -50713,13 +50657,19 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 2789,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: destroy it",
+          "severity": "partial"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Old Hob, Alleycat Blues",
       "oracle_id": "e88b1520-aa9a-41ee-9036-4d4bebd1a0c0",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -50743,7 +50693,7 @@
       "layout": "normal",
       "name": "Old-Growth Educator",
       "oracle_id": "2b7362a9-3518-4071-ab1b-40689a50e12a",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -51369,7 +51319,7 @@
       "layout": "normal",
       "name": "Osseous Sticktwister",
       "oracle_id": "33c3a81a-6cea-48c9-b966-67084d96e74f",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -51526,19 +51476,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 2835,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Outcaster Greenblade",
       "oracle_id": "855a2579-8f78-46ce-a3a8-eddc808bd7b4",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -51571,7 +51515,7 @@
       "layout": "normal",
       "name": "Outlaw Medic",
       "oracle_id": "637be5f7-ab39-4e3a-a5eb-c6e48fca00a9",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -52657,7 +52601,7 @@
       "layout": "normal",
       "name": "Perimeter Enforcer",
       "oracle_id": "be8d3788-709b-4d10-861c-a6f27d4b63a6",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -52862,7 +52806,7 @@
       "layout": "modal_dfc",
       "name": "Peter Parker // Amazing Spider-Man",
       "oracle_id": "f1b7488c-c675-42e9-818a-24a50347ec2c",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -53064,7 +53008,7 @@
       "layout": "adventure",
       "name": "Picklock Prankster // Free the Fae",
       "oracle_id": "22d82f4c-2896-477e-8d20-8fe43acd4ba2",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -54093,7 +54037,7 @@
       "layout": "normal",
       "name": "Practiced Offense",
       "oracle_id": "99678cc9-59c8-4358-b847-8c38ffb4a050",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "observed_clean"
     },
     {
@@ -54127,7 +54071,7 @@
       "layout": "normal",
       "name": "Prairie Dog",
       "oracle_id": "70987216-f84d-43b9-8d75-bb21ff37747b",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -54295,7 +54239,7 @@
       "layout": "normal",
       "name": "Pride of the Road",
       "oracle_id": "2af236b0-6b30-4ddc-8735-864d2ffad68e",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -54313,7 +54257,7 @@
       "layout": "normal",
       "name": "Prideful Feastling",
       "oracle_id": "faf2f368-a7e7-4427-bc03-929f294b1e03",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -54330,7 +54274,7 @@
       "layout": "normal",
       "name": "Prideful Parent",
       "oracle_id": "a90d1d35-6d67-43b3-8256-b0318b3a4b07",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -54500,7 +54444,7 @@
       "name": "Prismari Charm",
       "oracle_id": "c3c25a2c-f71c-4cb7-9117-0bcda9248bfd",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "verified"
     },
     {
       "abilities_registered": 4,
@@ -55037,7 +54981,7 @@
       "layout": "normal",
       "name": "Pummeler for Hire",
       "oracle_id": "ffa23c3a-76a8-414f-aa3b-fc09aabd78c5",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -55136,7 +55080,7 @@
       "layout": "adventure",
       "name": "Purging Stormbrood // Absorb Essence",
       "oracle_id": "5e8086d5-ea48-4555-b65a-a33d08ba4afd",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -55178,13 +55122,19 @@
       "effect_probes": 2,
       "faces_audited": 2,
       "index": 3035,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: Sacrifice them",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "split",
       "name": "Push // Pull",
       "oracle_id": "7e050495-bed7-43b9-abce-866c61beb1da",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 1,
@@ -55197,7 +55147,12 @@
         {
           "count": 1,
           "reason": "unparsed clause: Return all Mount",
-          "severity": "partial"
+          "severity": "unparsed"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed effect text: Sacrifice them",
+          "severity": "unparsed"
         }
       ],
       "keywords": [],
@@ -55205,7 +55160,7 @@
       "name": "Push the Limit",
       "oracle_id": "62e54c6d-d775-4597-bd4d-dc38460b33ec",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -55270,7 +55225,7 @@
       "layout": "normal",
       "name": "Pyrewood Gearhulk",
       "oracle_id": "c4c6083a-b0b5-4c6b-9f11-9f4fe38417c2",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -55365,7 +55320,7 @@
       "layout": "normal",
       "name": "Qarsi Revenant",
       "oracle_id": "bbea79bc-71d4-4100-92f4-783c2c4b46da",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "partial"
     },
     {
@@ -55992,13 +55947,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3079,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Deathtouch",
         "Fateful Bite",
@@ -56008,7 +55957,7 @@
       "name": "Radioactive Spider",
       "oracle_id": "f15bd5c0-99ff-42c6-8eed-48de6df81b61",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -56131,7 +56080,7 @@
       "layout": "meld",
       "name": "Ragnarok, Divine Deliverance",
       "oracle_id": "14b839ef-80b1-4e7d-b2fd-38e973899cde",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -56583,7 +56532,7 @@
       "layout": "normal",
       "name": "Rangers' Aetherhive",
       "oracle_id": "49d149d6-de94-48cf-974b-6bb4a37ce77c",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -56909,7 +56858,7 @@
       "layout": "normal",
       "name": "Rattleback Apothecary",
       "oracle_id": "5538d4cf-98eb-4e20-a9c1-42c7cdcad194",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -57320,7 +57269,7 @@
       "layout": "normal",
       "name": "Reaping Willow",
       "oracle_id": "ce60402c-34cd-44fe-ae1d-4a5404298f5b",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -57714,7 +57663,7 @@
       "layout": "normal",
       "name": "Redshift, Rocketeer Chief",
       "oracle_id": "582c7e54-d64c-4ffb-ae5f-d2752b3ed10b",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -57823,7 +57772,7 @@
       "layout": "normal",
       "name": "Regal Caracal",
       "oracle_id": "aa571676-b390-4b8a-baea-4c4cd60c01f6",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -57856,7 +57805,7 @@
       "layout": "normal",
       "name": "Rehearsed Debater",
       "oracle_id": "e30ccf07-0969-4e81-ba43-c50a2ff9c040",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -57999,7 +57948,7 @@
       "layout": "normal",
       "name": "Reluctant Role Model",
       "oracle_id": "8d24c12a-a300-4199-b2a9-3d5ead8df617",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -58435,7 +58384,7 @@
       "layout": "normal",
       "name": "Resplendent Angel",
       "oracle_id": "2ac93092-1a57-4cf7-8f03-1dca86d5c476",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -58835,7 +58784,7 @@
       "layout": "saga",
       "name": "Revival of the Ancestors",
       "oracle_id": "5a848c1f-d11a-42fb-b9ce-663901fc9555",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -58892,7 +58841,7 @@
       "layout": "normal",
       "name": "Rhino, Barreling Brute",
       "oracle_id": "9a6bf8a3-7640-4890-ac62-d5028f41978b",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -59080,7 +59029,7 @@
       "layout": "adventure",
       "name": "Riling Dawnbreaker // Signaling Roar",
       "oracle_id": "1fc31651-70fe-4a58-9b7e-7359510bba51",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -59497,7 +59446,7 @@
       "layout": "normal",
       "name": "River Herald Guide",
       "oracle_id": "b9687fef-4cb2-4bf1-91ad-49dada07f4d6",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -59644,7 +59593,7 @@
       "layout": "normal",
       "name": "Roadside Assistance",
       "oracle_id": "814f30a1-c0d6-4243-839d-0645d7bcbe4c",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -59993,7 +59942,7 @@
       "layout": "normal",
       "name": "Rooftop Assassin",
       "oracle_id": "f3baef8c-f8d7-4cb2-b5cc-b889a991e4e8",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -60116,7 +60065,7 @@
       "layout": "normal",
       "name": "Rosa, Resolute White Mage",
       "oracle_id": "9c4fdd20-0396-40b7-8687-43b1035b6956",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -60131,7 +60080,7 @@
       "layout": "normal",
       "name": "Rot Farm Mortipede",
       "oracle_id": "1f4d3a96-bc30-4362-9c1f-40bf79f78e78",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -60537,7 +60486,7 @@
       "layout": "normal",
       "name": "Ruin-Lurker Bat",
       "oracle_id": "e6f379ad-96b1-46c3-bbc6-a8cb57156a7f",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -60587,7 +60536,7 @@
       "layout": "normal",
       "name": "Rumble Arena",
       "oracle_id": "83f2470e-2114-4cd9-ab1a-21b76e9cdf63",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -60698,13 +60647,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3338,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying"
       ],
@@ -60712,7 +60655,7 @@
       "name": "Rune-Scarred Demon",
       "oracle_id": "14aefe99-fb60-4f1c-a71f-7ffbe94c8b13",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -60918,7 +60861,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3350,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: return that card to the battlefield under its owner's control",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Crew",
         "Flash",
@@ -60928,7 +60877,7 @@
       "name": "S.H.I.E.L.D. Flying Car",
       "oracle_id": "12d51534-a98d-487b-9ba9-c10861dff992",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 3,
@@ -61028,7 +60977,7 @@
       "layout": "normal",
       "name": "Sabotage Strategist",
       "oracle_id": "1b788680-28e3-4378-9607-bd42acb4fbad",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -61143,7 +61092,7 @@
       "layout": "normal",
       "name": "Sage of the Skies",
       "oracle_id": "cfc7cef7-0a95-49f8-970f-abff2cacd82d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "verified"
     },
     {
@@ -61202,13 +61151,7 @@
       "effect_probes": 2,
       "faces_audited": 2,
       "index": 3364,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying"
       ],
@@ -61216,7 +61159,7 @@
       "name": "Sagu Wildling // Roost Seek",
       "oracle_id": "7cee6d43-5dec-4989-85ec-c635ec783ec7",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -61258,13 +61201,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3367,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: Sacrifice it",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Saheeli, the Sun's Brilliance",
       "oracle_id": "5aa76c5d-8046-42ce-b61d-cc9b4806c11a",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -61305,13 +61254,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3370,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: Sacrifice them",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Salt Road Skirmish",
       "oracle_id": "f6e72f4e-d6e0-4537-93c1-7045385c8401",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 3,
@@ -61337,7 +61292,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3372,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: return it to the battlefield under its owner's control with a flying counter on ",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Flash",
         "Flying"
@@ -61346,7 +61307,7 @@
       "name": "Salvation Swan",
       "oracle_id": "0f68ae67-1671-4281-8b6b-3e52fdd4915f",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 0,
@@ -61393,7 +61354,7 @@
       "layout": "normal",
       "name": "Sami, Wildcat Captain",
       "oracle_id": "c4175a34-70bb-47e5-8406-efdc4d2cd079",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -61449,7 +61410,7 @@
       "layout": "normal",
       "name": "Samut, the Driving Force",
       "oracle_id": "ee89c719-5ae8-4316-bfd0-cfe3684b5859",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -61482,13 +61443,7 @@
       "effect_probes": 2,
       "faces_audited": 2,
       "index": 3380,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Prepared",
         "Treasure"
@@ -61497,7 +61452,7 @@
       "name": "Sanar, Unfinished Genius // Wild Idea",
       "oracle_id": "a8c44bd9-6470-47d7-934f-77c76a44a984",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -61725,7 +61680,7 @@
       "layout": "normal",
       "name": "Sanguine Savior",
       "oracle_id": "cc3a6c83-a671-4ce8-b98e-434989fb6778",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -61956,7 +61911,7 @@
       "layout": "normal",
       "name": "Savior of the Sleeping",
       "oracle_id": "412eb5ec-bf13-45fb-94b3-c41e62b19d1d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -62091,11 +62046,6 @@
           "count": 1,
           "reason": "unparsed clause: double the number of +1/+1 counters on that creature",
           "severity": "partial"
-        },
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
         }
       ],
       "keywords": [
@@ -62155,7 +62105,7 @@
       "layout": "normal",
       "name": "Scales of Shale",
       "oracle_id": "655a2b78-6a6c-4b9e-b7c0-48d3768978f5",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -62209,7 +62159,7 @@
       "layout": "normal",
       "name": "Scarblade Scout",
       "oracle_id": "f6758e8f-5462-48a7-96d3-60d07b1563fc",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -62230,7 +62180,7 @@
       "layout": "normal",
       "name": "Scarblade's Malice",
       "oracle_id": "66d57851-2844-4b9d-be78-e90fc620b750",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "partial"
     },
     {
@@ -62409,7 +62359,7 @@
       "layout": "prepare",
       "name": "Scheming Silvertongue // Sign in Blood",
       "oracle_id": "44443716-8356-40cd-a879-35264b29108c",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -62545,19 +62495,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3437,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Scour for Scrap",
       "oracle_id": "da422b3e-1092-47ad-97d6-a7a3ef060a53",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -63088,7 +63032,7 @@
       "layout": "normal",
       "name": "Seedglaive Mentor",
       "oracle_id": "f50bbe5e-a839-40e1-ba79-1e96f91bd218",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -63452,7 +63396,7 @@
       "layout": "normal",
       "name": "Selvala, Eager Trailblazer",
       "oracle_id": "95b20721-1af9-4f3f-a39b-7cd1d4ce0b20",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -63560,7 +63504,7 @@
       "layout": "normal",
       "name": "Sephiroth, Planet's Heir",
       "oracle_id": "6af71c5a-2c1b-4120-b3c9-c3c70d94a5c9",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -63596,7 +63540,7 @@
       "layout": "normal",
       "name": "Seraphic Steed",
       "oracle_id": "51622e89-aa5e-4dd6-a078-eb45e8ebb434",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -63662,7 +63606,7 @@
       "layout": "normal",
       "name": "Serra Angel",
       "oracle_id": "4b7ac066-e5c7-43e6-9e7e-2739b24a905d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -63689,13 +63633,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3501,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Deathtouch"
       ],
@@ -63703,7 +63641,7 @@
       "name": "Servant of the Stinger",
       "oracle_id": "0c9ec9a1-738a-4f69-b367-5dbf3d046bf1",
       "replacement_effects_registered": 1,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -64008,7 +63946,7 @@
       "layout": "normal",
       "name": "Sharp-Eyed Rookie",
       "oracle_id": "0642fb0d-73cb-4989-852c-3233fe36c3b4",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -64042,7 +63980,7 @@
       "layout": "normal",
       "name": "Shattered Acolyte",
       "oracle_id": "57f58d52-0014-4cac-94fc-668063cc147a",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -64130,7 +64068,7 @@
       "layout": "normal",
       "name": "Sheltered by Ghosts",
       "oracle_id": "d13fc657-c6fc-4394-bc70-691050550226",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -64148,7 +64086,7 @@
       "layout": "normal",
       "name": "Shepherd of the Clouds",
       "oracle_id": "c0535854-e4e7-43e4-bc5c-7cc95fb17929",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -64233,7 +64171,7 @@
       "layout": "normal",
       "name": "Shiko, Paragon of the Way",
       "oracle_id": "d3bdd3f2-9e38-436a-93a3-f87d9f4d4f86",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -64661,7 +64599,7 @@
       "layout": "normal",
       "name": "Shrike Force",
       "oracle_id": "d014b02f-a8b8-4b97-96e0-f588792069f0",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -64985,7 +64923,7 @@
       "layout": "normal",
       "name": "Silver Sable, Mercenary Leader",
       "oracle_id": "40b82dee-98c7-4b86-88b8-28388cd0331f",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -65056,7 +64994,7 @@
       "layout": "normal",
       "name": "Silverquill, the Disputant",
       "oracle_id": "66deb3f3-0314-427e-9cb8-6befa365ae94",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -65239,7 +65177,7 @@
       "layout": "normal",
       "name": "Sire of Seven Deaths",
       "oracle_id": "a15547d0-bbcb-41ee-a9ae-8325a9e7fe1f",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -65457,7 +65395,7 @@
       "layout": "prepare",
       "name": "Skycoach Conductor // All Aboard",
       "oracle_id": "788d3cfa-7706-4728-9c48-cf7bc963d002",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -65611,6 +65549,11 @@
           "count": 1,
           "reason": "unparsed clause: exile up to one other target creature you control",
           "severity": "partial"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed clause: return it to the battlefield under its owner's control",
+          "severity": "partial"
         }
       ],
       "keywords": [
@@ -65704,7 +65647,7 @@
       "name": "Slagstorm",
       "oracle_id": "2ed1879a-83b8-48df-a6d2-fe28e912b4c5",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "verified"
     },
     {
       "abilities_registered": 0,
@@ -65936,7 +65879,7 @@
       "layout": "normal",
       "name": "Slickshot Vault-Buster",
       "oracle_id": "2085642e-29be-4e13-81dc-1f2ff6c095eb",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -66230,7 +66173,7 @@
       "layout": "normal",
       "name": "Snow Villiers",
       "oracle_id": "01cdaf69-f53a-4735-92f2-ef149de4d5c9",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -66253,7 +66196,7 @@
       "layout": "normal",
       "name": "Snowmelt Stag",
       "oracle_id": "b25ccb64-e114-4d54-a07a-c8cd4560b511",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -66292,7 +66235,7 @@
       "layout": "normal",
       "name": "Soaring Stoneglider",
       "oracle_id": "62d18d2b-fa68-49cd-b62d-803728ddfa8b",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -66302,19 +66245,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3638,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: you may copy this spell",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Social Snub",
       "oracle_id": "b284913e-3530-4a7e-8c75-efb18788dad0",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -66368,7 +66305,7 @@
       "layout": "normal",
       "name": "Sokka, Lateral Strategist",
       "oracle_id": "427f8ef9-12b3-4fa0-b303-28153566b6dc",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -66907,7 +66844,7 @@
       "layout": "normal",
       "name": "SP//dr, Piloted by Peni",
       "oracle_id": "722ab6e4-a2e0-4aaa-a050-7b6436e22b40",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -67210,7 +67147,7 @@
       "name": "Spell Snare",
       "oracle_id": "38877c68-b69b-4ee1-8e8f-5137a184a8f7",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "verified"
     },
     {
       "abilities_registered": 0,
@@ -67261,7 +67198,7 @@
       "layout": "normal",
       "name": "Spellbook Vendor",
       "oracle_id": "51dad7d3-f91d-4bd8-aaed-235da42a448b",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -67539,7 +67476,7 @@
       "layout": "normal",
       "name": "Spider-Man 2099",
       "oracle_id": "19845456-3d96-48a4-89fa-9b8e583774c9",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -67646,7 +67583,7 @@
       "layout": "normal",
       "name": "Spider-Man, To the Rescue",
       "oracle_id": "85dec6cf-6f27-4eb0-834b-5f6fbbe25fc8",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -67947,13 +67884,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3727,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Delirium"
       ],
@@ -67961,7 +67892,7 @@
       "name": "Spineseeker Centipede",
       "oracle_id": "dcfa0476-e88f-43b4-8011-d78a3de97f2a",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -67970,13 +67901,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3728,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Reach",
         "Ward"
@@ -67985,7 +67910,7 @@
       "name": "Spinewoods Armadillo",
       "oracle_id": "8c81f7b6-38e7-482b-afff-727074a23888",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -68278,13 +68203,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3744,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put that card into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Sneak"
       ],
@@ -68292,7 +68211,7 @@
       "name": "Splinter's Technique",
       "oracle_id": "532ee9c3-391c-44db-8ed5-a1d28fd7f876",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -69124,7 +69043,7 @@
       "layout": "normal",
       "name": "Starseer Mentor",
       "oracle_id": "12a165c4-229b-458b-8fc7-c1b7cba35a8e",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -69177,7 +69096,7 @@
       "layout": "normal",
       "name": "Startled Relic Sloth",
       "oracle_id": "5d46e85f-4a04-48b1-afe9-3a47678041d4",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -69404,7 +69323,7 @@
       "layout": "normal",
       "name": "Steamcore Scholar",
       "oracle_id": "0fb9a928-9adb-4dc1-9761-857df7e6c643",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -69637,7 +69556,7 @@
       "layout": "normal",
       "name": "Stiltzkin, Moogle Merchant",
       "oracle_id": "958c2a27-9fb1-42b4-a0ef-296584763a98",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -69761,7 +69680,7 @@
       "layout": "normal",
       "name": "Stirring Hopesinger",
       "oracle_id": "7244d04a-bb9c-4fbe-a346-4a3f45709da7",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -70190,7 +70109,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3846,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: exile that token",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Haste"
       ],
@@ -70198,7 +70123,7 @@
       "name": "Stormsplitter",
       "oracle_id": "4a9ae0d9-5ee7-4289-9333-ef0bcc3079ca",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -70247,7 +70172,7 @@
       "name": "Strategic Betrayal",
       "oracle_id": "0127c13f-7b0f-44c3-8b35-97f306c5f239",
       "replacement_effects_registered": 0,
-      "status": "observed_clean"
+      "status": "verified"
     },
     {
       "abilities_registered": 3,
@@ -70287,7 +70212,7 @@
       "layout": "normal",
       "name": "Streaking Oilgorger",
       "oracle_id": "c163a95e-9414-4b8c-b5a2-1e7674530404",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -70359,7 +70284,7 @@
       "layout": "normal",
       "name": "Strix Lookout",
       "oracle_id": "5a6d01c8-47b6-43e5-a6e9-c48088286007",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -70369,13 +70294,7 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3856,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Crew",
         "Flying"
@@ -70384,7 +70303,7 @@
       "name": "Strixhaven Skycoach",
       "oracle_id": "e286a191-39d4-4073-b844-11d2aba911b4",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -70729,19 +70648,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 3876,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Sultai Monument",
       "oracle_id": "9db71b76-eda7-49dd-af5a-3de18acb8ccb",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -71096,7 +71009,7 @@
       "layout": "normal",
       "name": "Summoned Dromedary",
       "oracle_id": "697b14c6-fe6a-4880-9cf2-b6602a52ca0b",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -71150,7 +71063,7 @@
       "layout": "normal",
       "name": "Sun-Blessed Healer",
       "oracle_id": "1729c6f2-2452-4fbc-a1bc-3e625f2ad8e1",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -71183,7 +71096,7 @@
       "layout": "normal",
       "name": "Sun-Dappled Celebrant",
       "oracle_id": "27c87371-697e-4ca6-a7f4-d99215d908bc",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -71193,19 +71106,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3901,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Sun-Spider, Nimble Webber",
       "oracle_id": "2d961997-4f5f-4ce2-b062-11411147e2f7",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -71246,7 +71153,7 @@
       "layout": "transform",
       "name": "Sunbird Standard // Sunbird Effigy",
       "oracle_id": "c69742bf-f0f5-4216-a602-c21f9c5a6501",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -71637,7 +71544,7 @@
       "layout": "normal",
       "name": "Super-Adaptoid",
       "oracle_id": "f93fa6ec-1f13-4109-aa60-11e148f7ba88",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -72174,7 +72081,7 @@
       "layout": "normal",
       "name": "Swiftblade Vindicator",
       "oracle_id": "44240b1e-c104-4eb4-8ab9-0d56607ba241",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -72298,7 +72205,7 @@
       "layout": "normal",
       "name": "Sygg's Command",
       "oracle_id": "7fe5baab-b182-4cd9-bea5-912ce9b1464a",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -72525,7 +72432,7 @@
       "layout": "normal",
       "name": "Syr Vondam, Sunstar Exemplar",
       "oracle_id": "9e597063-c077-4236-a9e4-b0721b24677f",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -72543,7 +72450,7 @@
       "layout": "normal",
       "name": "Syr Vondam, the Lucent",
       "oracle_id": "28225bae-2d96-4352-b256-0c2ff4ef65e9",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -72553,13 +72460,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 3975,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: remove ten charge counters from it",
+          "severity": "partial"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Systems Override",
       "oracle_id": "4c9d9d47-1eb6-4981-ba83-d5ec04906e71",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "partial"
     },
     {
       "abilities_registered": 3,
@@ -72669,7 +72582,7 @@
       "layout": "normal",
       "name": "Tajuru Pathwarden",
       "oracle_id": "d8c7cd66-d8bf-4a99-add5-1d5651d4e025",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -72729,7 +72642,7 @@
       "layout": "normal",
       "name": "Take Up the Shield",
       "oracle_id": "e8d0eafe-540a-4b2e-a989-e98ff3c31105",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -72848,7 +72761,7 @@
       "layout": "normal",
       "name": "Tangle Tumbler",
       "oracle_id": "0d81ea20-5e7d-4eea-b0ba-fe688f27df94",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -72942,7 +72855,7 @@
       "layout": "normal",
       "name": "Tapestry Warden",
       "oracle_id": "981138d0-bf61-406a-85be-68cc5e58796c",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -73343,13 +73256,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4020,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Flying"
       ],
@@ -73357,7 +73264,7 @@
       "name": "Tempest Hawk",
       "oracle_id": "7423b3b9-56eb-4cf2-8ada-135918219c4b",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -73627,19 +73534,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 4036,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Temur Monument",
       "oracle_id": "5464d5ae-5be5-4e52-b9d0-ddce48fd93b3",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 1,
@@ -73773,7 +73674,7 @@
       "layout": "normal",
       "name": "Tenured Concocter",
       "oracle_id": "0ecd4493-dfb4-4d56-a90e-08b74b474f39",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -74106,7 +74007,7 @@
       "layout": "normal",
       "name": "Teval, Arbiter of Virtue",
       "oracle_id": "f6cf359a-91cb-4b3c-8837-be53e4ed9c93",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -74163,19 +74064,13 @@
       "effect_probes": 4,
       "faces_audited": 1,
       "index": 4064,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Tezzeret, Cruel Captain",
       "oracle_id": "0eb11b2d-a397-48da-a0f3-9f0f83f42282",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -74193,7 +74088,7 @@
       "layout": "normal",
       "name": "Thanos, the Mad Titan",
       "oracle_id": "090d815b-b2c8-48cd-a0b3-dc662d5352ac",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -74727,13 +74622,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4093,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: Sacrifice it",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "The Fire Crystal",
       "oracle_id": "57276db8-9d8d-4587-ae88-dfdc44343f17",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 4,
@@ -74890,7 +74791,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4101,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: Sacrifice it",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [
         "Haste"
       ],
@@ -74898,7 +74805,7 @@
       "name": "The Jolly Balloon Man",
       "oracle_id": "82ea519f-0e14-43d3-bf46-a1c5352e9600",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -75000,7 +74907,7 @@
       "layout": "saga",
       "name": "The Last Ronin",
       "oracle_id": "e1865bec-1744-40c2-9031-7d6363be5333",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -75127,7 +75034,7 @@
       "layout": "normal",
       "name": "The Lion-Turtle",
       "oracle_id": "fff728a1-56f5-4e97-91e2-19aba5772909",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -75178,19 +75085,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4115,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "The Masters of Evil",
       "oracle_id": "fcb1caea-e1ac-48f0-a67a-d4aadad490d9",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -75593,7 +75494,7 @@
       "layout": "normal",
       "name": "The Sentry, Golden Guardian",
       "oracle_id": "1fe549c3-79be-40ef-b57c-de59f24df5ab",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -75603,13 +75504,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4133,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Station"
       ],
@@ -75617,7 +75512,7 @@
       "name": "The Seriema",
       "oracle_id": "a6bcec1f-f515-4e63-9e84-8eb04cc582ff",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 4,
@@ -75946,7 +75841,7 @@
       "layout": "normal",
       "name": "The Vision",
       "oracle_id": "32aee76a-e738-4898-985a-801d1cce15ea",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -76035,7 +75930,7 @@
       "layout": "normal",
       "name": "The Wind Crystal",
       "oracle_id": "240f0835-36af-4ad8-9336-d6d3d816d293",
-      "replacement_effects_registered": 3,
+      "replacement_effects_registered": 2,
       "status": "unseen"
     },
     {
@@ -76231,7 +76126,7 @@
       "layout": "normal",
       "name": "Thor Odinson",
       "oracle_id": "ec9b74d0-e4fe-4764-b628-992a62f2a1cf",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -76293,13 +76188,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4169,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Forage"
       ],
@@ -76307,7 +76196,7 @@
       "name": "Thornvault Forager",
       "oracle_id": "7b18cfad-a1cf-46c2-bcdd-7762c13d50e5",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -76732,7 +76621,7 @@
       "layout": "transform",
       "name": "Throne of the Grim Captain // The Grim Captain",
       "oracle_id": "a7c96442-706b-4fd8-9b38-052872dafe58",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "partial"
     },
     {
@@ -77194,7 +77083,7 @@
       "layout": "normal",
       "name": "Tiger-Seal",
       "oracle_id": "68f84643-c0f9-4d31-ba2e-38b65ab45d04",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -77283,7 +77172,7 @@
       "layout": "normal",
       "name": "Tin Street Gossip",
       "oracle_id": "19dc29a7-8ccc-4e54-829b-86cc102b082d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -77596,7 +77485,7 @@
       "layout": "normal",
       "name": "Tolsimir, Midnight's Light",
       "oracle_id": "0e9c7380-7584-43e6-8c31-5d1bb1685fe0",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -77668,7 +77557,7 @@
       "layout": "normal",
       "name": "Tomik, Wielder of Law",
       "oracle_id": "2ef0961a-0543-4371-8c2a-333881b735e5",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -77952,7 +77841,7 @@
       "layout": "normal",
       "name": "Toxin Analysis",
       "oracle_id": "1f3b0b15-2c38-4aaa-b527-afbb540a6715",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -78175,7 +78064,7 @@
       "layout": "normal",
       "name": "Transcendent Archaic",
       "oracle_id": "fdd4b3a9-83ce-41bf-82e2-7808657e2c09",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -78202,19 +78091,13 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4268,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "Transit Mage",
       "oracle_id": "991efbf1-299d-4892-aeab-8ff9827f7168",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -78849,7 +78732,7 @@
       "layout": "normal",
       "name": "Tuinvale Guide",
       "oracle_id": "dab16c93-9788-46e0-9345-838ebeda8d54",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -79246,7 +79129,13 @@
       "effect_probes": 1,
       "faces_audited": 2,
       "index": 4326,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed clause: Return it to the battlefield under its owner's control",
+          "severity": "partial"
+        }
+      ],
       "keywords": [
         "Flying",
         "Vigilance",
@@ -79255,8 +79144,8 @@
       "layout": "adventure",
       "name": "Twining Twins // Swift Spiral",
       "oracle_id": "105aea98-8eb9-4fb2-a0cb-7c7513317c5b",
-      "replacement_effects_registered": 1,
-      "status": "unseen"
+      "replacement_effects_registered": 0,
+      "status": "partial"
     },
     {
       "abilities_registered": 2,
@@ -79497,7 +79386,7 @@
       "layout": "normal",
       "name": "Uchbenbak, the Great Mistake",
       "oracle_id": "36bfcc4a-7f66-4649-ab6b-18d360299d46",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -80019,7 +79908,7 @@
       "layout": "normal",
       "name": "Undergrowth Leopard",
       "oracle_id": "511fa8a3-0a65-47fc-9f3b-57eaef2698cd",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -80140,13 +80029,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4376,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: If you do, unattach it",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "Unexpected Request",
       "oracle_id": "f4497af5-8b81-46b3-bb52-eaed1999809b",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 1,
@@ -80162,7 +80057,7 @@
       "layout": "normal",
       "name": "Unflinching Courage",
       "oracle_id": "0e969a27-1609-4ab4-b0db-46b1af8066a9",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -80720,7 +80615,7 @@
       "layout": "normal",
       "name": "Unwilling Vessel",
       "oracle_id": "d2593334-ce0b-43e1-97ad-b00950bfae2b",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -80932,7 +80827,7 @@
       "layout": "normal",
       "name": "Vadmir, New Blood",
       "oracle_id": "b000bcf5-529a-447a-bc2e-ae6f42d6073b",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -81013,7 +80908,7 @@
       "layout": "normal",
       "name": "Valgavoth, Terror Eater",
       "oracle_id": "cae3ec72-436d-4086-9dcb-17b3d92ad5c4",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unparsed"
     },
     {
@@ -81175,7 +81070,7 @@
       "layout": "normal",
       "name": "Valor's Flagship",
       "oracle_id": "a3023de2-61e7-4f46-aa4a-09d08ee7d939",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -81256,7 +81151,7 @@
       "layout": "normal",
       "name": "Vampire Nighthawk",
       "oracle_id": "feb244f8-bcb1-44cf-9940-2719221a7309",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -81868,7 +81763,7 @@
       "layout": "normal",
       "name": "Veteran Ice Climber",
       "oracle_id": "ccaadf8d-22c0-4139-b734-03ac2fcb4494",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -81931,13 +81826,7 @@
       "effect_probes": 3,
       "faces_audited": 1,
       "index": 4475,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Evoke"
       ],
@@ -81945,7 +81834,7 @@
       "name": "Vibrance",
       "oracle_id": "52867cdd-8bf2-4cae-bb8d-0f16a18a455b",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 3,
@@ -82153,7 +82042,7 @@
       "layout": "transform",
       "name": "Vincent Valentine // Galian Beast",
       "oracle_id": "f40e6bbf-1fed-4ec5-869d-18c2dd396d14",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -82732,7 +82621,7 @@
       "layout": "normal",
       "name": "Voja, Jaws of the Conclave",
       "oracle_id": "d94ff0b8-5499-4eeb-80f0-20c7fbf07499",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -82854,7 +82743,7 @@
       "layout": "normal",
       "name": "Voracious Varmint",
       "oracle_id": "bd785a7e-df65-48e6-843b-7831f3c1e5d3",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -83075,7 +82964,7 @@
       "layout": "normal",
       "name": "Wakandan Royal Guard",
       "oracle_id": "4ae15bd1-e0ea-4c1a-a311-dae421381ebc",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -83209,7 +83098,7 @@
       "layout": "normal",
       "name": "Wan Shi Tong, Librarian",
       "oracle_id": "2bace3ea-7d28-4a1c-857a-d3c3a1c11b59",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "partial"
     },
     {
@@ -83372,13 +83261,19 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4552,
-      "issues": [],
+      "issues": [
+        {
+          "count": 1,
+          "reason": "unparsed effect text: sacrifice it",
+          "severity": "unparsed"
+        }
+      ],
       "keywords": [],
       "layout": "normal",
       "name": "War Effort",
       "oracle_id": "d9bc6841-9f71-46af-ac1f-a01caee290c1",
       "replacement_effects_registered": 0,
-      "status": "unseen"
+      "status": "unparsed"
     },
     {
       "abilities_registered": 2,
@@ -83818,7 +83713,7 @@
       "layout": "transform",
       "name": "Waterlogged Hulk // Watertight Gondola",
       "oracle_id": "30820f71-9fd4-453c-b377-c2e0b01c07a7",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -83916,7 +83811,7 @@
       "layout": "normal",
       "name": "Wax-Wane Witness",
       "oracle_id": "426dbe89-0cbb-4a3b-8812-d9761d063373",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -84414,7 +84309,7 @@
       "layout": "normal",
       "name": "White Lotus Reinforcements",
       "oracle_id": "c55a4b25-ccc4-49de-9f98-a829c547a64d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -84517,6 +84412,11 @@
           "count": 1,
           "reason": "unparsed clause: exile another target nonland",
           "severity": "partial"
+        },
+        {
+          "count": 1,
+          "reason": "unparsed clause: return that card to the battlefield under its owner's control",
+          "severity": "partial"
         }
       ],
       "keywords": [
@@ -84598,11 +84498,6 @@
       "faces_audited": 1,
       "index": 4620,
       "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        },
         {
           "count": 1,
           "reason": "unparsed clause: you may put it onto the battlefield. if you don't put the card onto the battlefi",
@@ -84884,7 +84779,7 @@
       "layout": "normal",
       "name": "Will, Scion of Peace",
       "oracle_id": "4ecb8653-db8c-468a-853d-420ff62a7a8a",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -84970,7 +84865,7 @@
       "layout": "normal",
       "name": "Windcrag Siege",
       "oracle_id": "64df560a-905f-45d1-bc70-14d99e3112d3",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unparsed"
     },
     {
@@ -85084,7 +84979,7 @@
       "layout": "normal",
       "name": "Winter Soldier, Icy Assassin",
       "oracle_id": "6f4c94b6-f829-4646-a574-083997b78dfb",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -85215,11 +85110,6 @@
       "issues": [
         {
           "count": 1,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        },
-        {
-          "count": 1,
           "reason": "unparsed clause: shuffle. An opponent gains control of this artifact. Activate only during your t",
           "severity": "partial"
         }
@@ -85260,7 +85150,7 @@
       "layout": "normal",
       "name": "Wispdrinker Vampire",
       "oracle_id": "6317d45a-fe02-4879-b515-bc5327ecb5ae",
-      "replacement_effects_registered": 2,
+      "replacement_effects_registered": 1,
       "status": "unseen"
     },
     {
@@ -85419,7 +85309,7 @@
       "layout": "normal",
       "name": "Wojek Investigator",
       "oracle_id": "ab41243d-b178-4ebe-a7ac-bea37427be99",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -85504,19 +85394,13 @@
       "effect_probes": 2,
       "faces_audited": 1,
       "index": 4669,
-      "issues": [
-        {
-          "count": 2,
-          "reason": "unparsed clause: put it into your hand",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "normal",
       "name": "World Map",
       "oracle_id": "51d4f95e-aad2-4e5f-9f15-a68bbdf9ab3e",
       "replacement_effects_registered": 0,
-      "status": "partial"
+      "status": "unseen"
     },
     {
       "abilities_registered": 0,
@@ -85734,7 +85618,7 @@
       "layout": "normal",
       "name": "Wylie Duke, Atiin Hero",
       "oracle_id": "b3ac27d6-7e18-404d-9af2-b03897a5f1d9",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -85859,7 +85743,7 @@
       "layout": "normal",
       "name": "Yellowjacket, Heartless Marauder",
       "oracle_id": "0a364879-31bd-4760-833d-165cde1e96c6",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -85977,7 +85861,7 @@
       "layout": "normal",
       "name": "Yue, the Moon Spirit",
       "oracle_id": "961f1883-2f97-4249-90f9-416279d7a9dd",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unparsed"
     },
     {
@@ -85992,7 +85876,7 @@
       "layout": "normal",
       "name": "Yuna, Hope of Spira",
       "oracle_id": "3dee768a-612c-4960-bad2-2fe5b83a70c3",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -86192,7 +86076,7 @@
       "layout": "normal",
       "name": "Zetalpa, Primal Dawn",
       "oracle_id": "7da0e5de-3e4c-420a-8685-991206100b9d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -86249,7 +86133,7 @@
       "layout": "normal",
       "name": "Zidane, Tantalus Thief",
       "oracle_id": "f267fb54-1881-464c-81af-9e03c3f3b41d",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -86445,7 +86329,7 @@
       "layout": "normal",
       "name": "Zoraline, Cosmos Caller",
       "oracle_id": "5a775f50-20f8-4a8f-868c-8907305bfad6",
-      "replacement_effects_registered": 1,
+      "replacement_effects_registered": 0,
       "status": "unseen"
     },
     {
@@ -86656,7 +86540,7 @@
   "kind": "format_card_support_ledger",
   "overrides": {
     "path": "support_overrides.json",
-    "sha256": "0884020382da99f425ecc8613202a010d1385d52cfe2670deeed8aa0d60bb450"
+    "sha256": "b23c4b1e41a9c36892ade8e2ff7e12d9342564bb3eb71af161e0eac19a9e535b"
   },
   "pool_snapshot": {
     "path": "standard.jsonl",
@@ -86788,6 +86672,15 @@
       "name": "Astrologian's Planisphere",
       "reasons": [
         "unclassified ability clause: Equipped creature is a Wizard in addition to its other types and has \"Whenever y"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Attack-in-the-Box",
+      "reasons": [
+        "unparsed effect text: if you do, sacrifice it"
       ],
       "status": "unparsed"
     },
@@ -87069,6 +86962,17 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Calamity, Galloping Inferno",
+      "reasons": [
+        "unparsed clause: attacking token that's a copy of it. repeat this process once",
+        "unparsed clause: create a tapped",
+        "unparsed effect text: sacrifice that token"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Captain America, Super-Soldier",
       "reasons": [
         "unclassified ability clause: As long as Captain America has a shield counter on him, you and other Heroes you"
@@ -87126,8 +87030,7 @@
       "decks": [],
       "name": "Case of the Shattered Pact",
       "reasons": [
-        "unclassified ability clause: Solved \u2014 At the beginning of combat on your turn, target creature you control ga",
-        "unparsed clause: put it into your hand"
+        "unclassified ability clause: Solved \u2014 At the beginning of combat on your turn, target creature you control ga"
       ],
       "status": "unparsed"
     },
@@ -87217,6 +87120,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Chrome Dome",
+      "reasons": [
+        "unparsed effect text: Sacrifice it"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Chupacabra Echo",
       "reasons": [
         "unclassified ability clause: Fathomless descent \u2014 When this creature enters, target creature an opponent cont"
@@ -87265,6 +87177,16 @@
       "name": "Collective Inferno",
       "reasons": [
         "unclassified ability clause: Double all damage that sources you control of the chosen type would deal"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Come Back Wrong",
+      "reasons": [
+        "unparsed clause: return it to the battlefield under your control",
+        "unparsed effect text: Sacrifice it"
       ],
       "status": "unparsed"
     },
@@ -87370,6 +87292,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Dalkovan Encampment",
+      "reasons": [
+        "unparsed effect text: Sacrifice them"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Daredevil, Man Without Fear",
       "reasons": [
         "unclassified ability clause: Radar Sense \u2014 You may look at the top card of your library any time",
@@ -87431,6 +87362,15 @@
       "name": "Destined Confrontation",
       "reasons": [
         "unparsed effect text: Each player chooses any number of creatures they control with total power 4 or l"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Devastating Onslaught",
+      "reasons": [
+        "unparsed effect text: Sacrifice them"
       ],
       "status": "unparsed"
     },
@@ -87595,7 +87535,6 @@
       "decks": [],
       "name": "Emeritus of Woe // Demonic Tutor",
       "reasons": [
-        "unparsed clause: put that card into your hand",
         "unparsed effect text: this creature becomes prepared"
       ],
       "status": "unparsed"
@@ -87742,6 +87681,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Fire Navy Trebuchet",
+      "reasons": [
+        "unparsed effect text: sacrifice that token"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Flamewake Phoenix",
       "reasons": [
         "unclassified ability clause: Ferocious \u2014 At the beginning of combat on your turn, if you control a creature w"
@@ -87764,6 +87712,16 @@
       "reasons": [
         "unclassified ability clause: Enchanted permanent loses all abilities and doesn't untap during its controller'",
         "unparsed clause: tap enchanted permanent"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Foggy Swamp Visions",
+      "reasons": [
+        "unparsed clause: waterbend {X}. Exile X target creature cards from graveyards. For each creature ",
+        "unparsed effect text: sacrifice those tokens"
       ],
       "status": "unparsed"
     },
@@ -88054,6 +88012,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Harried Dronesmith",
+      "reasons": [
+        "unparsed effect text: sacrifice it"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Hauntwoods Shrieker",
       "reasons": [
         "unparsed effect text: Reveal target face-down permanent. If it's a creature card, you may turn it face"
@@ -88304,7 +88271,6 @@
       "decks": [],
       "name": "Keys to the House",
       "reasons": [
-        "unparsed clause: put it into your hand",
         "unparsed effect text: Lock or unlock a door of target Room you control. Activate only as a sorcery"
       ],
       "status": "unparsed"
@@ -88388,6 +88354,17 @@
       "name": "Korvold and the Noble Thief",
       "reasons": [
         "unclassified ability clause: I, II \u2014 Create a Treasure token"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Koya, Death from Above",
+      "reasons": [
+        "unparsed clause: exile up to one other target creature. if you don't",
+        "unparsed clause: return that card to the battlefield under its owner's control",
+        "unparsed effect text: you may pay {3}{b}"
       ],
       "status": "unparsed"
     },
@@ -88558,9 +88535,28 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Mana Sculpt",
+      "reasons": [
+        "unparsed effect text: If you control a Wizard, add an amount of {C} equal to the amount of mana spent "
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Manifest Dread",
       "reasons": [
         "unparsed effect text: Manifest dread. (Look at the top two cards of your library. Put one onto the bat"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Mardu Siegebreaker",
+      "reasons": [
+        "unparsed clause: exile up to one other target creature you control until this creature leaves the",
+        "unparsed effect text: sacrifice those tokens"
       ],
       "status": "unparsed"
     },
@@ -88590,6 +88586,16 @@
       "reasons": [
         "unparsed clause: return that card under your control with a finality counter on it",
         "unparsed effect text: each player sacrifices x creatures of their choice"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Meek Attack",
+      "reasons": [
+        "unparsed clause: You may put a creature card with total power",
+        "unparsed effect text: sacrifice that creature"
       ],
       "status": "unparsed"
     },
@@ -88681,6 +88687,15 @@
       "name": "Mm'menon, the Right Hand",
       "reasons": [
         "unclassified ability clause: You may look at the top card of your library any time"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Molten Duplication",
+      "reasons": [
+        "unparsed effect text: Sacrifice it"
       ],
       "status": "unparsed"
     },
@@ -88948,6 +88963,25 @@
       "reasons": [
         "unparsed clause: You may put a land card from your hand onto the battlefield",
         "unparsed effect text: Until end of turn, this creature's base power becomes equal to the number of Tow"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Push // Pull",
+      "reasons": [
+        "unparsed effect text: Sacrifice them"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Push the Limit",
+      "reasons": [
+        "unparsed clause: Return all Mount",
+        "unparsed effect text: Sacrifice them"
       ],
       "status": "unparsed"
     },
@@ -89257,6 +89291,24 @@
       "name": "Sage's Nouliths",
       "reasons": [
         "unclassified ability clause: Equipped creature gets +1/+0, has \"Whenever this creature attacks, untap target "
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Saheeli, the Sun's Brilliance",
+      "reasons": [
+        "unparsed effect text: Sacrifice it"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Salt Road Skirmish",
+      "reasons": [
+        "unparsed effect text: Sacrifice them"
       ],
       "status": "unparsed"
     },
@@ -89949,6 +90001,24 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "The Fire Crystal",
+      "reasons": [
+        "unparsed effect text: Sacrifice it"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "The Jolly Balloon Man",
+      "reasons": [
+        "unparsed effect text: Sacrifice it"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "The Kingpin of Crime",
       "reasons": [
         "unparsed effect text: you may pay 2 life. if you do, until end of turn, creatures you control with tou"
@@ -90337,6 +90407,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Unexpected Request",
+      "reasons": [
+        "unparsed effect text: If you do, unattach it"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Valgavoth's Lair",
       "reasons": [
         "unparsed effect text: Add one mana of the chosen color"
@@ -90452,6 +90531,15 @@
       "name": "Voidforged Titan",
       "reasons": [
         "unclassified ability clause: Void \u2014 At the beginning of your end step, if a nonland permanent left the battle"
+      ],
+      "status": "unparsed"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "War Effort",
+      "reasons": [
+        "unparsed effect text: sacrifice it"
       ],
       "status": "unparsed"
     },
@@ -90691,16 +90779,8 @@
       "decks": [],
       "name": "Abuelo, Ancestral Echo",
       "reasons": [
-        "unparsed clause: Exile another target creature or artifact you control"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Abzan Monument",
-      "reasons": [
-        "unparsed clause: put it into your hand"
+        "unparsed clause: Exile another target creature or artifact you control",
+        "unparsed clause: Return it to the battlefield under its owner's control"
       ],
       "status": "partial"
     },
@@ -91284,8 +91364,7 @@
       "decks": [],
       "name": "Brave the Wilds",
       "reasons": [
-        "unparsed clause: Bargain If this spell was bargained",
-        "unparsed clause: put it into your hand"
+        "unparsed clause: Bargain If this spell was bargained"
       ],
       "status": "partial"
     },
@@ -91424,25 +91503,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Calamity, Galloping Inferno",
-      "reasons": [
-        "unparsed clause: attacking token that's a copy of it. repeat this process once",
-        "unparsed clause: create a tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Call the Mountain Chocobo",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Campus Composer // Aqueous Aria",
       "reasons": [
         "unparsed clause: Create a 3/3 blue"
@@ -91488,27 +91548,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Caradora, Heart of Alacria",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Case File Auditor",
       "reasons": [
         "unparsed clause: put it into your hand. put the rest on the bottom of your library in a random or"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Case of the Stashed Skeleton",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -91544,17 +91586,7 @@
       "decks": [],
       "name": "Celestial Reunion",
       "reasons": [
-        "unparsed clause: put it into your hand",
         "unparsed clause: put that card onto the battlefield instead of putting it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Central Elevator // Promising Stairs",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -91588,9 +91620,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Changeling Wayfinder",
+      "name": "Charming Prince",
       "reasons": [
-        "unparsed clause: put it into your hand"
+        "unparsed clause: return it to the battlefield under your control"
       ],
       "status": "partial"
     },
@@ -91662,15 +91694,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Clay-Fired Bricks // Cosmium Kiln",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Clifftop Lookout",
       "reasons": [
         "unparsed clause: reveal cards from the top of your library until you reveal a land card. put that"
@@ -91709,9 +91732,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Cloud, Midgar Mercenary",
+      "name": "Coalstoke Gearhulk",
       "reasons": [
-        "unparsed clause: put it into your hand"
+        "unparsed clause: exile that creature"
       ],
       "status": "partial"
     },
@@ -91748,15 +91771,6 @@
       "name": "Colossus of the Blood Age",
       "reasons": [
         "unparsed clause: draw that many cards plus one"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Come Back Wrong",
-      "reasons": [
-        "unparsed clause: return it to the battlefield under your control"
       ],
       "status": "partial"
     },
@@ -91865,7 +91879,6 @@
       "decks": [],
       "name": "Courier of Comestibles",
       "reasons": [
-        "unparsed clause: put it into your hand",
         "unparsed clause: shuffle. if you don't put a card into your hand this way"
       ],
       "status": "partial"
@@ -92113,15 +92126,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Demonic Counsel",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Demonic Junker",
       "reasons": [
         "unparsed clause: destroy up to one target creature that player controls. if a creature you contro"
@@ -92261,15 +92265,6 @@
       "name": "Dragonologist",
       "reasons": [
         "unparsed clause: put it into your hand. put the rest on the bottom of your library in a random or"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Dragonstorm Forecaster",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -92499,16 +92494,8 @@
       "decks": [],
       "name": "Ennis, Debate Moderator",
       "reasons": [
-        "unparsed clause: exile up to one other target creature you control"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Environmental Scientist",
-      "reasons": [
-        "unparsed clause: put it into your hand"
+        "unparsed clause: exile up to one other target creature you control",
+        "unparsed clause: return that card to the battlefield under its owner's control"
       ],
       "status": "partial"
     },
@@ -92569,15 +92556,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Everything Pizza",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Evil's Thrall",
       "reasons": [
         "unparsed clause: gain control of that creature until the end of your next turn instead."
@@ -92596,18 +92574,18 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Expedition Map",
+      "name": "Explorer's Cache",
       "reasons": [
-        "unparsed clause: put it into your hand"
+        "unparsed clause: Move a +1/+1 counter from this artifact onto target creature. Activate only as a"
       ],
       "status": "partial"
     },
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Explorer's Cache",
+      "name": "Explosive Getaway",
       "reasons": [
-        "unparsed clause: Move a +1/+1 counter from this artifact onto target creature. Activate only as a"
+        "unparsed clause: Return it to the battlefield under its owner's control"
       ],
       "status": "partial"
     },
@@ -92717,7 +92695,6 @@
       "decks": [],
       "name": "Fecund Greenshell",
       "reasons": [
-        "unparsed clause: put it into your hand",
         "unparsed clause: you may put it onto the battlefield tapped. otherwise"
       ],
       "status": "partial"
@@ -92747,15 +92724,6 @@
       "name": "Feral Encounter",
       "reasons": [
         "unparsed clause: Look at the top five cards of your library. You may exile a creature card from a"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Fierce Empath",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -92859,15 +92827,6 @@
       "name": "Flourishing Bloom-Kin",
       "reasons": [
         "unparsed clause: reveal them. put one of them onto the battlefield tapped"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Foggy Swamp Visions",
-      "reasons": [
-        "unparsed clause: waterbend {X}. Exile X target creature cards from graveyards. For each creature "
       ],
       "status": "partial"
     },
@@ -93095,6 +93054,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Getaway Glamer",
+      "reasons": [
+        "unparsed clause: Return it to the battlefield under its owner's control"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Ghalta, Stampede Tyrant",
       "reasons": [
         "unparsed clause: put any number of creature cards from your hand onto the battlefield"
@@ -93172,15 +93140,6 @@
       "name": "Glint Weaver",
       "reasons": [
         "unparsed clause: you gain life equal to the greatest toughness among creatures you control"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Gloryheath Lynx",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -93491,7 +93450,8 @@
       "decks": [],
       "name": "Hide on the Ceiling",
       "reasons": [
-        "unparsed clause: Exile X target artifacts and/or creatures"
+        "unparsed clause: Exile X target artifacts and/or creatures",
+        "unparsed clause: Return the exiled cards to the battlefield under their owners' control"
       ],
       "status": "partial"
     },
@@ -93563,15 +93523,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Hour of Victory",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Hovel Hurler",
       "reasons": [
         "unparsed clause: gains flying until end of turn. Activate only as a sorcery"
@@ -93584,7 +93535,6 @@
       "name": "Huatli, Poet of Unity // Roar of the Fifth People",
       "reasons": [
         "unparsed clause: Exile Huatli",
-        "unparsed clause: put it into your hand",
         "unparsed clause: return her to the battlefield transformed under her owner's control. Activate on"
       ],
       "status": "partial"
@@ -93812,15 +93762,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Jeskai Monument",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Jet's Brainwashing",
       "reasons": [
         "unparsed clause: gain control of that creature until end of turn"
@@ -93955,15 +93896,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Kellan, the Fae-Blooded // Birthright Boon",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Kellan, the Kid",
       "reasons": [
         "unparsed clause: you may put a land card from your hand onto the battlefield"
@@ -94023,16 +93955,6 @@
         "unparsed clause: Choose a creature card exiled with Koh",
         "unparsed clause: exile up to one other target creature",
         "unparsed clause: you may exile it"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Koya, Death from Above",
-      "reasons": [
-        "unparsed clause: exile up to one other target creature. if you don't",
-        "unparsed clause: return that card to the battlefield under its owner's control"
       ],
       "status": "partial"
     },
@@ -94236,15 +94158,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Lo and Li, Twin Tutors",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Longstalk Brawl",
       "reasons": [
         "unparsed clause: Gift a tapped Fish Choose target creature you control"
@@ -94293,15 +94206,6 @@
       "name": "Mabel, Heir to Cragflame",
       "reasons": [
         "unparsed clause: create cragflame"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Maelstrom of the Spirit Dragon",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -94372,37 +94276,10 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Mardu Monument",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Mardu Siegebreaker",
-      "reasons": [
-        "unparsed clause: exile up to one other target creature you control until this creature leaves the"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Marina Vendrell's Grimoire",
       "reasons": [
         "unparsed clause: draw that many cards",
         "unparsed clause: you lose the game"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Marshals' Pathcruiser",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -94449,15 +94326,6 @@
       "name": "Mazemind Tome",
       "reasons": [
         "unparsed clause: exile it. if you do"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Meek Attack",
-      "reasons": [
-        "unparsed clause: You may put a creature card with total power"
       ],
       "status": "partial"
     },
@@ -94513,15 +94381,6 @@
       "name": "Michelangelo, Improviser",
       "reasons": [
         "unparsed clause: you may put a creature card and/or a land card from your hand onto the battlefie"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Micromancer",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -94629,7 +94488,8 @@
       "decks": [],
       "name": "Morningtide's Light",
       "reasons": [
-        "unparsed clause: Exile any number of target creatures. Until your next turn"
+        "unparsed clause: Exile any number of target creatures. Until your next turn",
+        "unparsed clause: return those cards to the battlefield tapped under their owners' control"
       ],
       "status": "partial"
     },
@@ -94681,15 +94541,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Mystical Teachings",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Nameless Inversion",
       "reasons": [
         "unparsed clause: loses all creature types until end of turn"
@@ -94720,15 +94571,6 @@
       "name": "Nature's Rhythm",
       "reasons": [
         "unparsed clause: put it onto the battlefield"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Nervous Gardener",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -94783,6 +94625,24 @@
       "name": "Nick Fury, Agent of S.H.I.E.L.D.",
       "reasons": [
         "unparsed clause: look at the top seven cards of your library. You may put a Hero"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Niko, Light of Hope",
+      "reasons": [
+        "unparsed clause: Return it to the battlefield under its owner's control"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Nine-Lives Familiar",
+      "reasons": [
+        "unparsed clause: return it to the battlefield with one fewer revival counter on it"
       ],
       "status": "partial"
     },
@@ -94895,6 +94755,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Old Hob, Alleycat Blues",
+      "reasons": [
+        "unparsed clause: destroy it"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Omenpath Journey",
       "reasons": [
         "unparsed clause: choose a card at random exiled with this enchantment",
@@ -94946,15 +94815,6 @@
       "name": "Otterball Antics",
       "reasons": [
         "unparsed clause: Create a 1/1 blue"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Outcaster Greenblade",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -95326,15 +95186,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Push the Limit",
-      "reasons": [
-        "unparsed clause: Return all Mount"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Qarsi Revenant",
       "reasons": [
         "unparsed clause: a deathtouch counter",
@@ -95403,15 +95254,6 @@
       "name": "Raccoon Rallier",
       "reasons": [
         "unparsed clause: Target creature you control gains haste until end of turn. Activate only as a so"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Radioactive Spider",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -95713,15 +95555,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Rune-Scarred Demon",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Rush of Dread",
       "reasons": [
         "unparsed clause: Target opponent loses half their life"
@@ -95734,6 +95567,15 @@
       "name": "Ruthless Negotiation",
       "reasons": [
         "unparsed clause: Target opponent exiles a card from their hand. If this spell was cast from a gra"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "S.H.I.E.L.D. Flying Car",
+      "reasons": [
+        "unparsed clause: return that card to the battlefield under its owner's control"
       ],
       "status": "partial"
     },
@@ -95776,18 +95618,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Sagu Wildling // Roost Seek",
+      "name": "Salvation Swan",
       "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Sanar, Unfinished Genius // Wild Idea",
-      "reasons": [
-        "unparsed clause: put it into your hand"
+        "unparsed clause: return it to the battlefield under its owner's control with a flying counter on "
       ],
       "status": "partial"
     },
@@ -95851,8 +95684,7 @@
       "decks": [],
       "name": "Sazh Katzroy",
       "reasons": [
-        "unparsed clause: double the number of +1/+1 counters on that creature",
-        "unparsed clause: put it into your hand"
+        "unparsed clause: double the number of +1/+1 counters on that creature"
       ],
       "status": "partial"
     },
@@ -95880,15 +95712,6 @@
       "name": "Scientist Supreme of A.I.M.",
       "reasons": [
         "unparsed clause: Copy target activated or triggered ability you control from an artifact source. "
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Scour for Scrap",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -95961,15 +95784,6 @@
       "name": "Sephiroth, Fabled SOLDIER // Sephiroth, One-Winged Angel",
       "reasons": [
         "unparsed clause: you draw that many cards"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Servant of the Stinger",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -96134,7 +95948,8 @@
       "decks": [],
       "name": "Skyskipper Duo",
       "reasons": [
-        "unparsed clause: exile up to one other target creature you control"
+        "unparsed clause: exile up to one other target creature you control",
+        "unparsed clause: return it to the battlefield under its owner's control"
       ],
       "status": "partial"
     },
@@ -96181,15 +95996,6 @@
       "name": "Snarl Song",
       "reasons": [
         "unparsed clause: Create two 0/0 green"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Social Snub",
-      "reasons": [
-        "unparsed clause: you may copy this spell"
       ],
       "status": "partial"
     },
@@ -96372,24 +96178,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Spineseeker Centipede",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Spinewoods Armadillo",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Spinner of Souls",
       "reasons": [
         "unparsed clause: you may reveal cards from the top of your library until you reveal a creature ca"
@@ -96420,15 +96208,6 @@
       "name": "Splash Portal",
       "reasons": [
         "unparsed clause: return it to the battlefield under its owner's control. If that creature is a Bi"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Splinter's Technique",
-      "reasons": [
-        "unparsed clause: put that card into your hand"
       ],
       "status": "partial"
     },
@@ -96562,18 +96341,18 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Strife Scholar // Awaken the Ages",
+      "name": "Stormsplitter",
       "reasons": [
-        "unparsed clause: Create two 2/2 red"
+        "unparsed clause: exile that token"
       ],
       "status": "partial"
     },
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Strixhaven Skycoach",
+      "name": "Strife Scholar // Awaken the Ages",
       "reasons": [
-        "unparsed clause: put it into your hand"
+        "unparsed clause: Create two 2/2 red"
       ],
       "status": "partial"
     },
@@ -96598,27 +96377,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Sultai Monument",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Sumala Sentry",
       "reasons": [
         "unparsed clause: a +1/+1 counter on this creature"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Sun-Spider, Nimble Webber",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -96716,6 +96477,15 @@
     {
       "deck_slots": 0,
       "decks": [],
+      "name": "Systems Override",
+      "reasons": [
+        "unparsed clause: remove ten charge counters from it"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
       "name": "Tarrian's Journal // The Tomb of Aclazotz",
       "reasons": [
         "unparsed clause: it enters with a finality counter on it"
@@ -96744,27 +96514,9 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Tempest Hawk",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Temporal Cleansing",
       "reasons": [
         "unparsed clause: Convoke The owner of target nonland permanent puts it into their library second "
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Temur Monument",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -96821,15 +96573,6 @@
       "name": "Teval, Arbiter of Virtue",
       "reasons": [
         "unparsed clause: you lose life equal to its mana value"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Tezzeret, Cruel Captain",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -96973,15 +96716,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "The Masters of Evil",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "The Mighty Thor, Jane Foster",
       "reasons": [
         "unparsed clause: return that card to the battlefield tapped under its owner's control"
@@ -97038,15 +96772,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "The Seriema",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "The Sibsig Ceremony",
       "reasons": [
         "unparsed clause: destroy that creature"
@@ -97077,15 +96802,6 @@
       "name": "The Ten Rings",
       "reasons": [
         "unparsed clause: draw cards equal to the difference"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Thornvault Forager",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -97205,15 +96921,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Transit Mage",
-      "reasons": [
-        "unparsed clause: put it into your hand"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Transmutation Font",
       "reasons": [
         "unparsed clause: put it onto the battlefield"
@@ -97302,6 +97009,15 @@
       "name": "Turtles Forever",
       "reasons": [
         "unparsed clause: reveal those cards. An opponent chooses two of them. Put the chosen cards into y"
+      ],
+      "status": "partial"
+    },
+    {
+      "deck_slots": 0,
+      "decks": [],
+      "name": "Twining Twins // Swift Spiral",
+      "reasons": [
+        "unparsed clause: Return it to the battlefield under its owner's control"
       ],
       "status": "partial"
     },
@@ -97505,15 +97221,6 @@
       "name": "Veteran Beastrider",
       "reasons": [
         "unparsed clause: untap each creature you control"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Vibrance",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -97741,7 +97448,8 @@
       "decks": [],
       "name": "Wiccan, Rising Magician",
       "reasons": [
-        "unparsed clause: exile another target nonland"
+        "unparsed clause: exile another target nonland",
+        "unparsed clause: return that card to the battlefield under its owner's control"
       ],
       "status": "partial"
     },
@@ -97750,7 +97458,6 @@
       "decks": [],
       "name": "Wickerfolk Thresher",
       "reasons": [
-        "unparsed clause: put it into your hand",
         "unparsed clause: you may put it onto the battlefield. if you don't put the card onto the battlefi"
       ],
       "status": "partial"
@@ -97779,7 +97486,6 @@
       "decks": [],
       "name": "Wishclaw Talisman",
       "reasons": [
-        "unparsed clause: put it into your hand",
         "unparsed clause: shuffle. An opponent gains control of this artifact. Activate only during your t"
       ],
       "status": "partial"
@@ -97799,15 +97505,6 @@
       "name": "Woodland Acolyte // Mend the Wilds",
       "reasons": [
         "unparsed clause: Put target permanent card from your graveyard on top of your library"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "World Map",
-      "reasons": [
-        "unparsed clause: put it into your hand"
       ],
       "status": "partial"
     },
@@ -97896,7 +97593,7 @@
   ],
   "ranked_mechanics": [
     {
-      "affected_cards": 837,
+      "affected_cards": 819,
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
@@ -97905,20 +97602,20 @@
         "Aberrant Manawurm",
         "Absorbing Man",
         "Abuelo, Ancestral Echo",
-        "Abzan Monument",
         "Additive Evolution",
         "Aegis Sculptor",
         "Aerith Gainsborough",
-        "Aetherjacket"
+        "Aetherjacket",
+        "Agency Outfitter"
       ],
       "mechanic": "unclassified oracle text",
       "status_counts": {
-        "partial": 652,
-        "unparsed": 185
+        "partial": 614,
+        "unparsed": 205
       }
     },
     {
-      "affected_cards": 31,
+      "affected_cards": 30,
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
@@ -97926,16 +97623,16 @@
         "Braided Net // Braided Quipu",
         "Brass's Tunnel-Grinder // Tecutlan, the Searing Rift",
         "Brigid, Clachan's Heart // Brigid, Doun's Mind",
-        "Clay-Fired Bricks // Cosmium Kiln",
         "Dire Flail // Dire Blunderbuss",
         "Garland, Knight of Cornelia // Chaos, the Endless",
         "Grasping Shadows // Shadows' Lair",
         "Growing Rites of Itlimoc // Itlimoc, Cradle of the Sun",
-        "Kaslem's Stonetree // Kaslem's Strider"
+        "Kaslem's Stonetree // Kaslem's Strider",
+        "Kefka, Court Mage // Kefka, Ruler of Ruin"
       ],
       "mechanic": "layout:transform",
       "status_counts": {
-        "partial": 26,
+        "partial": 25,
         "unparsed": 5
       }
     },
@@ -98006,7 +97703,7 @@
       }
     },
     {
-      "affected_cards": 18,
+      "affected_cards": 17,
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
@@ -98023,7 +97720,7 @@
       ],
       "mechanic": "layout:adventure",
       "status_counts": {
-        "partial": 16,
+        "partial": 15,
         "unparsed": 2
       }
     },
@@ -98216,24 +97913,6 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
-        "Campus Composer // Aqueous Aria",
-        "Emeritus of Truce // Swords to Plowshares",
-        "Grave Researcher // Reanimate",
-        "Jadzi, Steward of Fate // Oracle's Gift",
-        "Sanar, Unfinished Genius // Wild Idea",
-        "Skycoach Conductor // All Aboard",
-        "Strife Scholar // Awaken the Ages"
-      ],
-      "mechanic": "layout:prepare",
-      "status_counts": {
-        "partial": 7
-      }
-    },
-    {
-      "affected_cards": 7,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
         "Aether Syphon",
         "Endrider Spikespitter",
         "Far Fortune, End Boss",
@@ -98322,17 +98001,34 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
-        "Central Elevator // Promising Stairs",
+        "Campus Composer // Aqueous Aria",
+        "Emeritus of Truce // Swords to Plowshares",
+        "Grave Researcher // Reanimate",
+        "Jadzi, Steward of Fate // Oracle's Gift",
+        "Skycoach Conductor // All Aboard",
+        "Strife Scholar // Awaken the Ages"
+      ],
+      "mechanic": "layout:prepare",
+      "status_counts": {
+        "partial": 6
+      }
+    },
+    {
+      "affected_cards": 6,
+      "deck_cards": 0,
+      "deck_slots": 0,
+      "examples": [
         "Charred Foyer // Warped Space",
         "Dazzling Theater // Prop Room",
         "Flotsam // Jetsam",
         "Hustle // Bustle",
+        "Push // Pull",
         "Walk-In Closet // Forgotten Cellar"
       ],
       "mechanic": "layout:split",
       "status_counts": {
-        "partial": 3,
-        "unparsed": 3
+        "partial": 2,
+        "unparsed": 4
       }
     },
     {
@@ -98415,6 +98111,22 @@
       "mechanic": "Descend",
       "status_counts": {
         "unparsed": 5
+      }
+    },
+    {
+      "affected_cards": 5,
+      "deck_cards": 0,
+      "deck_slots": 0,
+      "examples": [
+        "Appa, Loyal Sky Bison",
+        "Fear of Falling",
+        "High-Flying Ace",
+        "Kheru Goldkeeper",
+        "Salvation Swan"
+      ],
+      "mechanic": "Flying",
+      "status_counts": {
+        "partial": 5
       }
     },
     {
@@ -98510,21 +98222,6 @@
       "mechanic": "Flurry",
       "status_counts": {
         "unparsed": 4
-      }
-    },
-    {
-      "affected_cards": 4,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
-        "Appa, Loyal Sky Bison",
-        "Fear of Falling",
-        "High-Flying Ace",
-        "Kheru Goldkeeper"
-      ],
-      "mechanic": "Flying",
-      "status_counts": {
-        "partial": 4
       }
     },
     {
@@ -98636,28 +98333,14 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
-        "Case of the Gorgon's Kiss",
-        "Case of the Stashed Skeleton",
-        "Case of the Uneaten Feast"
-      ],
-      "mechanic": "layout:case",
-      "status_counts": {
-        "partial": 2,
-        "unparsed": 1
-      }
-    },
-    {
-      "affected_cards": 3,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
         "Crashing Wave",
         "Foggy Swamp Visions",
         "Hama, the Bloodbender"
       ],
       "mechanic": "Waterbend",
       "status_counts": {
-        "partial": 3
+        "partial": 2,
+        "unparsed": 1
       }
     },
     {
@@ -98751,6 +98434,20 @@
       "mechanic": "Haste",
       "status_counts": {
         "unparsed": 2
+      }
+    },
+    {
+      "affected_cards": 2,
+      "deck_cards": 0,
+      "deck_slots": 0,
+      "examples": [
+        "Case of the Gorgon's Kiss",
+        "Case of the Uneaten Feast"
+      ],
+      "mechanic": "layout:case",
+      "status_counts": {
+        "partial": 1,
+        "unparsed": 1
       }
     },
     {
@@ -99226,16 +98923,16 @@
     }
   ],
   "schema_version": 1,
-  "sha256": "8adcd2d2253e168468c45d8d77014b497f603786328da99202d9b764f4ba01ac",
+  "sha256": "196d321e2032e5414fe3e0da3f62cac9167d207a796509cea7693a930815563e",
   "summary": {
     "qualified_fraction": 0.033815397703105064,
-    "static_clean_fraction": 0.7413866439812845,
+    "static_clean_fraction": 0.7458528285835815,
     "status_counts": {
-      "observed_clean": 73,
-      "partial": 788,
-      "unparsed": 428,
-      "unseen": 3327,
-      "verified": 86
+      "observed_clean": 63,
+      "partial": 745,
+      "unparsed": 450,
+      "unseen": 3348,
+      "verified": 96
     },
     "total": 4702
   }

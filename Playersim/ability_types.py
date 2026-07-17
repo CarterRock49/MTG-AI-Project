@@ -3969,6 +3969,8 @@ class DamageEffect(AbilityEffect):
         target_type_str = str(target_type).lower() if target_type is not None else "any target"
         if amount == "source_last_known_power":
             amount_str = "its last-known power"
+        elif amount == "previous_target_power":
+            amount_str = "the previous target's power"
         else:
             amount_str = "X" if amount == 'x' else str(amount) # Represent X in description
         super().__init__(f"Deal {amount_str} damage to {target_type_str}", condition)
@@ -4008,6 +4010,51 @@ class DamageEffect(AbilityEffect):
         elif self.base_amount == "source_last_known_power":
             last_known = getattr(self, "resolution_context", {}).get("last_known", {})
             effective_amount = max(0, safe_int(last_known.get("power"), 0) or 0)
+        elif self.base_amount == "previous_target_power":
+            # Linked instructions can modify one creature and then have "it"
+            # deal damage to another target. Read the immediately preceding
+            # instruction's target after that earlier effect has resolved.
+            # The same pronoun also begins standalone source instructions
+            # (for example, a dies trigger saying "it deals damage equal to
+            # its power"). With no earlier target role, use the source's
+            # event snapshot, falling back to its current power.
+            effective_amount = 0
+            resolution_context = getattr(self, "resolution_context", {}) or {}
+            current_instruction = safe_int(
+                getattr(self, "_instruction_index", -1), -1)
+            slots = list(resolution_context.get(
+                "instruction_target_slots", []) or [])
+            targets_by_slot = list(resolution_context.get(
+                "targets_by_slot", []) or [])
+            prior_slots = []
+            found_previous_creature = False
+            for slot_index, slot in enumerate(slots):
+                instruction_index = safe_int(
+                    slot.get("instruction_index"), -1)
+                if instruction_index < current_instruction:
+                    prior_slots.append((instruction_index, slot_index))
+            for _, slot_index in sorted(prior_slots, reverse=True):
+                selected_ids = (
+                    targets_by_slot[slot_index]
+                    if slot_index < len(targets_by_slot) else [])
+                for target_id in selected_ids or []:
+                    card = game_state._safe_get_card(target_id)
+                    _, zone = game_state.find_card_location(target_id)
+                    if (card and zone == "battlefield"
+                            and "creature" in getattr(card, "card_types", [])):
+                        effective_amount = max(
+                            0, safe_int(getattr(card, "power", 0), 0) or 0)
+                        found_previous_creature = True
+                        break
+                if found_previous_creature:
+                    break
+            if not prior_slots:
+                last_known = resolution_context.get("last_known", {}) or {}
+                source = game_state._safe_get_card(source_id)
+                effective_amount = max(0, safe_int(
+                    last_known.get(
+                        "power", getattr(source, "power", 0) if source else 0),
+                    0) or 0)
         else:
             effective_amount = text_to_number(self.base_amount)
         # --- End X Cost Handling ---
@@ -4094,6 +4141,7 @@ class DamageEffect(AbilityEffect):
         has_infect = game_state.check_keyword(source_id, "infect") if hasattr(game_state, 'check_keyword') else False
         total_actual_damage = 0
         success_overall = False
+        resolved_any_target = False
 
         for target_id in targets_to_damage:
              is_player_target = target_id in ["p1", "p2"]
@@ -4134,6 +4182,9 @@ class DamageEffect(AbilityEffect):
                       elif 'battle' in getattr(target_obj, 'type_line', ''):
                            damage_applied = game_state.damage_battle(target_id, effective_amount, source_id) # Pass effective amount
 
+                 # Prevention can reduce a correctly applied damage event to
+                 # zero. That is still a successful resolving instruction.
+                 resolved_any_target = True
                  if damage_applied > 0:
                       total_actual_damage += damage_applied
                       success_overall = True
@@ -4145,7 +4196,7 @@ class DamageEffect(AbilityEffect):
             if hasattr(game_state, 'gain_life'): game_state.gain_life(controller, total_actual_damage, source_id)
             else: controller['life'] += total_actual_damage
 
-        return success_overall
+        return success_overall or resolved_any_target
 
 
 class KeywordChoiceGrantEffect(AbilityEffect):
@@ -4510,7 +4561,7 @@ class RemoveCounterEffect(AbilityEffect):
 class CreateTokenEffect(AbilityEffect):
     """Effect that creates token creatures. Can handle copies with modified P/T."""
     # ADDED: is_copy flag and source_card_for_copy attribute
-    def __init__(self, power, toughness, creature_type="Creature", count=1, keywords=None, colors=None, is_legendary=False, controller_gets=True, condition=None, is_copy=False, source_card_for_copy=None, count_expr=None):
+    def __init__(self, power, toughness, creature_type="Creature", count=1, keywords=None, colors=None, is_legendary=False, controller_gets=True, condition=None, is_copy=False, source_card_for_copy=None, count_expr=None, enters_tapped=False):
         self.is_copy = is_copy
         self.source_card_for_copy = source_card_for_copy # Should be the Card object
         # "for each X" token counts are resolved against the controller at
@@ -4539,6 +4590,7 @@ class CreateTokenEffect(AbilityEffect):
         self.colors = colors # Base colors if not copy
         self.is_legendary = is_legendary # Base legendary status if not copy
         self.controller_gets = controller_gets
+        self.enters_tapped = bool(enters_tapped)
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         target_player = controller
@@ -4594,7 +4646,9 @@ class CreateTokenEffect(AbilityEffect):
             for _ in range(effective_count):
                  if token_data: # Ensure data was prepared
                      # Use GameState.create_token method
-                     token_id = game_state.create_token(target_player, token_data.copy()) # Pass copy
+                     token_id = game_state.create_token(
+                         target_player, token_data.copy(),
+                         enters_tapped=self.enters_tapped) # Pass copy
                      if token_id: created_token_ids.append(token_id)
 
         # --- Handle Normal Token Creation (Existing Logic) ---
@@ -4681,7 +4735,9 @@ class CreateTokenEffect(AbilityEffect):
 
             for _ in range(effective_count):
                 # Use GameState.create_token
-                token_id = game_state.create_token(target_player, token_data.copy()) # Pass copy
+                token_id = game_state.create_token(
+                    target_player, token_data.copy(),
+                    enters_tapped=self.enters_tapped) # Pass copy
                 if token_id: created_token_ids.append(token_id)
 
         created_context = getattr(self, "resolution_context", None)
@@ -5985,8 +6041,10 @@ class ImpulseDrawEffect(AbilityEffect):
         self.requires_target = False
 
     def _apply_effect(self, game_state, source_id, controller, targets):
-        if not controller or not controller.get("library"):
+        if not controller:
             return False
+        if not controller.get("library"):
+            return True
         count = min(self.count, len(controller["library"]))
         if count <= 0:
             return True
@@ -6004,6 +6062,13 @@ class ImpulseDrawEffect(AbilityEffect):
                     game_state.impulse_until_eot = set()
                 if self.duration == "end_of_turn":
                     game_state.impulse_until_eot.add(card_id)
+                elif self.duration == "end_of_your_next_turn":
+                    if not hasattr(game_state, "impulse_until_next_turn"):
+                        game_state.impulse_until_next_turn = {}
+                    controller_is_active = (
+                        game_state._get_active_player() is controller)
+                    game_state.impulse_until_next_turn[card_id] = (
+                        game_state.turn + (2 if controller_is_active else 1))
             else:
                 break
         if exiled:
@@ -6819,9 +6884,15 @@ class SurveilEffect(AbilityEffect):
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         """Initiate the surveil process by setting the game state."""
-        if not controller or "library" not in controller or not controller["library"]:
+        if not controller or "library" not in controller:
             logging.debug(f"Cannot Surveil: Player {controller.get('name', 'Unknown')} or library invalid.")
-            return False # Cannot surveil with no library
+            return False
+
+        # Looking at zero cards is a legal no-op.  A following instruction
+        # still happens; for Prismari Charm that means attempting its draw and
+        # losing normally if the library is empty.
+        if not controller["library"]:
+            return True
 
         count = min(self.count, len(controller["library"]))
         if count <= 0: return True # Surveil 0 is valid, does nothing
@@ -8045,7 +8116,7 @@ class ArchdruidSearchEffect(AbilityEffect):
             'type': 'dig_select', 'player': controller, 'options': options,
             'remaining': 1, 'selected': [], 'source_zone': 'library',
             'destination': 'hand', 'destination_by_card_type': True,
-            'rest_destination': 'stay', 'optional': False,
+            'rest_destination': 'stay', 'optional': True,
             'shuffle_after': True, 'source_id': source_id,
             'resume_phase': game_state.PHASE_PRIORITY,
         }
@@ -8088,9 +8159,11 @@ class OutsideGameCardEffect(AbilityEffect):
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         context = getattr(self, 'resolution_context', {}) or {}
-        if context and not (context.get('was_cast')
-                            or context.get('source_zone') == 'stack_implicit'
-                            or context.get('source_zone') in {'hand', 'exile', 'graveyard'}):
+        # North Wind Avatar's intervening-if is checked both when its ETB
+        # triggers and when that trigger resolves.  Keep the effect itself
+        # fail-closed too: merely entering from a cast-capable zone does not
+        # mean the permanent was cast (reanimation and blink must not wish).
+        if not context.get('was_cast'):
             return True
         pool_key = ('outside_game' if 'outside_game' in controller
                     else 'sideboard')
@@ -8330,7 +8403,8 @@ class DestroyEffect(AbilityEffect):
             logging.warning(f"DestroyEffect has requires_target={self.requires_target} but no targets resolved.")
             return False
 
-        if not targets_to_destroy: return False
+        if not targets_to_destroy:
+            return "all " in self.target_type
 
         # Later instructions such as "Its controller may search their library"
         # need the target's battlefield controller even after destruction has
@@ -8381,7 +8455,11 @@ class DestroyEffect(AbilityEffect):
                     # Logging handled by move_card
 
         # SBAs handled by main loop
-        return destroyed_count > 0
+        # A legal destroy instruction resolved even when indestructible,
+        # regeneration, Totem Armor, or another replacement kept the target
+        # on the battlefield.  The boolean reports rules resolution, not
+        # whether the zone move happened.
+        return True
     
 class ExileLibrariesExceptBottomEffect(AbilityEffect):
     """Exile every card above the bottom N cards of each library face down."""
@@ -8432,6 +8510,10 @@ class ExileEffect(AbilityEffect):
         cats = []
         if self.target_type == "creature": cats = ["creatures"]
         elif self.target_type == "artifact": cats = ["artifacts"]
+        elif self.target_type == "artifact_or_enchantment":
+            cats = [
+                "artifacts", "enchantments", "artifact_or_enchantment",
+                "chosen", "permanents"]
         elif self.target_type == "creature_or_vehicle": cats = ["creatures", "artifacts"]
         # Add more specific types
         elif self.target_type == "permanent": cats = ["creatures", "artifacts", "enchantments", "lands", "planeswalkers", "battles", "permanents"]

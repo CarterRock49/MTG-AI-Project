@@ -16,6 +16,21 @@ class GameStateZonesMixin:
     # Empty slots: preserves GameState's __slots__ semantics (no instance __dict__).
     __slots__ = ()
 
+    def _clear_exile_play_permissions(self, player, card_id):
+        """Clear permissions attached to the current exile-zone object.
+
+        A card that leaves exile is a new object if it later returns.  Keeping
+        an old impulse expiry keyed only by card ID could therefore revoke a
+        newer permission when the old duration expires.
+        """
+        if (player is not None
+                and hasattr(self, "_consume_plot_permission")):
+            self._consume_plot_permission(player, card_id)
+        getattr(self, "cards_castable_from_exile", set()).discard(card_id)
+        getattr(self, "exile_alternative_costs", {}).pop(card_id, None)
+        getattr(self, "impulse_until_eot", set()).discard(card_id)
+        getattr(self, "impulse_until_next_turn", {}).pop(card_id, None)
+
     def _snapshot_battlefield_object(self, card_id, controller):
         """Capture characteristics used by leave/dies triggers before the move."""
         card = self._safe_get_card(card_id)
@@ -69,6 +84,37 @@ class GameStateZonesMixin:
                 r"enters tapped if it(?:'|\u2019| i)s not your turn",
                 normalized):
             return self._get_active_player() is not controller
+
+        # These lands check for basic land *types*, not basic supertypes.
+        # move_card asks after appending the entering object, so skip exactly
+        # one occurrence of that object while inspecting existing permanents.
+        land_type_condition = re.search(
+            r"enters tapped unless you control (?:a|an)\s+([a-z]+)\s+or\s+"
+            r"(?:a|an)\s+([a-z]+)", normalized)
+        if land_type_condition:
+            required_types = {
+                land_type_condition.group(1).lower(),
+                land_type_condition.group(2).lower(),
+            }
+            skipped_entering_occurrence = False
+            for permanent_id in controller.get("battlefield", []):
+                if (card_id is not None and permanent_id == card_id
+                        and not skipped_entering_occurrence):
+                    skipped_entering_occurrence = True
+                    continue
+                permanent = self._safe_get_card(permanent_id)
+                if not permanent:
+                    continue
+                land_types = {
+                    str(subtype).lower()
+                    for subtype in (getattr(permanent, "subtypes", []) or [])
+                }
+                land_types.update(re.findall(
+                    r"[a-z]+",
+                    (getattr(permanent, "type_line", "") or "").lower()))
+                if required_types.intersection(land_types):
+                    return False
+            return True
 
         # Shockland-style payment clauses and Multiversal Passage defer the
         # tapped decision until their entry choice has been made.  Treating
@@ -644,13 +690,8 @@ class GameStateZonesMixin:
                 **context,
             })
 
-        if (actual_from_zone == "exile" and from_player
-                and final_destination_zone != "exile"
-                and hasattr(self, "_consume_plot_permission")):
-            self._consume_plot_permission(from_player, card_id)
-            getattr(self, "cards_castable_from_exile", set()).discard(card_id)
-            getattr(self, "exile_alternative_costs", {}).pop(card_id, None)
         if actual_from_zone == "exile" and final_destination_zone != "exile":
+            self._clear_exile_play_permissions(from_player, card_id)
             # Face-down identity is a property of this exile-zone object, not
             # of the physical card in its next zone.
             if hasattr(self, "clear_face_down_exile"):

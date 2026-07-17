@@ -569,17 +569,17 @@ persists them beside statistics. Worst severity sticks per card. The builder
 must exclude crash/unparsed cards and distrust or down-weight partial-card
 statistics.
 
-Standard's pinned 4,702-card ledger, last measured July 12, contains:
+Standard's pinned 4,702-card ledger, last measured July 17, contains:
 
 | Evidence class | Cards |
 | --- | ---: |
-| Verified | 86 |
-| Observed clean | 73 |
-| Unseen/static clean | 3,327 |
-| Partial | 788 |
-| Unparsed | 428 |
+| Verified | 96 |
+| Observed clean | 63 |
+| Unseen/static clean | 3,348 |
+| Partial | 745 |
+| Unparsed | 450 |
 
-That is 74.1% static-clean but only 3.4% evidence-qualified. A clean manifest
+That is 74.6% static-clean but only 3.4% evidence-qualified. A clean manifest
 for the representative corpus does not prove unseen cards are faithful.
 
 Workflow: harvest → rank failures by real frequency/impact → write a failing

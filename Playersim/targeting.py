@@ -324,6 +324,56 @@ class TargetingSystem:
             return numeric_value <= threshold
         return numeric_value == threshold
 
+    def _target_mana_value(self, characteristic_card, target_obj, target_zone):
+        """Return mana value for a target, including an announced stack X.
+
+        Outside the stack, a card's printed mana value is authoritative.  On
+        the stack, each X in the mana cost has the value announced for X (CR
+        202.3e).  Cost reductions and alternative payments do not change mana
+        value, so this deliberately reads the spell face and ``X`` rather than
+        the amount of mana paid.
+        """
+        value = self._live_characteristic(
+            characteristic_card, 'cmc', None,
+            use_layers=target_zone == "battlefield")
+        if (target_zone != "stack"
+                or not isinstance(target_obj, tuple)
+                or not target_obj
+                or target_obj[0] != "SPELL"):
+            return value
+
+        context = (target_obj[3]
+                   if len(target_obj) >= 4 and isinstance(target_obj[3], dict)
+                   else {})
+        mana_cost = str(
+            getattr(characteristic_card, "mana_cost", "") or "")
+        if context.get("prepared_copy"):
+            face = context.get("prepared_face", {}) or {}
+            mana_cost = str(face.get("mana_cost", "") or "")
+            value = face.get("cmc", value)
+        elif (context.get("cast_as_back_face")
+              and hasattr(characteristic_card, "get_face_cost")):
+            mana_cost = str(
+                characteristic_card.get_face_cost(1) or "")
+            faces = list(getattr(characteristic_card, "faces", []) or [])
+            if len(faces) > 1:
+                value = faces[1].get("cmc", value)
+        elif (context.get("cast_as_adventure")
+              and hasattr(characteristic_card, "get_adventure_data")):
+            adventure = characteristic_card.get_adventure_data() or {}
+            mana_cost = str(adventure.get("cost", "") or "")
+            value = adventure.get("cmc", value)
+
+        try:
+            x_value = max(0, int(context.get("X", 0) or 0))
+        except (TypeError, ValueError):
+            x_value = 0
+        x_symbols = len(re.findall(r"\{X\}", mana_cost, re.IGNORECASE))
+        try:
+            return float(value) + x_value * x_symbols
+        except (TypeError, ValueError):
+            return value
+
     def _is_valid_target(self, source_id, target_id, caster, target_info, requirement):
         """Unified check for any target type."""
         gs = self.game_state
@@ -584,9 +634,8 @@ class TargetingSystem:
         if "mana value_restriction" in requirement:
             if characteristic_card is None:
                 return False
-            cmc = self._live_characteristic(
-                characteristic_card, 'cmc', None,
-                use_layers=target_zone == "battlefield")
+            cmc = self._target_mana_value(
+                characteristic_card, target_obj, target_zone)
             if not self._matches_numeric_restriction(
                     cmc, requirement["mana value_restriction"]):
                 return False

@@ -15011,7 +15011,9 @@ def scenario_closure_zone_and_crew_transactions():
         "When this creature enters, if you cast it, you may put a card you "
         "own from outside the game into your hand.",
         source_name='North Wind Avatar')[0]
-    assert outside.apply(gs, source, controller, {}, context={'source_zone': 'hand'})
+    assert outside.apply(
+        gs, source, controller, {},
+        context={'was_cast': True, 'cast_controller_id': 'p1'})
     gs.agent_is_p1 = True
     assert get_env().action_handler._handle_choose_mode(0, {})[1]
     assert wish in controller['hand'] and wish not in controller['outside_game']

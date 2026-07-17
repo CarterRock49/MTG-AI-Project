@@ -1131,6 +1131,12 @@ class ChoiceHandlersMixin:
         if ctx.get("resume_cast"):
             cast_context = dict(ctx.get("original_cast_context", {}))
             cast_context["targets"] = categorized_targets
+            # Resolution must revalidate against the instruction/mode that
+            # actually created these targets.  Falling back to a modal card's
+            # entire Oracle text can apply another mode's restriction and
+            # discard a legal target (Prismari Charm lost its player target to
+            # the nonland-permanent bounce mode).
+            cast_context["targeting_text"] = ctx.get("effect_text", "")
             if targets_by_slot:
                 cast_context["targets_by_slot"] = targets_by_slot
             card_id = ctx.get("source_id")
@@ -2212,6 +2218,14 @@ class ChoiceHandlersMixin:
                 logging.warning("Bargain choice called for the wrong player.")
                 return -0.2, False
             success = gs.complete_bargain_choice(param)
+            return (0.05 if success else -0.1), success
+        if (getattr(gs, 'choice_context', None)
+                and gs.choice_context.get('type') == 'gift'):
+            player = gs.p1 if gs.agent_is_p1 else gs.p2
+            if gs.choice_context.get('player') is not player or param != 0:
+                logging.warning("Gift choice called with an invalid option or player.")
+                return -0.2, False
+            success = gs.complete_gift_choice(True)
             return (0.05 if success else -0.1), success
         if (getattr(gs, 'choice_context', None)
                 and gs.choice_context.get('type') == 'manifest_dread'):

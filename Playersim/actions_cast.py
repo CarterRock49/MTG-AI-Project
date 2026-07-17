@@ -378,6 +378,7 @@ class CastingHandlersMixin:
 
         option = castable_options[param]
         card_id = option["card_id"]
+        card = gs._safe_get_card(card_id)
         # Verify card still exists in player's exile (might have moved)
         if card_id not in player.get("exile",[]):
              logging.warning(f"CAST_FROM_EXILE: Card {card_id} no longer in {player['name']}'s exile.")
@@ -396,6 +397,18 @@ class CastingHandlersMixin:
         card_value = 0
         if self.card_evaluator:
             card_value = self.card_evaluator.evaluate_card(card_id, "play")
+
+        is_land = bool(
+            card and ("land" in getattr(card, "card_types", [])
+                      or "land" in str(
+                          getattr(card, "type_line", "")).lower()))
+        if is_land:
+            if option.get("permission") != "ordinary":
+                return -0.1, False
+            success = gs.play_land(
+                card_id, player, source_zone="exile", permission="exile")
+            return ((0.2 + card_value * 0.3, True)
+                    if success else (-0.1, False))
 
         success = gs.cast_spell(card_id, player, context=context)
         if success:

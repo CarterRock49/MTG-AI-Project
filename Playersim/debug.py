@@ -3,13 +3,66 @@
 import logging
 import traceback
 import os
+import sys
 import atexit
 import numpy as np
 from datetime import datetime
 from logging.handlers import RotatingFileHandler
 
-# Create bugs directory if it doesn't exist
-os.makedirs("bugs", exist_ok=True)
+def _looks_like_test_process(argv=None, environ=None):
+    """Identify repository test runners without relying on one framework."""
+    if argv is None:
+        argv = list(sys.argv)
+        invocation = list(getattr(sys, "orig_argv", ()) or ())
+    else:
+        argv = list(argv)
+        invocation = list(argv)
+    environ = os.environ if environ is None else environ
+    explicit = str(environ.get("PLAYERSIM_TEST_MODE", "")).strip().lower()
+    if explicit in {"1", "true", "yes", "on"}:
+        return True
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    if environ.get("PYTEST_CURRENT_TEST"):
+        return True
+    if not argv:
+        return False
+    lowered_invocation = [str(token).strip().lower()
+                          for token in invocation]
+    if any(token in {"pytest", "py.test", "unittest"}
+           for token in lowered_invocation):
+        return True
+    executable = os.path.basename(str(argv[0])).lower()
+    if executable.startswith("pytest") or executable in {
+            "py.test", "unittest", "unittest.exe"}:
+        return True
+    normalized = str(argv[0]).replace("\\", "/").lower()
+    filename = normalized.rsplit("/", 1)[-1]
+    return (
+        "/tests/" in f"/{normalized.lstrip('/')}"
+        or "/unittest/" in f"/{normalized.lstrip('/')}"
+        or filename.endswith(("_test.py", "test.py"))
+    )
+
+
+def _resolve_bug_log_directory(argv=None, environ=None):
+    """Route synthetic test logs away from operator-facing run logs."""
+    environ = os.environ if environ is None else environ
+    override = str(environ.get("PLAYERSIM_BUG_LOG_DIR", "")).strip()
+    if override:
+        return os.path.normpath(override)
+    return os.path.join(
+        "bugs", "tests") if _looks_like_test_process(
+            argv=argv, environ=environ) else "bugs"
+
+
+TEST_LOG_CONTEXT = _looks_like_test_process()
+if TEST_LOG_CONTEXT:
+    # Windows spawned workers import this module afresh.  Mark the parent
+    # environment so every child keeps the same isolated destination.
+    os.environ.setdefault("PLAYERSIM_TEST_MODE", "1")
+BUG_LOG_DIRECTORY = _resolve_bug_log_directory()
+os.makedirs(BUG_LOG_DIRECTORY, exist_ok=True)
 
 # Keep only the most recent logs of each family so bugs/ stops growing
 # without bound across runs.
@@ -40,7 +93,7 @@ def _prune_old_logs(directory="bugs", keep=KEEP_RECENT_LOGS):
             except OSError:
                 pass  # still open in another process; the next run gets it
 
-_prune_old_logs()
+_prune_old_logs(BUG_LOG_DIRECTORY)
 
 # Configure logging based on debug mode
 DEBUG_MODE = False
@@ -58,7 +111,7 @@ BACKUP_COUNT = KEEP_RECENT_LOGS - 1
 # file until a record is actually written: importing this module used to
 # leave three empty timestamped files behind on every run.
 error_handler = RotatingFileHandler(
-    os.path.join("bugs", f"mtg_errors_{timestamp}.log"),
+    os.path.join(BUG_LOG_DIRECTORY, f"mtg_errors_{timestamp}.log"),
     maxBytes=MAX_LOG_SIZE,
     backupCount=BACKUP_COUNT,
     encoding="utf-8",
@@ -70,7 +123,7 @@ error_handler.setFormatter(logging.Formatter('%(asctime)s - %(levelname)s - %(fi
 
 # Set up warning file handler with rotation
 warning_handler = RotatingFileHandler(
-    os.path.join("bugs", f"mtg_warnings_{timestamp}.log"),
+    os.path.join(BUG_LOG_DIRECTORY, f"mtg_warnings_{timestamp}.log"),
     maxBytes=MAX_LOG_SIZE,
     backupCount=BACKUP_COUNT,
     encoding="utf-8",
@@ -89,7 +142,7 @@ warning_handler.addFilter(WarningFilter())
 
 # Set up debug file handler with rotation
 debug_handler = RotatingFileHandler(
-    os.path.join("bugs", f"mtg_debug_{timestamp}.log"),
+    os.path.join(BUG_LOG_DIRECTORY, f"mtg_debug_{timestamp}.log"),
     maxBytes=MAX_LOG_SIZE,
     backupCount=BACKUP_COUNT,
     encoding="utf-8",
@@ -123,7 +176,7 @@ def _shutdown_bug_logging():
             handler.close()
         except (OSError, ValueError):
             pass
-    _prune_old_logs()
+    _prune_old_logs(BUG_LOG_DIRECTORY)
 
 
 atexit.register(_shutdown_bug_logging)

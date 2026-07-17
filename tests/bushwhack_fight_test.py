@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import unittest
+from collections import Counter
 from pathlib import Path
 
 
@@ -110,6 +111,73 @@ class BushwhackFightTest(unittest.TestCase):
         game_state.check_state_based_actions()
         self.assertIn(enemy, opponent["graveyard"])
         self.assertIn(friendly, controller["battlefield"])
+
+    def test_real_search_mode_exposes_the_basic_land_choice_to_policy(self):
+        game_state, handler, controller, _, bushwhack = \
+            self._state(196300)
+        first_land = inject_into_zone(game_state, controller, {
+            "name": "Bushwhack Forest", "mana_cost": "", "cmc": 0,
+            "type_line": "Basic Land - Forest", "oracle_text": "",
+            "color_identity": ["G"],
+        }, "library")
+        second_land = inject_into_zone(game_state, controller, {
+            "name": "Bushwhack Island", "mana_cost": "", "cmc": 0,
+            "type_line": "Basic Land - Island", "oracle_text": "",
+            "color_identity": ["U"],
+        }, "library")
+
+        self.assertTrue(game_state.cast_spell(bushwhack, controller))
+        self.assertTrue(handler._handle_choose_mode(0, {})[1])
+        self.assertTrue(game_state.resolve_top_of_stack())
+        choice = game_state.choice_context
+        self.assertIsNotNone(choice)
+        self.assertEqual(choice.get("type"), "dig_select")
+        self.assertTrue(choice.get("optional"))
+        self.assertIn(first_land, choice.get("options", []))
+        self.assertIn(second_land, choice.get("options", []))
+
+        controller_is_p1 = controller is game_state.p1
+        game_state.agent_is_p1 = controller_is_p1
+        selected_index = choice["options"].index(second_land)
+        choice["choice_page"] = selected_index // 10
+        self.assertTrue(handler._handle_choose_mode(
+            selected_index % 10, {})[1])
+        self.assertIn(second_land, controller["hand"])
+        self.assertIn(first_land, controller["library"])
+        self.assertIn(bushwhack, controller["graveyard"])
+
+    def test_real_search_mode_may_fail_to_find_and_still_shuffles(self):
+        game_state, handler, controller, _, bushwhack = \
+            self._state(196304)
+        legal_land = inject_into_zone(game_state, controller, {
+            "name": "Declined Bushwhack Forest", "mana_cost": "", "cmc": 0,
+            "type_line": "Basic Land - Forest", "oracle_text": "",
+            "color_identity": ["G"],
+        }, "library")
+
+        self.assertTrue(game_state.cast_spell(bushwhack, controller))
+        self.assertTrue(handler._handle_choose_mode(0, {})[1])
+        self.assertTrue(game_state.resolve_top_of_stack())
+        self.assertIn(legal_land, game_state.choice_context.get("options", []))
+        library_before = Counter(controller["library"])
+
+        shuffle_calls = []
+        state_type = type(game_state)
+        original_shuffle = state_type.shuffle_library
+
+        def recording_shuffle(state, player):
+            shuffle_calls.append(player)
+            return original_shuffle(state, player)
+
+        from unittest.mock import patch
+        with patch.object(state_type, "shuffle_library", recording_shuffle):
+            self.assertTrue(handler._handle_pass_priority(None)[1])
+
+        self.assertEqual(shuffle_calls, [controller])
+        self.assertEqual(Counter(controller["library"]), library_before)
+        self.assertIn(legal_land, controller["library"])
+        self.assertIn(bushwhack, controller["graveyard"])
+        self.assertIsNone(game_state.choice_context)
 
     def test_fight_mode_mask_requires_one_legal_creature_in_each_role(self):
         cases = (

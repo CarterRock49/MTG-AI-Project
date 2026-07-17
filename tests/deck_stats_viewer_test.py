@@ -151,15 +151,49 @@ class DeckStatsViewerTest(unittest.TestCase):
         _write_json(replay_path, replay_payload)
         debug_payload = {
             "schema_version": 1,
+            "card_catalog": {
+                "schema_version": 1,
+                "entries": [
+                    {"runtime_id": 901, "canonical_id": 101,
+                     "name": "Shared Name", "owner": "p1"},
+                    {"runtime_id": 902, "canonical_id": 102,
+                     "name": "Opponent Card", "owner": "p2"},
+                ],
+                "recorded_entries": 2,
+                "omitted_entries": 0,
+            },
             "replay": {
                 "version": 3,
                 "seed": 7001,
-                "actions": [{"action": 20, "context": {"source_idx": 0}}],
+                "actions": [{"action": 20, "context": {"card_id": 901},
+                             "trace_sequence": 0}],
             },
             "trace": [{
                 "sequence": 0,
                 "actor": "learned",
                 "action": 20,
+                "label": "PLAY_SPELL (0)",
+                "context": {"card_id": 901, "target_id": 902},
+                "pre": {
+                    "turn": 2, "phase_name": "MAIN_PRECOMBAT",
+                    "priority_player": "p1", "stack": [],
+                    "p1": {"life": 20, "poison_counters": 0,
+                           "zones": {"hand": {"count": 1,
+                                               "cards": [901]}}},
+                    "p2": {"life": 20, "poison_counters": 0,
+                           "zones": {}},
+                },
+                "post": {
+                    "turn": 2, "phase_name": "MAIN_PRECOMBAT",
+                    "priority_player": "p1",
+                    "stack": [{"kind": "spell", "source_id": 901,
+                               "controller": "p1"}],
+                    "p1": {"life": 20, "poison_counters": 0,
+                           "zones": {"hand": {"count": 0,
+                                               "cards": []}}},
+                    "p2": {"life": 20, "poison_counters": 0,
+                           "zones": {}},
+                },
                 "evaluator": {
                     "schema_version": 1,
                     "capture_scope": "pre-and-during-atomic-action",
@@ -205,6 +239,16 @@ class DeckStatsViewerTest(unittest.TestCase):
                         },
                     }],
                 },
+            }, {
+                "sequence": 1,
+                "actor": "opponent",
+                "action": 11,
+                "label": "PASS_PRIORITY",
+                "context": {},
+                "pre": {"turn": 2, "phase_name": "MAIN_PRECOMBAT",
+                        "priority_player": "p2", "stack": []},
+                "post": {"turn": 2, "phase_name": "MAIN_PRECOMBAT",
+                         "priority_player": "p1", "stack": []},
             }],
             "terminal": {
                 "game_result": "win",
@@ -223,6 +267,20 @@ class DeckStatsViewerTest(unittest.TestCase):
                     "pending": 0,
                 },
                 "unattached": [],
+            },
+            "capture": {
+                "trace": {"recorded_events": 2, "dropped_events": 0,
+                          "serialized_bytes": 1024,
+                          "sanitization_omissions": 0,
+                          "serialization_errors": 0},
+                "replay": {"recorded_events": 1, "dropped_events": 0,
+                           "serialized_bytes": 128,
+                           "sanitization_omissions": 0,
+                           "serialization_errors": 0},
+                "terminal": {"serialized_bytes": 2048,
+                             "sanitization_omissions": 0,
+                             "serialization_errors": 0},
+                "errors": [],
             },
         }
         debug_sidecar = (
@@ -254,7 +312,7 @@ class DeckStatsViewerTest(unittest.TestCase):
                 episodes[0]["debug_path"] = "games/200/case_000.json.gz"
                 episodes[0]["debug_sha256"] = debug_sidecar_sha256
                 episodes[0]["debug_size_bytes"] = len(debug_sidecar_bytes)
-                episodes[0]["trace_event_count"] = 1
+                episodes[0]["trace_event_count"] = 2
                 episodes[0]["replay_action_count"] = 1
                 # Full verified debug must outrank this terminal-only fallback.
                 episodes[0]["policy_state"] = {"legacy_fallback": True}
@@ -867,6 +925,50 @@ class DeckStatsViewerTest(unittest.TestCase):
         self.assertEqual(self.repository.overview()["run_count"], 1)
         self.assertEqual(self.repository.overview()["stats_source_count"], 2)
 
+    def test_generated_test_artifacts_are_not_discovered_as_user_stats(self):
+        synthetic = (
+            self.root / "tests" / "test_artifacts" / "fake-run"
+            / "deck_stats")
+        _write_jsonl(synthetic / "game_log.jsonl", [{
+            "game_id": "synthetic-test-only", "result": "win",
+        }])
+        _write_json(synthetic / "fidelity_report.json", {
+            "games_recorded": 1,
+        })
+
+        overview = self.repository.refresh()
+        self.assertEqual(overview["stats_source_count"], 2)
+        self.assertIn("tests/test_artifacts",
+                      overview["ignored_artifact_roots"])
+        self.assertFalse(any(
+            source["relative_path"].startswith("tests/test_artifacts/")
+            for source in self.repository.stats_sources()
+        ))
+
+    def test_related_worker_scope_totals_are_visible_but_not_silently_merged(self):
+        sibling = (
+            self.root / "logs" / self.RUN_ID / "environment_data"
+            / "eval" / "env_1" / "deck_stats")
+        _write_jsonl(sibling / "game_log.jsonl", [
+            {"game_id": "sibling-0", "result": "win"},
+            {"game_id": "sibling-1", "result": "loss"},
+        ])
+        _write_json(sibling / "fidelity_report.json", {
+            "games_recorded": 2,
+        })
+        self.repository.refresh()
+
+        source = next(
+            item for item in self.repository.stats_sources()
+            if item["relative_path"].endswith("eval/env_0/deck_stats")
+        )
+        bundle = self.repository.stats_bundle(source["id"])
+        related = bundle["related_sources"]
+        self.assertEqual(related["source_count"], 2)
+        self.assertEqual(related["total_game_count"], 7)
+        self.assertEqual(related["aggregation"], "not_merged")
+        self.assertEqual(bundle["game_count"], 5)
+
     def test_conflicting_checkpoint_never_relaxed_joins_game_log(self):
         path = (
             self.root / "logs" / self.RUN_ID / "environment_data"
@@ -931,6 +1033,18 @@ class DeckStatsViewerTest(unittest.TestCase):
         self.assertFalse(games[0]["terminal_debug_available"])
         self.assertNotIn("replay", games[1])
         self.assertEqual(games[2]["debug"]["trace"][0]["action"], 20)
+        self.assertEqual(len(games[2]["debug"]["trace"]), 2)
+        self.assertEqual(
+            games[2]["debug"]["card_catalog"]["entries"][0]["name"],
+            "Shared Name",
+        )
+        self.assertEqual(
+            games[2]["debug_summary"]["trace_actor_counts"],
+            {"learned": 1, "opponent": 1},
+        )
+        self.assertEqual(
+            games[2]["debug_summary"]["capture_status"], "complete")
+        self.assertEqual(games[2]["debug_summary"]["card_catalog_count"], 2)
         self.assertNotIn("legacy_fallback", games[2]["debug"])
         self.assertTrue(games[2]["trace_available"])
         self.assertTrue(games[2]["replay_available"])
@@ -1173,13 +1287,17 @@ class DeckStatsViewerTest(unittest.TestCase):
         for marker in (
                 "contract_valid", "data-evaluator-page",
                 "data-evaluator-event-index", "data-action-page",
-                "data-action-index", "statsRequestGeneration",
+                "data-action-index", "data-replay-index", "renderStateDelta",
+                "renderDecisionSnapshot", "valid_actions", "buildCardCatalog",
+                "Played when seen", "games_drawn", "usage_count",
+                "statsRequestGeneration",
                 "runRequestGeneration", "state.currentTraceReplay = {trace,replay}",
                 "terminal_debug_available", "checkpoint_sha256=",
                 "record_id=", "Number.NEGATIVE_INFINITY"):
             self.assertIn(marker, source)
         self.assertNotIn('pretty(value(step,"context"))', source)
         self.assertNotIn("trace || replay", source)
+        self.assertNotIn("automatic atomic actions", source)
         self.assertNotIn(
             '<h4>Terminal diagnostics</h4><pre class="raw">${escapeHTML(pretty(debug))}',
             source,

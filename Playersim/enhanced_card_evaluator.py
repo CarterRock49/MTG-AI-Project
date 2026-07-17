@@ -1,6 +1,7 @@
 import json
 import logging
 import math
+import re
 import numpy as np
 from typing import Dict, List, Any, Tuple
 
@@ -1225,7 +1226,6 @@ class EnhancedCardEvaluator:
             # Card selection (scry, surveil, etc.)
             if 'scry' in card_text:
                 # Extract scry amount
-                import re
                 scry_match = re.search(r'scry (\d+)', card_text)
                 if scry_match:
                     scry_amount = int(scry_match.group(1))
@@ -1233,11 +1233,30 @@ class EnhancedCardEvaluator:
             
             if 'surveil' in card_text:
                 # Extract surveil amount
-                import re
                 surveil_match = re.search(r'surveil (\d+)', card_text)
                 if surveil_match:
                     surveil_amount = int(surveil_match.group(1))
                     value += min(0.5, surveil_amount * 0.12)  # Slightly better than scry
+
+            # Impulse draw is real card access even though it does not use the
+            # word "draw". Longer permissions are modestly more flexible.
+            impulse_match = re.search(
+                r"exile the top\s+(?:(\d+|one|two|three|four|five)\s+)?card",
+                card_text)
+            if impulse_match and re.search(r"\bmay (?:play|cast)\b", card_text):
+                word_counts = {
+                    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+                raw_count = impulse_match.group(1)
+                impulse_count = (
+                    int(raw_count) if raw_count and raw_count.isdigit()
+                    else word_counts.get(raw_count, 1))
+                value += min(1.0, impulse_count * 0.45)
+                if "end of your next turn" in card_text:
+                    value += 0.1
+
+            life_gain_match = re.search(r"\bgain(?:s)?\s+(\d+)\s+life\b", card_text)
+            if life_gain_match:
+                value += min(0.6, int(life_gain_match.group(1)) * 0.12)
                     
             # Removal effects with quality assessment
             removal_value = 0
@@ -1278,14 +1297,16 @@ class EnhancedCardEvaluator:
                     removal_value *= 1.1
             
             # Damage-based removal
-            elif 'deals' in card_text and 'damage to target' in card_text:
-                import re
+            elif re.search(
+                    r"\bdeals\s+\d+\s+damage\s+to\s+"
+                    r"(?:(?:any|up to one)\s+)?target\b", card_text):
                 damage_match = re.search(r'deals (\d+) damage', card_text)
                 if damage_match:
                     damage = int(damage_match.group(1))
                     removal_value = min(0.8, damage * 0.2)  # Value scales with damage
                     
-                    if 'creature' in card_text and 'player' in card_text:
+                    if ('any target' in card_text
+                            or ('creature' in card_text and 'player' in card_text)):
                         removal_value *= 1.2  # Flexible targeting is better
             
             # Return to hand (temporary removal)

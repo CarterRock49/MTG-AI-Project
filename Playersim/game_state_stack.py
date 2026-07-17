@@ -8,7 +8,8 @@ import copy as copy_module
 import logging
 from .ability_utils import EffectFactory
 import re
-from .ability_types import BoundExileTriggeredAbility, TriggeredAbility
+from .ability_types import (
+    BoundExileTriggeredAbility, CreateTokenEffect, TriggeredAbility)
 from .card import Card
 from .targeting import aura_cast_targeting_text
 
@@ -681,6 +682,12 @@ class GameStateStackMixin:
         if listed:
             maximum = 3 if "three" in listed.group(0) else 2 if "two" in listed.group(0) else 1
             return 1, maximum
+        ranged = re.search(
+            r"\b(one|two|three|four)\s+or\s+"
+            r"(two|three|four|five)\s+(?:other\s+)?targets?\b", text)
+        if ranged:
+            counts = {"one": 1, **word_counts}
+            return counts[ranged.group(1)], counts[ranged.group(2)]
         counted = re.search(r"\btarget\s+(two|three|four|five)\b", text)
         if not counted:
             counted = re.search(
@@ -799,7 +806,12 @@ class GameStateStackMixin:
             segment = raw_segment.strip()
             if not segment:
                 continue
-            if segments and linked_reference.match(segment):
+            # A linked sentence that announces another target is a separate
+            # resolving instruction/target role ("It deals ... to target ...").
+            # Linked riders without a new target stay attached to the prior
+            # instruction so they can consume its result.
+            if (segments and linked_reference.match(segment)
+                    and not re.search(r"\btarget\b", segment, re.IGNORECASE)):
                 segments[-1] = f"{segments[-1]} {segment}"
             else:
                 segments.append(segment)
@@ -900,6 +912,26 @@ class GameStateStackMixin:
         if len(instructions) == 1:
             return instructions[0].get('effect_text', effect_text)
         return effect_text
+
+    @staticmethod
+    def _gift_targeting_texts(effect_text):
+        """Return the ordinary and promised target instructions for Gift."""
+        text = str(effect_text or "")
+        if not re.search(r"\bgift a tapped fish\b", text, re.IGNORECASE):
+            return ()
+        ordinary = re.search(
+            r"(return target creature an opponent controls to its "
+            r"owner(?:'|\u2019)s hand)\s*\.", text, re.IGNORECASE)
+        promised = re.search(
+            r"if the gift was promised,\s*instead\s*(return target nonland "
+            r"permanent an opponent controls to its owner(?:'|\u2019)s hand)\s*\.",
+            text, re.IGNORECASE)
+        if not ordinary or not promised:
+            return ()
+        return (
+            ordinary.group(1).strip().capitalize() + ".",
+            promised.group(1).strip().capitalize() + ".",
+        )
 
     def _categorize_targets_for_slot(self, slot, target_ids):
         """Categorize targets using the announced slot, not shared card IDs."""
@@ -1766,6 +1798,38 @@ class GameStateStackMixin:
         cast_context["bargain_sacrifice_id"] = selected_id
         return self._resume_after_casting_choice(choice, cast_context)
 
+    def complete_gift_choice(self, promised=False):
+        """Announce whether a Gift is promised and resume the pending cast."""
+        choice = getattr(self, "choice_context", None)
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "gift"):
+            return False
+        if not isinstance(promised, bool):
+            return False
+        card = self._safe_get_card(choice.get("card_id"))
+        branches = self._gift_targeting_texts(
+            getattr(card, "oracle_text", "") if card else "")
+        if len(branches) != 2:
+            return False
+        chosen_text = branches[1 if promised else 0]
+        controller = choice.get("controller") or choice.get("player")
+        minimum, _ = self._target_bounds_from_text(chosen_text)
+        target_type = self._get_target_type_from_text(chosen_text)
+        valid_map = self.targeting_system.get_valid_targets(
+            choice.get("card_id"), controller, target_type,
+            effect_text=chosen_text)
+        valid_ids = {
+            target_id for target_ids in valid_map.values()
+            for target_id in target_ids}
+        if len(valid_ids) < minimum:
+            return False
+        cast_context = dict(choice.get("original_cast_context", {}))
+        cast_context["gift_choice_complete"] = True
+        cast_context["gift_promised"] = promised
+        cast_context["effect_text"] = chosen_text
+        cast_context["targeting_text"] = chosen_text
+        return self._resume_after_casting_choice(choice, cast_context)
+
     def choose_casting_additional_return(self, option_index):
         """Stage the permanent chosen for a mandatory casting cost."""
         choice = self.choice_context
@@ -2537,6 +2601,21 @@ class GameStateStackMixin:
                     final_cost_dict, mode_cost)
                 context['spree_mode_costs'].append(mode_cost_text)
 
+        # Gift is announced while casting. The promised branch has different
+        # target restrictions, so choose it before target selection begins.
+        gift_branches = self._gift_targeting_texts(
+            context.get("effect_text", getattr(card, "oracle_text", "")))
+        if gift_branches and not context.get("gift_choice_complete", False):
+            self._begin_casting_choice({
+                "type": "gift", "player": player, "controller": player,
+                "card_id": card_id, "source_id": card_id,
+                "options": ["promise"], "optional": True,
+                "original_cast_context": self._copy_stack_context(context),
+            })
+            logging.info(
+                "Waiting for Gift choice before casting %s.", card.name)
+            return True
+
         # Work out target bounds before the final cost because some sample
         # spells price themselves from the targets chosen at CR 601.2c.
         requires_target = False
@@ -3066,11 +3145,8 @@ class GameStateStackMixin:
             payment_grants_cant_be_countered = bool(
                 paid_mana_details.get("payment", {}).get(
                     "grants_cant_be_countered"))
-            if source_zone == "exile" and hasattr(self, "cards_castable_from_exile"):
-                 self.cards_castable_from_exile.discard(card_id)
-                 getattr(self, "exile_alternative_costs", {}).pop(card_id, None)
             if source_zone == "exile":
-                 self._consume_plot_permission(player, card_id)
+                 self._clear_exile_play_permissions(player, card_id)
             if source_zone == "graveyard" and context.get(
                     "graveyard_adventure_cast"):
                  self._consume_graveyard_adventure_permission(player, card_id)
@@ -3364,6 +3440,12 @@ class GameStateStackMixin:
                 if not (has_emblem_permission or has_permanent_permission):
                     logging.warning("No effect permits this graveyard land play.")
                     return False
+            if (source_zone == "exile"
+                    and (permission != "exile"
+                         or card_id not in getattr(
+                             self, "cards_castable_from_exile", set()))):
+                logging.warning("No effect permits this exile land play.")
+                return False
             
             # Check if the card is actually a land (checking the correct face)
             card = self._safe_get_card(card_id)
@@ -4178,17 +4260,27 @@ class GameStateStackMixin:
 
             modal_effects = []
             mode_targets = self._effect_targets_from_context(context)
-            for mode_idx in selected_modes_indices:
-                if 0 <= mode_idx < len(all_modes_text):
-                     mode_text = all_modes_text[mode_idx]
-                     logging.debug(f"Applying mode {mode_idx}: '{mode_text}'")
-                     # Create and apply effects for THIS mode's text
-                     # Pass targets that were selected *for the whole spell* if available
-                     # If modes have separate targets, targeting phase needs modification. Assume shared targets for now.
-                     effects = EffectFactory.create_effects(mode_text, mode_targets, source_name=getattr(spell, 'name', None))
-                     modal_effects.extend(effects)
-                else:
-                     logging.warning(f"Invalid mode index {mode_idx} found in context for {spell_name}")
+            parsed_all_modes = True
+            if context.get("instruction_target_slots"):
+                selected_text = " ".join(
+                    all_modes_text[mode_idx]
+                    for mode_idx in selected_modes_indices
+                    if 0 <= mode_idx < len(all_modes_text))
+                modal_effects, parsed_all_modes = \
+                    self._ordinary_instruction_effects(
+                        spell, selected_text, context)
+            else:
+                for mode_idx in selected_modes_indices:
+                    if 0 <= mode_idx < len(all_modes_text):
+                         mode_text = all_modes_text[mode_idx]
+                         logging.debug(f"Applying mode {mode_idx}: '{mode_text}'")
+                         effects = EffectFactory.create_effects(
+                             mode_text, mode_targets,
+                             source_name=getattr(spell, 'name', None))
+                         modal_effects.extend(effects)
+                    else:
+                         parsed_all_modes = False
+                         logging.warning(f"Invalid mode index {mode_idx} found in context for {spell_name}")
 
             finalizer = {
                 'kind': 'modal_spell', 'source_id': spell_id,
@@ -4198,7 +4290,9 @@ class GameStateStackMixin:
             success, pending = self._run_effect_sequence(
                 modal_effects, spell_id, controller, mode_targets,
                 context=context, finalizer=finalizer,
-                initial_success=bool(modal_effects))
+                initial_success=(
+                    parsed_all_modes if context.get("instruction_target_slots")
+                    else bool(modal_effects)))
             return True if pending else success
 
         # --- NON-MODAL SPELL RESOLUTION ---
@@ -4705,6 +4799,10 @@ class GameStateStackMixin:
                 effects = EffectFactory.create_effects(
                     resolving_text, effect_targets,
                     source_name=spell_name)
+            if context.get("gift_promised"):
+                effects.insert(0, CreateTokenEffect(
+                    1, 1, "Fish", colors=["blue"],
+                    controller_gets=False, enters_tapped=True))
         else:
             logging.warning("No ability handler found to resolve instant/sorcery effects.")
             parsed_all_instructions = False

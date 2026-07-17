@@ -98,6 +98,11 @@ class ViewerRepository:
         ".git", ".hg", ".svn", ".mypy_cache", ".pytest_cache",
         "__pycache__", "MTGenv", "node_modules", ".venv", "venv",
     })
+    # These are generated test outputs, not user runs.  Keep the exclusion
+    # precise so a real project directory merely named ``tests`` remains
+    # inspectable while the repository's synthetic DeckStats fixtures never
+    # appear beside production scopes.
+    _IGNORED_ARTIFACT_ROOTS = (("tests", "test_artifacts"),)
     _HARVEST_MANIFESTS = {
         "harvest_run.json": "harvest_run",
         "harvest_protocol.json": "harvest_protocol",
@@ -183,6 +188,9 @@ class ViewerRepository:
                 int(row.get("card_count") or 0) for row in source_rows),
             "statuses": dict(sorted(statuses.items())),
             "latest_run_id": run_rows[0]["run_id"] if run_rows else None,
+            "ignored_artifact_roots": [
+                "/".join(parts) for parts in self._IGNORED_ARTIFACT_ROOTS
+            ],
             "scan_errors": _json_safe(self._scan_errors),
             "diagnostics": _json_safe(self._scan_errors),
         }
@@ -287,6 +295,14 @@ class ViewerRepository:
                             normalized["replay"] = replay
                         if debug is not None:
                             normalized["debug"] = debug
+                            derived_summary = self._evaluation_debug_summary(
+                                debug)
+                            if derived_summary is not None:
+                                normalized["debug_summary"] = {
+                                    **_as_mapping(normalized.get(
+                                        "debug_summary")),
+                                    **derived_summary,
+                                }
                             debug_source_key = (
                                 debug_artifact.get("source_key")
                                 if isinstance(debug_artifact, Mapping) else None
@@ -383,12 +399,18 @@ class ViewerRepository:
                     "diagnostics", "policy_state",
                 }
             )
+            derived_summary = self._evaluation_debug_summary(debug)
+            debug_summary = {
+                **_as_mapping(game.get("debug_summary")),
+                **_as_mapping(derived_summary),
+            } or None
             return _json_safe({
                 "run_id": str(run_id),
                 "evaluation_timestep": target_timestep,
                 "case_index": target_case,
                 "record_id": game.get("record_id"),
                 "checkpoint_sha256": game.get("checkpoint_sha256"),
+                "debug_summary": debug_summary,
                 "debug": debug,
                 "replay": replay,
                 "debug_available": debug is not None,
@@ -481,8 +503,30 @@ class ViewerRepository:
 
             game_path = base / "game_log.jsonl"
             total_games = self._jsonl_count(game_path) if game_path.is_file() else 0
+            related_sources = [
+                self._stats_source_summary(candidate)
+                for candidate in self._stats_by_id.values()
+                if candidate.get("id") == source.get("id") or (
+                    source.get("run_id") is not None
+                    and candidate.get("run_id") == source.get("run_id")
+                    and candidate.get("kind") == source.get("kind")
+                )
+            ]
+            related_sources.sort(key=lambda item: (
+                str(item.get("scope") or "").casefold(),
+                str(item.get("relative_path") or "").casefold(),
+            ))
             return _json_safe({
                 "source": self._stats_source_summary(source),
+                "related_sources": {
+                    "same_run_and_kind": related_sources,
+                    "source_count": len(related_sources),
+                    "total_game_count": sum(
+                        int(item.get("game_count") or 0)
+                        for item in related_sources),
+                    "selected_source_id": source.get("id"),
+                    "aggregation": "not_merged",
+                },
                 "game_count": total_games,
                 "fidelity_report": document("fidelity_report.json.gz", "fidelity_report.json"),
                 "card_support_manifest": document(
@@ -577,10 +621,21 @@ class ViewerRepository:
         for directory, child_names, file_names in os.walk(
                 self.project_root, topdown=True, onerror=on_error, followlinks=False):
             current = Path(directory)
+
+            def ignored_artifact_root(path: Path) -> bool:
+                relative = tuple(
+                    part.casefold() for part in self._relative_parts(path))
+                return any(
+                    relative[:len(prefix)] == tuple(
+                        part.casefold() for part in prefix)
+                    for prefix in self._IGNORED_ARTIFACT_ROOTS
+                )
+
             child_names[:] = sorted(
                 name for name in child_names
                 if name not in self._IGNORED_DIRECTORIES
                 and self._is_internal(current / name)
+                and not ignored_artifact_root(current / name)
             )
             file_names = sorted(file_names)
             file_set = set(file_names)
@@ -1704,6 +1759,91 @@ class ViewerRepository:
             "fidelity", "final_state", "done", "truncated",
         }
         return any(value.get(key) is not None for key in terminal_keys)
+
+    @staticmethod
+    def _evaluation_debug_summary(value: Any) -> dict[str, Any] | None:
+        """Index a loaded sidecar without copying its heavy event arrays."""
+        if not isinstance(value, Mapping):
+            if isinstance(value, (list, tuple)):
+                return {
+                    "schema_version": 1,
+                    "trace_event_count": len(value),
+                    "trace_actor_counts": {},
+                    "replay_action_count": 0,
+                    "card_catalog_count": 0,
+                    "capture_status": "not_recorded",
+                }
+            return None
+        trace = value.get("trace")
+        trace = trace if isinstance(trace, (list, tuple)) else ()
+        replay = value.get("replay")
+        replay_actions = replay.get("actions") \
+            if isinstance(replay, Mapping) else None
+        replay_actions = replay_actions \
+            if isinstance(replay_actions, (list, tuple)) else ()
+        actor_counts: Counter[str] = Counter()
+        for event in trace:
+            if isinstance(event, Mapping):
+                actor_counts[str(event.get("actor") or "unknown")] += 1
+
+        capture = value.get("capture")
+        capture_summary: dict[str, Any] = {}
+        degraded = False
+        if isinstance(capture, Mapping):
+            for scope in ("trace", "replay", "terminal"):
+                raw = capture.get(scope)
+                if not isinstance(raw, Mapping):
+                    continue
+                selected = {
+                    key: raw.get(key) for key in (
+                        "recorded_events", "dropped_events",
+                        "serialized_bytes", "sanitization_omissions",
+                        "serialization_errors") if key in raw
+                }
+                capture_summary[scope] = selected
+                degraded = degraded or any(
+                    (_integer(selected.get(key)) or 0) > 0 for key in (
+                        "dropped_events", "sanitization_omissions",
+                        "serialization_errors")
+                )
+            errors = capture.get("errors")
+            error_count = len(errors) \
+                if isinstance(errors, (list, tuple)) else 0
+            capture_summary["error_count"] = error_count
+            degraded = degraded or error_count > 0
+
+        catalog = value.get("card_catalog")
+        if isinstance(catalog, Mapping):
+            entries = catalog.get("entries")
+            catalog_count = len(entries) \
+                if isinstance(entries, (list, tuple)) \
+                else (_integer(catalog.get("recorded_entries")) or 0)
+            catalog_omitted = _integer(catalog.get("omitted_entries")) or 0
+        elif isinstance(catalog, (list, tuple)):
+            catalog_count, catalog_omitted = len(catalog), 0
+        else:
+            catalog_count, catalog_omitted = 0, 0
+        degraded = degraded or catalog_omitted > 0
+        terminal = _as_mapping(value.get("terminal"))
+        evaluator = _as_mapping(value.get("evaluator"))
+        return _json_safe({
+            "schema_version": 1,
+            "trace_event_count": len(trace),
+            "trace_actor_counts": dict(sorted(actor_counts.items())),
+            "replay_action_count": len(replay_actions),
+            "card_catalog_count": catalog_count,
+            "card_catalog_omitted": catalog_omitted,
+            "capture_status": "degraded" if degraded else (
+                "complete" if isinstance(capture, Mapping)
+                else "not_recorded"),
+            "capture": capture_summary,
+            "terminal": {
+                key: terminal.get(key) for key in (
+                    "game_result", "terminal_reason", "reward", "done",
+                    "truncated") if key in terminal
+            },
+            "evaluator": _as_mapping(evaluator.get("summary")) or None,
+        })
 
     @staticmethod
     def _evaluation_availability(

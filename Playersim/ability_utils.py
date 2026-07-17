@@ -822,7 +822,12 @@ class EffectFactory:
             # ``put it into your hand`` fragment after the real search.
             from .ability_types import SearchLibraryEffect
             return [SearchLibraryEffect(
-                search_type="basic land", destination="hand", count=1)]
+                search_type="basic land", destination="hand", count=1,
+                # A hidden-zone search with a quality restriction may legally
+                # fail to find, and the selected land materially affects play.
+                # Keep both decisions on the policy surface instead of using
+                # search_library_and_choose's deterministic fallback.
+                policy_choice=True, optional=True)]
 
         effects = []
 
@@ -1210,7 +1215,14 @@ class EffectFactory:
                 count = int(raw_count) if raw_count.isdigit() else text_to_number(raw_count)
             if not isinstance(count, int) or count <= 0:
                 count = 1
-            effects.append(ImpulseDrawEffect(count=count))
+            duration = (
+                "end_of_your_next_turn"
+                if re.search(
+                    r"until (?:the )?end of your next turn",
+                    effect_text, re.IGNORECASE)
+                else "end_of_turn")
+            effects.append(ImpulseDrawEffect(
+                count=count, duration=duration))
             return effects
 
         # "Exile ... until [this source] leaves" is one linked effect, not an
@@ -1479,7 +1491,12 @@ class EffectFactory:
                     amount_str = amount_match.group(1)
                     amount = 'x' if amount_str == 'x' else text_to_number(amount_str)
                 elif "damage equal to its power" in clause_lower:
-                    amount = "source_last_known_power"
+                    amount = (
+                        "previous_target_power"
+                        if re.search(
+                            r"\bit deals damage equal to its power\b",
+                            clause_lower)
+                        else "source_last_known_power")
                 target_desc = EffectFactory._extract_target_description(clause_lower) or "any target" # Changed default
                 target_type = "any target" # Default
                 if re.search(
@@ -1532,6 +1549,8 @@ class EffectFactory:
                  # Add specific type checks similar to Destroy
                  if "target creature or vehicle" in clause_lower:
                      target_type = "creature_or_vehicle"
+                 elif "artifact or enchantment" in clause_lower:
+                     target_type = "artifact_or_enchantment"
                  elif "creature" in norm_target_desc: target_type = "creature"
                  elif "artifact" in norm_target_desc: target_type = "artifact"
                  elif "enchantment" in norm_target_desc: target_type = "enchantment"
@@ -2083,7 +2102,7 @@ class EffectFactory:
                  # Determine target
                  target_desc = EffectFactory._extract_target_description(clause_lower) or "self" # Default to self if no target word
                  target_type = "self" # Default if self or not targeted
-                 if "target" in target_desc:
+                 if re.search(r"\btarget\b", clause_lower):
                      # Use a mapping or series of checks to determine best fit based on keywords in desc
                      if "creature" in target_desc: target_type = "target creature"
                      elif "artifact" in target_desc: target_type = "target artifact"
@@ -2153,7 +2172,14 @@ class EffectFactory:
                     n = text_to_number(num_match.group(1)) if not num_match.group(1).isdigit() else int(num_match.group(1))
                 if not isinstance(n, int) or n <= 0:
                     n = 1
-                created_effect = ImpulseDrawEffect(count=n)
+                duration = (
+                    "end_of_your_next_turn"
+                    if re.search(
+                        r"until (?:the )?end of your next turn",
+                        clause_lower)
+                    else "end_of_turn")
+                created_effect = ImpulseDrawEffect(
+                    count=n, duration=duration)
 
             elif re.search(r"\bmill(?:s)?\b", clause_lower):
                 count = 1

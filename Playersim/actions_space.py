@@ -791,6 +791,11 @@ class ActionSpaceMixin:
         if 'target' not in effect_text.lower(): return True
         if source_id is None or not getattr(gs, 'targeting_system', None):
             return False
+        gift_branches = gs._gift_targeting_texts(effect_text)
+        if gift_branches:
+            return any(self._targets_available_from_text(
+                branch, caster, opponent, source_id=source_id)
+                for branch in gift_branches)
         try:
             target_slots = gs._ordinary_target_slots(effect_text)
             if target_slots:
@@ -1191,6 +1196,22 @@ class ActionSpaceMixin:
                         context={"option_index": option_index},
                     )
                 set_valid_action(11, "DECLINE_BARGAIN")
+
+            elif choice_type == "gift":
+                card = gs._safe_get_card(context.get("card_id"))
+                branches = gs._gift_targeting_texts(
+                    getattr(card, "oracle_text", "") if card else "")
+                if len(branches) == 2:
+                    if self._targets_available_from_text(
+                            branches[1], choice_player,
+                            source_id=context.get("card_id")):
+                        set_valid_action(
+                            353, "PROMISE_GIFT",
+                            context={"option_index": 0})
+                    if self._targets_available_from_text(
+                            branches[0], choice_player,
+                            source_id=context.get("card_id")):
+                        set_valid_action(11, "DECLINE_GIFT")
 
             elif choice_type == "manifest_dread":
                 for option_index, card_id in enumerate(context.get("options", [])[:2]):
@@ -2351,6 +2372,11 @@ class ActionSpaceMixin:
         card_id = getattr(card, 'card_id', None)
         if card_id is None or not hasattr(card, 'oracle_text'):
             return True # No target needed or cannot check
+        gift_branches = gs._gift_targeting_texts(card.oracle_text)
+        if gift_branches:
+            return any(self._targets_available_from_text(
+                branch, caster, opponent, source_id=card_id)
+                for branch in gift_branches)
         aura_target_text = aura_cast_targeting_text(card)
         if not aura_target_text and 'target' not in card.oracle_text.lower():
             return True # No target needed.
@@ -2684,14 +2710,24 @@ class ActionSpaceMixin:
     def _add_exile_casting_actions(self, player, valid_actions, set_valid_action):
         """Add actions for casting spells from exile."""
         gs = self.game_state
-        if not gs.can_player_cast_spells(player):
-            return
 
         for i, option in enumerate(gs.get_exile_cast_options(player)[:8]):
             card = gs._safe_get_card(option["card_id"])
             if not card:
                 continue
-            if option.get("permission") == "plot":
+            is_land = bool(
+                "land" in getattr(card, "card_types", [])
+                or "land" in str(getattr(card, "type_line", "")).lower())
+            if is_land:
+                can_afford = bool(
+                    option.get("permission") == "ordinary"
+                    and gs.can_play_land_this_turn(player)
+                    and gs._can_act_at_sorcery_speed(player)
+                    and (gs.priority_player is None
+                         or gs.priority_player is player))
+            elif not gs.can_player_cast_spells(player):
+                continue
+            elif option.get("permission") == "plot":
                 can_afford = True
             elif option.get("alternative_cost") and hasattr(gs, 'mana_system'):
                 can_afford = gs.mana_system.can_pay_mana_cost(
@@ -2704,7 +2740,9 @@ class ActionSpaceMixin:
             if can_afford:
                 permission = option.get("permission", "exile")
                 set_valid_action(
-                    230 + i, f"CAST_FROM_EXILE {card.name} ({permission})",
+                    230 + i,
+                    f"{'PLAY' if is_land else 'CAST'}_FROM_EXILE "
+                    f"{card.name} ({permission})",
                     context={"exile_option_index": i})
 
     def _add_plot_actions(self, player, valid_actions, set_valid_action):

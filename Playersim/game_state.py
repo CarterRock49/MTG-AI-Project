@@ -66,7 +66,7 @@ class GameState(
                  "adventure_cards", "saga_counters", "mdfc_cards", "battle_cards", 'battle_attack_targets',
                  "melded_permanents", "mutated_permanents", "specialized_cards",
                  "last_die_roll", "die_roll_history",
-                 "cards_castable_from_exile", "exile_alternative_costs", "impulse_until_eot", "cast_as_back_face", "face_down_exile_cards", "face_down_exile_counts", 'planeswalker_attack_targets',
+                 "cards_castable_from_exile", "exile_alternative_costs", "impulse_until_eot", "impulse_until_next_turn", "cast_as_back_face", "face_down_exile_cards", "face_down_exile_counts", 'planeswalker_attack_targets',
                  # Additional slots for various tracking variables
                  "phased_out", 'original_p1_deck',
                  "suspended_cards",
@@ -726,6 +726,7 @@ class GameState(
             self.cards_castable_from_exile = set()
             self.exile_alternative_costs = {}
             self.impulse_until_eot = set() # impulse-drawn cards whose play permission expires at end of turn
+            self.impulse_until_next_turn = {} # card_id -> cleanup turn for longer impulse permission
             self.cast_as_back_face = set()
             # Prepare-layout permanents whose spell face can currently be cast
             # as a copy. This is object state, not a Card characteristic.
@@ -1205,6 +1206,7 @@ class GameState(
             "card_instance_printings", "card_instance_owners",
             "foretold_cards", "epic_spells", "morphed_cards", "manifested_cards",
             "copy_overrides", "plotted_cards", "graveyard_adventure_permissions",
+            "exile_alternative_costs", "impulse_until_next_turn",
             "flashback_permissions", "earthbent_lands",
             "face_down_exile_counts",
             "planeswalker_attack_targets", "battle_attack_targets", "planeswalker_protectors",
@@ -1215,7 +1217,7 @@ class GameState(
             "current_attackers", "blocked_attackers_this_combat",
             "exerted_this_combat", "first_strike_damage_participants",
             "attackers_this_turn", "adventure_cards", "mdfc_cards",
-            "cards_castable_from_exile", "exile_alternative_costs", "cast_as_back_face", "face_down_exile_cards", "prepared_cards", "phased_out", "kicked_cards",
+            "cards_castable_from_exile", "impulse_until_eot", "cast_as_back_face", "face_down_exile_cards", "prepared_cards", "phased_out", "kicked_cards",
             "evoked_cards", "blitz_cards", "dash_cards", "unearthed_cards", "jump_start_cards",
             "buyback_cards", "flashback_cards", "exile_at_end_of_combat", "haste_until_eot",
             "banding_creatures", "crewed_vehicles", "boast_activated", "forecast_used",

@@ -3611,6 +3611,91 @@ def _build_evaluation_episode(case_index, case, outcome, reward, length):
     return episode
 
 
+def _evaluation_debug_summary(debug):
+    """Build the compact index stored beside a heavy evaluation sidecar."""
+    if not isinstance(debug, dict):
+        return None
+    trace = debug.get("trace")
+    trace = trace if isinstance(trace, (list, tuple)) else ()
+    replay = debug.get("replay")
+    replay_actions = replay.get("actions") \
+        if isinstance(replay, dict) else None
+    replay_actions = replay_actions \
+        if isinstance(replay_actions, (list, tuple)) else ()
+
+    actors = {}
+    for event in trace:
+        if not isinstance(event, dict):
+            continue
+        actor = str(event.get("actor") or "unknown")
+        actors[actor] = actors.get(actor, 0) + 1
+
+    capture = debug.get("capture")
+    compact_capture = {}
+    degraded = False
+    if isinstance(capture, dict):
+        for scope in ("trace", "replay", "terminal"):
+            raw = capture.get(scope)
+            if not isinstance(raw, dict):
+                continue
+            selected = {}
+            for key in (
+                    "recorded_events", "dropped_events", "serialized_bytes",
+                    "sanitization_omissions", "serialization_errors"):
+                if key in raw:
+                    selected[key] = raw.get(key)
+            compact_capture[scope] = selected
+            degraded = degraded or any(
+                int(selected.get(key, 0) or 0) > 0 for key in (
+                    "dropped_events", "sanitization_omissions",
+                    "serialization_errors")
+            )
+        capture_errors = capture.get("errors")
+        capture_error_count = len(capture_errors) \
+            if isinstance(capture_errors, (list, tuple)) else 0
+        compact_capture["error_count"] = capture_error_count
+        degraded = degraded or capture_error_count > 0
+    else:
+        capture_error_count = 0
+
+    catalog = debug.get("card_catalog")
+    if isinstance(catalog, dict):
+        catalog_entries = catalog.get("entries")
+        catalog_count = len(catalog_entries) \
+            if isinstance(catalog_entries, (list, tuple)) \
+            else int(catalog.get("recorded_entries", 0) or 0)
+        catalog_omitted = int(catalog.get("omitted_entries", 0) or 0)
+    elif isinstance(catalog, (list, tuple)):
+        catalog_count, catalog_omitted = len(catalog), 0
+    else:
+        catalog_count, catalog_omitted = 0, 0
+    degraded = degraded or catalog_omitted > 0
+
+    terminal = debug.get("terminal")
+    terminal = terminal if isinstance(terminal, dict) else {}
+    evaluator = debug.get("evaluator")
+    evaluator_summary = evaluator.get("summary") \
+        if isinstance(evaluator, dict) else None
+    return json_safe({
+        "schema_version": 1,
+        "trace_event_count": len(trace),
+        "trace_actor_counts": actors,
+        "replay_action_count": len(replay_actions),
+        "card_catalog_count": catalog_count,
+        "card_catalog_omitted": catalog_omitted,
+        "capture_status": "degraded" if degraded else (
+            "complete" if isinstance(capture, dict) else "not_recorded"),
+        "capture": compact_capture,
+        "terminal": {
+            key: terminal.get(key) for key in (
+                "game_result", "terminal_reason", "reward", "done",
+                "truncated") if key in terminal
+        },
+        "evaluator": evaluator_summary
+        if isinstance(evaluator_summary, dict) else None,
+    })
+
+
 def _persist_evaluation_debug_sidecars(
         episodes, *, timestep, evaluation_history_path):
     """Externalize inline per-game debug data before history publication.
@@ -3685,6 +3770,7 @@ def _persist_evaluation_debug_sidecars(
             if isinstance(trace, (list, tuple)) else 0,
             "replay_action_count": len(replay_actions)
             if isinstance(replay_actions, (list, tuple)) else 0,
+            "debug_summary": _evaluation_debug_summary(debug),
         })
         externalized.append(item)
     return externalized

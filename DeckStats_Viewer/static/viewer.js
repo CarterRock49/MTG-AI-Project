@@ -8,6 +8,8 @@ const state = {
   evaluatorGameKey: null, evaluatorPage: 0,
   evaluatorPageSize: 50, currentEvaluatorEvents: [], currentEvaluatorTerminal: null,
   actionGameKey: null, actionPage: 0, actionPageSize: 100, currentActions: [],
+  actionActorFilter: "all", replayPage: 0, replayPageSize: 100,
+  currentReplayActions: [], currentCardCatalog: {}, currentTerminalDebug: null,
   currentFullDebug: null, currentTraceReplay: null,
 };
 
@@ -232,6 +234,285 @@ function debugAvailabilityLabel(game) {
   if (replayAvailable(game)) labels.push("replay");
   if (terminalDebugAvailable(game)) labels.push("terminal");
   return labels.join(" + ") || "summary";
+}
+
+function traceEvents(trace) {
+  if (Array.isArray(trace)) return trace;
+  return array(value(trace || {}, "events", "actions"));
+}
+
+function replayEvents(replay) {
+  if (Array.isArray(replay)) return replay;
+  return array(value(replay || {}, "actions"));
+}
+
+function buildCardCatalog(debug) {
+  const catalog = value(debug || {}, "card_catalog", "runtime_card_catalog");
+  const entries = Array.isArray(catalog)
+    ? catalog
+    : array(value(catalog || {}, "entries", "cards"));
+  const index = {};
+  for (const entry of entries) {
+    if (!entry || typeof entry !== "object") continue;
+    const runtimeId = value(entry, "runtime_id", "card_id", "id");
+    if (runtimeId === undefined || runtimeId === null) continue;
+    index[String(runtimeId)] = entry;
+  }
+  // Tolerate an early mapping-shaped catalog while keeping schema metadata
+  // out of the identity index.
+  if (!entries.length && catalog && typeof catalog === "object" && !Array.isArray(catalog)
+      && catalog.entries === undefined && catalog.cards === undefined) {
+    for (const [runtimeId, entry] of objectEntries(catalog)) {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry) || ["limits","schema_version"].includes(runtimeId)) continue;
+      index[String(runtimeId)] = {runtime_id:runtimeId,...entry};
+    }
+  }
+  return index;
+}
+
+function cardIdentity(cardId, catalog = state.currentCardCatalog) {
+  if (cardId === undefined || cardId === null) return null;
+  return catalog[String(cardId)] || null;
+}
+
+function cardLabel(cardId, catalog = state.currentCardCatalog) {
+  if (cardId === undefined || cardId === null) return "unknown card";
+  const identity = cardIdentity(cardId, catalog);
+  const name = value(identity || {}, "name", "card_name");
+  return name ? `${name} (#${cardId})` : `card #${cardId}`;
+}
+
+function actionIdentityLabels(step, catalog) {
+  const context = value(step || {}, "context") || {};
+  if (!context || typeof context !== "object" || Array.isArray(context)) return [];
+  const labels = [];
+  const singularKeys = [
+    "card_id", "source_id", "target_id", "target_card_id",
+    "attacker_id", "blocker_id", "land_id", "permanent_id",
+    "discard_card_id", "sacrifice_card_id",
+  ];
+  for (const key of singularKeys) {
+    const cardId = context[key];
+    if (cardId === undefined || cardId === null) continue;
+    labels.push(`${key.replaceAll("_id", "").replaceAll("_", " ")}: ${cardLabel(cardId,catalog)}`);
+  }
+  for (const key of ["card_ids", "target_ids", "targets"]) {
+    const cardIds = array(context[key]);
+    if (!cardIds.length) continue;
+    labels.push(`${key.replaceAll("_ids", "s")}: ${cardIds.slice(0,6).map((cardId) => cardLabel(cardId,catalog)).join(", ")}${cardIds.length > 6 ? ` +${cardIds.length - 6} more` : ""}`);
+  }
+  return [...new Set(labels)];
+}
+
+function zoneSnapshot(stateSnapshot, seat, zone) {
+  const raw = value(stateSnapshot || {}, `${seat}.zones.${zone}`);
+  if (Array.isArray(raw)) return {count:raw.length,cards:raw};
+  return raw && typeof raw === "object"
+    ? {count:number(value(raw,"count"),array(value(raw,"cards")).length),cards:array(value(raw,"cards"))}
+    : {count:0,cards:[]};
+}
+
+function multisetDifference(left, right) {
+  const remaining = new Map();
+  for (const item of right) {
+    const key = String(item);
+    remaining.set(key,(remaining.get(key) || 0) + 1);
+  }
+  const difference = [];
+  for (const item of left) {
+    const key = String(item), count = remaining.get(key) || 0;
+    if (count) remaining.set(key,count - 1);
+    else difference.push(item);
+  }
+  return difference;
+}
+
+function stackDescription(stack, catalog) {
+  return array(stack).map((item) => {
+    if (!item || typeof item !== "object") return String(item);
+    const kind = value(item,"kind","type") || "stack item";
+    const sourceId = value(item,"source_id","card_id");
+    const controller = value(item,"controller","seat");
+    return `${kind}: ${sourceId === undefined ? "unknown source" : cardLabel(sourceId,catalog)}${controller ? ` (${controller})` : ""}`;
+  });
+}
+
+function nestedNumericTotal(input) {
+  if (typeof input === "number") return Number.isFinite(input) ? input : 0;
+  if (!input || typeof input !== "object") return 0;
+  return objectEntries(input).reduce((total,[,item]) => total + nestedNumericTotal(item),0);
+}
+
+function manaSummary(stateSnapshot, seat) {
+  const mana = value(stateSnapshot || {},`${seat}.mana`);
+  if (!mana || typeof mana !== "object") return null;
+  return {
+    normal:nestedNumericTotal(value(mana,"normal")),
+    special:nestedNumericTotal(value(mana,"snow"))
+      + nestedNumericTotal(value(mana,"phase_restricted_snow"))
+      + nestedNumericTotal(value(mana,"conditional_snow")),
+    restricted:nestedNumericTotal(value(mana,"phase_restricted"))
+      + nestedNumericTotal(value(mana,"conditional")),
+  };
+}
+
+function contextDescription(context, catalog) {
+  if (!context || typeof context !== "object" || Array.isArray(context)) return "none";
+  const parts = [];
+  for (const [kind,item] of objectEntries(context)) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) continue;
+    const type = value(item,"choice_kind","type","required_type") || kind;
+    const sourceId = value(item,"source_id","card_id");
+    const options = array(value(item,"options","valid_targets","targets"));
+    const optionCount = value(item,"options_count","valid_targets_count","targets_count") ?? options.length;
+    const optionText = options.slice(0,4).map((option) => cardIdentity(option,catalog) ? cardLabel(option,catalog) : String(option)).join(", ");
+    parts.push(`${kind}: ${type}${sourceId === undefined ? "" : ` from ${cardLabel(sourceId,catalog)}`}${optionCount ? ` · ${optionCount} options${optionText ? ` (${optionText}${optionCount > 4 ? ", …" : ""})` : ""}` : ""}`);
+  }
+  return parts.join("; ") || "none";
+}
+
+function markedDamageDescription(entries, catalog) {
+  const items = array(entries);
+  if (!items.length) return "none";
+  return items.slice(0,12).map((item) => `${cardLabel(value(item,"card_id"),catalog)}: ${number(value(item,"amount"))}`).join("; ") + (items.length > 12 ? `; +${items.length - 12} more` : "");
+}
+
+function permanentCounterDescription(entries, catalog) {
+  const items = array(entries);
+  if (!items.length) return "none";
+  return items.slice(0,12).map((item) => {
+    const counters = objectEntries(value(item,"counters")).map(([name,amount]) => `${name} ${amount}`).join(", ");
+    return `${cardLabel(value(item,"card_id"),catalog)}: ${counters || "none"}`;
+  }).join("; ") + (items.length > 12 ? `; +${items.length - 12} more` : "");
+}
+
+function renderDecisionSnapshot(step, catalog) {
+  const pre = value(step || {},"pre","state_before") || {};
+  const actorSeat = String(value(step,"actor_seat") || "").toLowerCase();
+  const seat = ["p1","p2"].includes(actorSeat) ? actorSeat : null;
+  const valid = value(pre,"valid_actions");
+  const indices = Array.isArray(valid) ? valid : array(value(valid || {},"indices"));
+  const validCaptured = Array.isArray(valid) || valid && typeof valid === "object";
+  const action = number(value(step,"action","action_idx","index"),-1);
+  const mana = seat ? manaSummary(pre,seat) : null;
+  const tapped = seat ? array(value(pre,`${seat}.tapped_permanents`)) : [];
+  const decisionContext = value(pre,"decision_context");
+  if (!validCaptured && !mana && !tapped.length && !decisionContext) return "";
+  const fields = [];
+  if (validCaptured) {
+    const count = number(value(valid || {},"count"),indices.length);
+    const maskSize = number(value(valid || {},"mask_size"));
+    fields.push(`<span class="decision-mask"><b>Decision mask</b>${fmtInt(count)}${maskSize ? ` / ${fmtInt(maskSize)}` : ""} legal · selected ${indices.includes(action) ? "legal" : "not in captured mask"}<small>${indices.slice(0,24).join(", ")}${indices.length > 24 ? `, … +${indices.length - 24}` : ""}</small></span>`);
+  }
+  if (mana) fields.push(`<span><b>${seat.toUpperCase()} mana before</b>normal ${fmtInt(mana.normal)} · special ${fmtInt(mana.special)} · restricted ${fmtInt(mana.restricted)}</span>`);
+  if (seat) fields.push(`<span><b>${seat.toUpperCase()} tapped before</b>${tapped.length ? tapped.slice(0,8).map((cardId) => cardLabel(cardId,catalog)).join(", ") + (tapped.length > 8 ? ` +${tapped.length - 8}` : "") : "none"}</span>`);
+  if (decisionContext) fields.push(`<span><b>Active choice / targeting</b>${escapeHTML(contextDescription(decisionContext,catalog))}</span>`);
+  return `<div class="decision-snapshot">${fields.join("")}</div>`;
+}
+
+function renderStateDelta(step, catalog) {
+  const pre = value(step || {}, "pre", "state_before") || {};
+  const post = value(step || {}, "post", "state_after") || {};
+  if (!Object.keys(pre).length && !Object.keys(post).length) return "";
+  const changes = [];
+  const scalar = (label, before, after) => {
+    if (before !== undefined && after !== undefined && String(before) !== String(after)) {
+      changes.push(`<span><b>${escapeHTML(label)}</b>${escapeHTML(before)} → ${escapeHTML(after)}</span>`);
+    }
+  };
+  scalar("Turn",value(pre,"turn"),value(post,"turn"));
+  scalar("Phase",value(pre,"phase_name","phase"),value(post,"phase_name","phase"));
+  scalar("Priority",value(pre,"priority_player"),value(post,"priority_player"));
+  for (const seat of ["p1","p2"]) {
+    scalar(`${seat.toUpperCase()} life`,value(pre,`${seat}.life`),value(post,`${seat}.life`));
+    scalar(`${seat.toUpperCase()} poison`,value(pre,`${seat}.poison_counters`),value(post,`${seat}.poison_counters`));
+    scalar(`${seat.toUpperCase()} energy`,value(pre,`${seat}.energy_counters`),value(post,`${seat}.energy_counters`));
+    scalar(`${seat.toUpperCase()} experience`,value(pre,`${seat}.experience_counters`),value(post,`${seat}.experience_counters`));
+    scalar(`${seat.toUpperCase()} land plays`,value(pre,`${seat}.lands_played_this_turn`),value(post,`${seat}.lands_played_this_turn`));
+    const beforeMana = manaSummary(pre,seat), afterMana = manaSummary(post,seat);
+    if (beforeMana && afterMana) {
+      for (const kind of ["normal","special","restricted"]) scalar(`${seat.toUpperCase()} ${kind} mana`,beforeMana[kind],afterMana[kind]);
+    }
+    const beforeTapped = array(value(pre,`${seat}.tapped_permanents`));
+    const afterTapped = array(value(post,`${seat}.tapped_permanents`));
+    const becameTapped = multisetDifference(afterTapped,beforeTapped);
+    const becameUntapped = multisetDifference(beforeTapped,afterTapped);
+    if (becameTapped.length || becameUntapped.length) {
+      const parts = [];
+      if (becameTapped.length) parts.push(`tapped ${becameTapped.map((cardId) => cardLabel(cardId,catalog)).join(", ")}`);
+      if (becameUntapped.length) parts.push(`untapped ${becameUntapped.map((cardId) => cardLabel(cardId,catalog)).join(", ")}`);
+      changes.push(`<span><b>${seat.toUpperCase()} tap state</b>${escapeHTML(parts.join(" · "))}</span>`);
+    }
+    const beforeDamage = value(pre,`${seat}.damage_marked`), afterDamage = value(post,`${seat}.damage_marked`);
+    if (beforeDamage !== undefined && afterDamage !== undefined && pretty(beforeDamage) !== pretty(afterDamage)) changes.push(`<span><b>${seat.toUpperCase()} marked damage</b>${escapeHTML(markedDamageDescription(beforeDamage,catalog))} → ${escapeHTML(markedDamageDescription(afterDamage,catalog))}</span>`);
+    const beforeCounters = value(pre,`${seat}.permanent_counters`), afterCounters = value(post,`${seat}.permanent_counters`);
+    if (beforeCounters !== undefined && afterCounters !== undefined && pretty(beforeCounters) !== pretty(afterCounters)) changes.push(`<span><b>${seat.toUpperCase()} permanent counters</b>${escapeHTML(permanentCounterDescription(beforeCounters,catalog))} → ${escapeHTML(permanentCounterDescription(afterCounters,catalog))}</span>`);
+    for (const zone of ["library","hand","battlefield","graveyard","exile","outside_game","sideboard"]) {
+      const before = zoneSnapshot(pre,seat,zone), after = zoneSnapshot(post,seat,zone);
+      const added = multisetDifference(after.cards,before.cards);
+      const removed = multisetDifference(before.cards,after.cards);
+      if (before.count === after.count && !added.length && !removed.length) continue;
+      const parts = [`${before.count} → ${after.count}`];
+      if (added.length) parts.push(`+ ${added.map((cardId) => cardLabel(cardId,catalog)).join(", ")}`);
+      if (removed.length) parts.push(`− ${removed.map((cardId) => cardLabel(cardId,catalog)).join(", ")}`);
+      changes.push(`<span><b>${seat.toUpperCase()} ${escapeHTML(zone)}</b>${escapeHTML(parts.join(" · "))}</span>`);
+    }
+  }
+  const beforeStack = stackDescription(value(pre,"stack"),catalog);
+  const afterStack = stackDescription(value(post,"stack"),catalog);
+  if (pretty(beforeStack) !== pretty(afterStack)) {
+    changes.push(`<span><b>Stack</b>${escapeHTML(beforeStack.join("; ") || "empty")} → ${escapeHTML(afterStack.join("; ") || "empty")}</span>`);
+  }
+  const beforeContext = value(pre,"decision_context"), afterContext = value(post,"decision_context");
+  if ((beforeContext !== undefined || afterContext !== undefined) && pretty(beforeContext) !== pretty(afterContext)) changes.push(`<span><b>Choice / targeting</b>${escapeHTML(contextDescription(beforeContext,catalog))} → ${escapeHTML(contextDescription(afterContext,catalog))}</span>`);
+  return `<div class="state-delta">${changes.join("") || "<span><b>State</b>No captured public-state change</span>"}</div>`;
+}
+
+function renderTraceStep(step, absoluteIndex, catalog) {
+  const action = value(step,"action","action_idx","index");
+  const actor = value(step,"actor","seat") || "unknown actor";
+  const label = value(step,"label","action_label","reason") || `Action ${action}`;
+  const timing = [value(step,"pre.turn","turn","turn_after"),value(step,"pre.phase_name","phase_name","phase_after","pre.phase")].filter((item) => item !== undefined).join(" · ");
+  const evaluatorCount = evaluatorCaptureEvents(value(step,"evaluator","evaluator_activity")).length + array(value(step,"evaluator_events")).length;
+  const identities = actionIdentityLabels(step,catalog);
+  const transition = value(step,"learned_transition") || {};
+  const transitionSummary = [
+    value(transition,"reward") !== undefined ? `reward ${fmtReward(value(transition,"reward"))}` : null,
+    value(transition,"done") === true ? "done" : null,
+    value(transition,"truncated") === true ? "truncated" : null,
+  ].filter(Boolean);
+  return `<article class="trace-step actor-${escapeHTML(actor)}"><span class="seq">${String(value(step,"sequence") ?? absoluteIndex).padStart(3,"0")}</span><div><div class="trace-heading"><strong>${escapeHTML(actor)} · ${escapeHTML(label)}</strong><span class="chip">action ${escapeHTML(action ?? "—")}</span></div><small>${escapeHTML(timing || "timing not captured")}${evaluatorCount ? ` · ${fmtInt(evaluatorCount)} evaluator events` : ""}${transitionSummary.length ? ` · ${escapeHTML(transitionSummary.join(" · "))}` : ""}</small>${identities.length ? `<div class="action-identities">${identities.map((item) => `<span>${escapeHTML(item)}</span>`).join("")}</div>` : ""}${renderDecisionSnapshot(step,catalog)}${renderStateDelta(step,catalog)}<details class="raw-drawer action-raw" data-action-index="${absoluteIndex}"><summary>Complete recorded action/context JSON</summary><pre class="lazy-raw">Open to materialize this action’s JSON.</pre></details></div></article>`;
+}
+
+function renderCaptureHealth(debug, summary) {
+  const capture = value(debug || {},"capture") || {};
+  const status = value(summary || {},"capture_status") || (Object.keys(capture).length ? "complete" : "not recorded");
+  const scopes = ["trace","replay","terminal"].map((scope) => {
+    const item = value(capture,scope) || value(summary || {},`capture.${scope}`) || {};
+    const issues = number(value(item,"dropped_events")) + number(value(item,"sanitization_omissions")) + number(value(item,"serialization_errors"));
+    return `<span class="capture-scope ${issues ? "has-warning" : ""}">${escapeHTML(scope)}<strong>${fmtInt(value(item,"recorded_events"))}${scope === "terminal" ? "" : " events"}</strong><small>${fmtInt(value(item,"dropped_events"))} dropped · ${fmtInt(value(item,"sanitization_omissions"))} omitted · ${fmtInt(value(item,"serialization_errors"))} errors</small></span>`;
+  }).join("");
+  const errors = array(value(capture,"errors"));
+  return `<section class="capture-health ${status === "degraded" ? "has-warning" : ""}"><div><strong>Capture ${escapeHTML(status)}</strong><span>${fmtInt(value(summary || {},"card_catalog_count"))} named runtime cards · ${fmtInt(errors.length)} capture errors</span></div><div class="capture-grid">${scopes}</div>${errors.length ? `<div class="legacy-notice">${errors.map((item) => escapeHTML(`${value(item,"stage") || "capture"}: ${value(item,"error_type") || "error"} · ${value(item,"message") || ""}`)).join("<br>")}</div>` : ""}</section>`;
+}
+
+function renderTerminalSummary(terminal, catalog) {
+  if (!terminal || typeof terminal !== "object") return "";
+  const finalState = value(terminal,"final_state") || {};
+  const fidelity = value(terminal,"fidelity") || {};
+  const stateFields = [
+    ["Turn",value(finalState,"turn")],
+    ["Phase",value(finalState,"phase_name","phase")],
+    ["P1 life",value(finalState,"p1.life")],
+    ["P2 life",value(finalState,"p2.life")],
+    ["Stack",stackDescription(value(finalState,"stack"),catalog).join("; ") || "empty"],
+  ];
+  const fidelityIssues = objectEntries(fidelity).filter(([,amount]) => {
+    if (Array.isArray(amount)) return amount.length > 0;
+    if (amount && typeof amount === "object") return Object.keys(amount).length > 0;
+    return typeof amount === "number" ? amount !== 0 : Boolean(amount);
+  });
+  return `<section class="terminal-summary"><div class="summary-kpis"><span>Result<strong>${escapeHTML(value(terminal,"game_result") ?? "—")}</strong></span><span>Reason<strong>${escapeHTML(value(terminal,"terminal_reason") ?? "—")}</strong></span><span>Reward<strong>${fmtOptionalReward(value(terminal,"reward"))}</strong></span><span>Done / truncated<strong>${value(terminal,"done") ? "yes" : "no"} / ${value(terminal,"truncated") ? "yes" : "no"}</strong></span></div><div class="terminal-state">${stateFields.map(([label,amount]) => `<span><b>${escapeHTML(label)}</b>${escapeHTML(amount ?? "—")}</span>`).join("")}</div><div class="detail-tags"><span class="chip ${fidelityIssues.length ? "warning-chip" : ""}">fidelity ${fidelityIssues.length ? `${fidelityIssues.length} non-empty counters` : "clean"}</span>${fidelityIssues.slice(0,8).map(([key,amount]) => `<span class="chip warning-chip">${escapeHTML(key)}: ${escapeHTML(typeof amount === "object" ? Array.isArray(amount) ? amount.length : Object.keys(amount).length : amount)}</span>`).join("")}</div><details class="raw-drawer" data-lazy-raw="terminal-debug"><summary>Complete terminal, reward, fidelity & final-state diagnostics</summary><pre class="lazy-raw">Open to materialize terminal diagnostics JSON.</pre></details></section>`;
 }
 
 function evaluatorCaptureEvents(capture) {
@@ -467,6 +748,8 @@ async function selectEvaluationGame(key, rerenderRows = true) {
   if (state.actionGameKey !== key) {
     state.actionGameKey = key;
     state.actionPage = 0;
+    state.replayPage = 0;
+    state.actionActorFilter = "all";
   }
   if (rerenderRows) $("eval-games-body").querySelectorAll("tr").forEach((row) => row.classList.toggle("selected", row.dataset.gameKey === key));
   const detail = $("evaluation-game-detail");
@@ -484,6 +767,7 @@ async function selectEvaluationGame(key, rerenderRows = true) {
       if (payload) {
         if (payload.debug !== undefined && payload.debug !== null) game.debug = payload.debug;
         if (payload.replay !== undefined && payload.replay !== null) game.replay = payload.replay;
+        if (payload.debug_summary !== undefined && payload.debug_summary !== null) game.debug_summary = payload.debug_summary;
         game._debugArtifact = payload.debug_artifact || null;
         game._replayArtifact = payload.replay_artifact || null;
         game._artifactErrors = [payload.debug_error,payload.replay_error].filter(Boolean);
@@ -507,54 +791,68 @@ async function selectEvaluationGame(key, rerenderRows = true) {
   const replay = gameReplay(game), trace = gameTrace(game);
   const hasTraceReplay = (trace !== null && trace !== undefined)
     || (replay !== null && replay !== undefined);
-  const actionCandidates = [
-    array(value(trace,"events","actions")),
-    array(value(replay,"actions")),
-    Array.isArray(trace) ? trace : [],
-  ];
-  const actions = actionCandidates.find((candidate) => candidate.length) || [];
+  const actions = traceEvents(trace);
+  const replayActions = replayEvents(replay);
+  const catalog = buildCardCatalog(debug);
+  const debugSummary = value(game,"debug_summary","raw.debug_summary") || {};
   state.currentActions = actions;
+  state.currentReplayActions = replayActions;
+  state.currentCardCatalog = catalog;
   const tags = [gameSeat(game), value(game,"opponent_profile","case.opponent_profile","raw.case.opponent_profile"), `seed ${value(game,"seed","case.seed","raw.case.seed")}`, value(game,"timeout","raw.timeout") ? "timeout" : "decisive"].filter(Boolean);
   const artifactErrors = array(game._artifactErrors);
   let traceNotice = game._debugLoadError
     ? `<div class="legacy-notice">The selected debug artifact could not be loaded: ${escapeHTML(game._debugLoadError)}</div>`
     : artifactErrors.length
       ? `<div class="legacy-notice">${artifactErrors.map((error) => escapeHTML(value(error,"message","error") || pretty(error))).join(" · ")}</div>`
+      : replayActions.length
+        ? `<div class="legacy-notice">This artifact has learned-policy replay decisions but no full action trace. Opponent decisions and their intermediate state changes were not persisted and cannot be reconstructed.</div>`
       : hasTraceReplay
-        ? `<div class="legacy-notice">A trace/replay payload was persisted, but it contains no recognized action array. Open the complete raw payload below.</div>`
+        ? `<div class="legacy-notice">A trace/replay payload was persisted, but it contains no recognized event array. Open the complete raw payload below.</div>`
         : anyDebugAvailable(game)
         ? `<div class="legacy-notice">Terminal diagnostics exist, but no action trace or replay actions were persisted for this game.</div>`
         : `<div class="legacy-notice">This historical game contains only its terminal summary. Its action timeline was never written and cannot be reconstructed.</div>`;
-  const actionPageCount = Math.max(1,Math.ceil(actions.length / state.actionPageSize));
+  const actorNames = [...new Set(actions.map((step) => String(value(step,"actor","seat") || "unknown")))].sort();
+  if (state.actionActorFilter !== "all" && !actorNames.includes(state.actionActorFilter)) state.actionActorFilter = "all";
+  const filteredActions = actions.map((step,index) => ({step,index})).filter(({step}) => state.actionActorFilter === "all" || String(value(step,"actor","seat") || "unknown") === state.actionActorFilter);
+  const actionPageCount = Math.max(1,Math.ceil(filteredActions.length / state.actionPageSize));
   state.actionPage = Math.min(Math.max(0,state.actionPage),actionPageCount - 1);
   const actionStart = state.actionPage * state.actionPageSize;
-  const visibleActions = actions.slice(actionStart,actionStart + state.actionPageSize);
-  const actionPager = actions.length > state.actionPageSize ? `<div class="action-pager"><button class="button ghost" data-action-page="${state.actionPage - 1}" ${state.actionPage === 0 ? "disabled" : ""}>← Previous actions</button><span>${fmtInt(actionStart + 1)}–${fmtInt(actionStart + visibleActions.length)} / ${fmtInt(actions.length)}</span><button class="button ghost" data-action-page="${state.actionPage + 1}" ${state.actionPage + 1 >= actionPageCount ? "disabled" : ""}>Next actions →</button></div>` : "";
-  let traceHtml = actions.length ? `${actionPager}<div class="trace-list">${visibleActions.map((step,index) => {
-    const absoluteIndex = actionStart + index;
-    const action = value(step,"action","action_idx","index");
-    const actor = value(step,"actor","seat") || "agent";
-    const label = value(step,"label","action_label","reason") || `Action ${action}`;
-    const timing = [value(step,"turn","turn_after","pre.turn"), value(step,"phase_name","phase_after","pre.phase_name","pre.phase")].filter((item) => item !== undefined).join(" · ");
-    const evaluatorCount = evaluatorCaptureEvents(value(step,"evaluator","evaluator_activity")).length + array(value(step,"evaluator_events")).length;
-    return `<div class="trace-step"><span class="seq">${String(absoluteIndex+1).padStart(3,"0")}</span><div><strong>${escapeHTML(actor)} · ${escapeHTML(label)}</strong><small>${escapeHTML(timing)}${timing ? " · " : ""}index ${escapeHTML(action)}${evaluatorCount ? ` · ${fmtInt(evaluatorCount)} evaluator events` : ""}</small><details class="raw-drawer action-raw" data-action-index="${absoluteIndex}"><summary>Complete action/context JSON</summary><pre class="lazy-raw">Open to materialize this action’s JSON.</pre></details></div></div>`;
-  }).join("")}</div>${actionPager}` : traceNotice;
+  const visibleActions = filteredActions.slice(actionStart,actionStart + state.actionPageSize);
+  const actionPager = filteredActions.length > state.actionPageSize ? `<div class="action-pager"><button class="button ghost" data-action-page="${state.actionPage - 1}" ${state.actionPage === 0 ? "disabled" : ""}>← Previous trace events</button><span>${fmtInt(actionStart + 1)}–${fmtInt(actionStart + visibleActions.length)} / ${fmtInt(filteredActions.length)} filtered · ${fmtInt(actions.length)} total</span><button class="button ghost" data-action-page="${state.actionPage + 1}" ${state.actionPage + 1 >= actionPageCount ? "disabled" : ""}>Next trace events →</button></div>` : "";
+  const actorFilter = actorNames.length > 1 ? `<label class="timeline-filter"><span>Actor</span><select id="trace-actor-filter"><option value="all">All actors · ${fmtInt(actions.length)}</option>${actorNames.map((actor) => `<option value="${escapeHTML(actor)}" ${actor === state.actionActorFilter ? "selected" : ""}>${escapeHTML(actor)} · ${fmtInt(actions.filter((step) => String(value(step,"actor","seat") || "unknown") === actor).length)}</option>`).join("")}</select></label>` : "";
+  let traceHtml = actions.length ? `<div class="timeline-toolbar"><div><strong>Full action trace</strong><span>Learned and opponent actions in sequence; automatic engine changes are folded into each pre/post state delta.</span></div>${actorFilter}</div>${actionPager}<div class="trace-list">${visibleActions.map(({step,index}) => renderTraceStep(step,index,catalog)).join("")}</div>${actionPager}` : traceNotice;
   if (actions.length && (game._debugLoadError || artifactErrors.length)) traceHtml = `${traceNotice}${traceHtml}`;
+  const replayPageCount = Math.max(1,Math.ceil(replayActions.length / state.replayPageSize));
+  state.replayPage = Math.min(Math.max(0,state.replayPage),replayPageCount - 1);
+  const replayStart = state.replayPage * state.replayPageSize;
+  const visibleReplay = replayActions.slice(replayStart,replayStart + state.replayPageSize);
+  const replayPager = replayActions.length > state.replayPageSize ? `<div class="action-pager"><button class="button ghost" data-replay-page="${state.replayPage - 1}" ${state.replayPage === 0 ? "disabled" : ""}>← Previous decisions</button><span>${fmtInt(replayStart + 1)}–${fmtInt(replayStart + visibleReplay.length)} / ${fmtInt(replayActions.length)}</span><button class="button ghost" data-replay-page="${state.replayPage + 1}" ${state.replayPage + 1 >= replayPageCount ? "disabled" : ""}>Next decisions →</button></div>` : "";
+  const replayHtml = replayActions.length ? `<div class="replay-notice"><strong>Deterministic learned-policy replay</strong><span>${fmtInt(replayActions.length)} policy decisions only. Use trace sequence links to locate each decision in the full engine timeline.</span></div>${replayPager}<div class="replay-list">${visibleReplay.map((step,index) => {
+    const absoluteIndex = replayStart + index;
+    const action = value(step,"action","action_idx","index");
+    const label = value(step,"label","action_label","reason") || `Action ${action}`;
+    const postStep = value(step,"post_step") || {};
+    const identities = actionIdentityLabels(step,catalog);
+    return `<article class="replay-step"><span class="seq">${String(absoluteIndex + 1).padStart(3,"0")}</span><div><strong>${escapeHTML(label)}</strong><small>action ${escapeHTML(action ?? "—")} · trace sequence ${escapeHTML(value(step,"trace_sequence") ?? "—")} · turn ${escapeHTML(value(postStep,"turn") ?? "—")} · ${escapeHTML(value(postStep,"phase_name","phase") ?? "phase unknown")} · reward ${fmtOptionalReward(value(postStep,"reward"))}${value(postStep,"done") ? " · done" : ""}${value(postStep,"truncated") ? " · truncated" : ""}</small>${identities.length ? `<div class="action-identities">${identities.map((item) => `<span>${escapeHTML(item)}</span>`).join("")}</div>` : ""}<details class="raw-drawer action-raw" data-replay-index="${absoluteIndex}"><summary>Complete replay decision/context JSON</summary><pre class="lazy-raw">Open to materialize this replay decision’s JSON.</pre></details></div></article>`;
+  }).join("")}</div>${replayPager}` : `<div class="legacy-notice">No deterministic learned-policy replay was retained for this game.</div>`;
   if (hasTraceReplay) traceHtml += `<details class="raw-drawer" data-lazy-raw="trace-replay"><summary>Complete trace/replay payload</summary><pre class="lazy-raw">Open to materialize both trace and replay JSON.</pre></details>`;
   state.currentFullDebug = debug;
   state.currentTraceReplay = {trace,replay};
+  state.currentTerminalDebug = value(debug || {},"terminal") || null;
   const evaluatorHtml = renderEvaluatorActivity(game, debug, actions);
   const terminal = value(debug || {},"terminal");
   const artifactInfo = [game._debugArtifact,game._replayArtifact].filter(Boolean);
 
   detail.innerHTML = `<div class="summary-title"><div><p class="eyebrow">Checkpoint ${fmtInt(gameTimestep(game))} · case ${gameCase(game)}</p><h3>${escapeHTML(gameResult(game).toUpperCase())} · ${escapeHTML(value(game,"terminal_reason","raw.terminal_reason") || "unknown")}</h3></div><span class="result ${escapeHTML(gameResult(game))}">${escapeHTML(gameResult(game))}</span></div>
     <div class="detail-tags">${tags.map((tag) => `<span class="chip">${escapeHTML(tag)}</span>`).join("")}</div>
-    <div class="summary-kpis"><span>Reward<strong>${fmtReward(value(game,"reward","raw.reward"))}</strong></span><span>Length<strong>${fmtInt(value(game,"length","raw.length"))}</strong></span><span>Pair mate<strong>${mate ? `${escapeHTML(gameResult(mate))} · ${gameSeat(mate)}` : "missing"}</strong></span><span>Persisted debug<strong>${escapeHTML(debugAvailabilityLabel(game))} · ${fmtInt(actions.length)} actions</strong></span></div>
+    <div class="summary-kpis"><span>Reward<strong>${fmtReward(value(game,"reward","raw.reward"))}</strong></span><span>Length<strong>${fmtInt(value(game,"length","raw.length"))}</strong></span><span>Pair mate<strong>${mate ? `${escapeHTML(gameResult(mate))} · ${gameSeat(mate)}` : "missing"}</strong></span><span>Full trace<strong>${fmtInt(actions.length)} recorded actions</strong></span><span>Policy replay<strong>${fmtInt(replayActions.length)} decisions</strong></span><span>Runtime identities<strong>${fmtInt(Object.keys(catalog).length)} named cards</strong></span></div>
     ${artifactInfo.length ? `<details class="raw-drawer"><summary>Artifact verification</summary><pre>${escapeHTML(pretty(artifactInfo))}</pre></details>` : ""}
+    ${debug ? renderCaptureHealth(debug,debugSummary) : ""}
     <h4>Evaluation case</h4><pre class="raw">${escapeHTML(pretty({requested:caseData,resolved}))}</pre>
-    <h4>${actions.length ? `Action timeline · ${actions.length} events` : "Action timeline"}</h4>${traceHtml}
+    <h4>${actions.length ? `Full action timeline · ${actions.length} events` : "Full action timeline"}</h4>${traceHtml}
+    <h4>Learned-policy replay · ${replayActions.length} decisions</h4>${replayHtml}
     ${evaluatorHtml ? `<h4>Evaluator activity</h4>${evaluatorHtml}` : ""}
-    ${terminal ? `<h4>Terminal diagnostics</h4><pre class="raw">${escapeHTML(pretty(terminal))}</pre>` : ""}
+    ${terminal ? `<h4>Terminal & fidelity diagnostics</h4>${renderTerminalSummary(terminal,catalog)}` : ""}
     ${debug ? `<details class="raw-drawer" data-lazy-raw="full-debug"><summary>Complete verified debug payload</summary><pre class="lazy-raw">Open to materialize the complete debug JSON.</pre></details>` : ""}
     <h4>Complete persisted episode</h4><pre class="raw">${escapeHTML(pretty(game.raw_episode || game.raw || game))}</pre>`;
 }
@@ -615,6 +913,47 @@ function memorySeenGames(memory) {
     number(value(memory, "games_played")),
     number(value(memory, "times_drawn")) + number(value(memory, "in_opening_hand"))
   );
+}
+function cardSeenEvidence(record) {
+  const aggregate = record && record.aggregate;
+  const memory = record && record.memory;
+  const exactSeen = value(aggregate || {},"games_drawn","raw.games_drawn");
+  if (aggregate && exactSeen !== undefined && exactSeen !== null) {
+    const exactPlayed = value(aggregate,"usage_count","raw.usage_count");
+    return {
+      seen:Math.max(0,number(exactSeen)),
+      played:exactPlayed === undefined || exactPlayed === null ? null : Math.max(0,number(exactPlayed)),
+      games:Math.max(0,recordGames(aggregate)),
+      exact:true,
+      source:"DeckStats exact games_drawn union",
+    };
+  }
+  if (!memory) return null;
+  return {
+    seen:memorySeenGames(memory),
+    played:Math.max(0,number(value(memory,"times_played"))),
+    games:Math.max(0,number(value(memory,"games_played"))),
+    exact:false,
+    source:"CardMemory estimate; opening/draw overlap was not persisted",
+  };
+}
+function cardSeenRate(record) {
+  const evidence = cardSeenEvidence(record);
+  return evidence && evidence.games > 0
+    ? Math.max(0,Math.min(1,evidence.seen / evidence.games))
+    : null;
+}
+function cardPlayedWhenSeen(record) {
+  const evidence = cardSeenEvidence(record);
+  if (!evidence || !evidence.seen || evidence.played === null) return null;
+  return Math.max(0,Math.min(1,evidence.played / evidence.seen));
+}
+function deckSeatAppearances() {
+  return deckRecords().reduce((total,record) => total + recordGames(record),0);
+}
+function cardDeckPrevalence(aggregate) {
+  const appearances = deckSeatAppearances();
+  return aggregate && appearances > 0 ? recordGames(aggregate) / appearances : null;
 }
 function memoryOpeningRate(memory) {
   const samples = number(value(memory || {}, "in_opening_hand"));
@@ -780,9 +1119,12 @@ function renderStats() {
   const decks = deckRecords(), cards = cardRecords();
   const memorySummary = value(bundle, "card_memory_summary") || {};
   const strategySummary = value(bundle, "strategy_memory_summary") || {};
+  const related = value(bundle,"related_sources") || {};
+  const relatedCount = number(value(related,"source_count"),1);
+  const relatedGames = number(value(related,"total_game_count"),number(value(bundle,"game_count")));
   const integrity = value(bundle,"integrity.status","status") || (diagnosticItems(bundle).length ? "Review notices" : "Loaded");
   $("stats-integrity").textContent = integrity;
-  $("stats-source-summary").innerHTML = `<span>${fmtInt(value(bundle,"game_count","games","summary.games"))} games</span><span>${fmtInt(decks.length)} DeckStats decks</span><span>${fmtInt(cards.length)} DeckStats cards</span><span>${fmtInt(value(memorySummary,"card_count"))} CardMemory cards</span><span>${escapeHTML(memoryDecisionLabel(memorySummary))}</span><span>${escapeHTML(value(source,"scope","phase") || "scope")}</span>`;
+  $("stats-source-summary").innerHTML = `<span title="Card/deck rows below are from only the selected scope">Selected scope · ${fmtInt(value(bundle,"game_count","games","summary.games"))} games</span><span title="Same run and artifact kind only; related scopes may span checkpoints or policies, and counters are not silently merged">${fmtInt(relatedCount)} related ${escapeHTML(value(source,"kind") || "") || "stats"} scopes · ${fmtInt(relatedGames)} games total</span><span>${fmtInt(decks.length)} DeckStats decks</span><span>${fmtInt(cards.length)} DeckStats cards</span><span>${fmtInt(value(memorySummary,"card_count"))} CardMemory cards</span><span>${escapeHTML(memoryDecisionLabel(memorySummary))}</span><span>${escapeHTML(value(source,"scope","phase") || "scope")}</span>`;
   renderCardMemoryStatus(memorySummary);
   renderStrategyMemoryStatus(strategySummary);
   renderDeckTable(); renderCardTable();
@@ -875,12 +1217,18 @@ function renderCardTable() {
       return rightGames-leftGames || String(a.cardId).localeCompare(String(b.cardId),undefined,{numeric:true});
     });
   const body = $("card-table-body");
-  if (!records.length) { body.innerHTML = '<tr><td colspan="11" class="empty-cell">No DeckStats aggregates or CardMemory records in this scope.</td></tr>'; $("card-detail").innerHTML = '<div class="empty-state">No canonical card records match this filter.</div>'; return; }
+  if (!records.length) { body.innerHTML = '<tr><td colspan="12" class="empty-cell">No DeckStats aggregates or CardMemory records in this scope.</td></tr>'; $("card-detail").innerHTML = '<div class="empty-state">No canonical card records match this filter.</div>'; return; }
   body.innerHTML = records.map((record,index) => {
     const aggregate = record.aggregate, memory = record.memory;
     const name = value(aggregate || {},"name","raw.name") || value(memory || {},"name") || "Unknown";
-    const opening = memoryOpeningRate(memory);
-    return `<tr data-card-index="${index}" class="${record.memoryOnly ? "memory-only-row" : ""}"><td>${escapeHTML(name)}${record.memoryOnly ? '<small class="row-source">memory only</small>' : ""}</td><td>${escapeHTML(record.cardId ?? "—")}</td><td>${aggregate ? fmtInt(recordGames(aggregate)) : "—"}</td><td>${aggregate ? `${recordWins(aggregate)}–${recordLosses(aggregate)}–${recordDraws(aggregate)}` : "—"}</td><td>${aggregate ? fmtRate(recordWinRate(aggregate)) : "—"}</td><td>${aggregate ? fmtInt(value(aggregate,"usage_count","raw.usage_count")) : "—"}</td><td>${memory ? fmtInt(value(memory,"games_played")) : "—"}</td><td>${memory ? fmtRate(value(memory,"effectiveness_rating") ?? .5) : "—"}</td><td>${memory ? `${fmtInt(memorySeenGames(memory))} / ${fmtInt(value(memory,"times_played"))}` : "—"}</td><td>${opening === null ? "—" : `${fmtRate(opening)} · n=${fmtInt(value(memory,"in_opening_hand"))}`}</td><td>${memoryTrendHtml(memory)}</td></tr>`;
+    const opening = memoryOpeningRate(memory), prevalence = cardDeckPrevalence(aggregate);
+    const evidence = cardSeenEvidence(record);
+    const seenRate = cardSeenRate(record), conversion = cardPlayedWhenSeen(record);
+    const evidenceTitle = evidence ? ` title="${escapeHTML(evidence.source)}"` : "";
+    const seenText = evidence
+      ? `${evidence.exact ? "" : "≈"}${fmtInt(evidence.seen)}${memory ? ` · ${fmtInt(value(memory,"times_drawn"))} / ${fmtInt(value(memory,"in_opening_hand"))}` : ""}`
+      : "—";
+    return `<tr data-card-index="${index}" class="${record.memoryOnly ? "memory-only-row" : ""}"><td>${escapeHTML(name)}${record.memoryOnly ? '<small class="row-source">memory only</small>' : ""}</td><td>${escapeHTML(record.cardId ?? "—")}</td><td>${aggregate ? fmtInt(recordGames(aggregate)) : "—"}</td><td>${prevalence === null ? "—" : fmtRate(prevalence)}</td><td>${aggregate ? `${recordWins(aggregate)}–${recordLosses(aggregate)}–${recordDraws(aggregate)}` : "—"}</td><td>${aggregate ? fmtRate(recordWinRate(aggregate)) : "—"}</td><td${evidenceTitle}>${seenText}</td><td${evidenceTitle}>${seenRate === null ? "—" : `${evidence && !evidence.exact ? "≈" : ""}${fmtRate(seenRate)}`}</td><td${evidenceTitle} class="${conversion !== null && conversion < .5 ? "warning-chip" : ""}">${conversion === null ? "—" : `${evidence && !evidence.exact ? "≈" : ""}${fmtRate(conversion)}`}</td><td>${memory ? fmtRate(value(memory,"effectiveness_rating") ?? .5) : "—"}</td><td>${opening === null ? "—" : `${fmtRate(opening)} · n=${fmtInt(value(memory,"in_opening_hand"))}`}</td><td>${memoryTrendHtml(memory)}</td></tr>`;
   }).join("");
   body.querySelectorAll("tr[data-card-index]").forEach((row) => row.addEventListener("click", () => {
     body.querySelectorAll("tr").forEach((candidate) => candidate.classList.toggle("selected", candidate === row));
@@ -897,12 +1245,17 @@ function renderCardDetail(record) {
   const rawAggregate = aggregate ? rawRecord(aggregate) : null;
   const name = value(aggregate || {},"name","raw.name") || value(memory || {},"name") || "Unknown card";
   const opening = memoryOpeningRate(memory), optimalTurn = memoryOptimalTurn(memory);
+  const evidence = cardSeenEvidence(record);
+  const seenRate = cardSeenRate(record), conversion = cardPlayedWhenSeen(record);
+  const prevalence = cardDeckPrevalence(aggregate);
   const mode = memoryDecisionLabel(value(state.stats || {},"card_memory_summary") || {});
   const metadata = memory ? Object.fromEntries([
     "first_seen", "cmc", "mana_cost", "types", "colors", "oracle_id", "meta_position"
   ].filter((key) => value(memory,key) !== undefined).map((key) => [key,value(memory,key)])) : {};
+  const evidencePrefix = evidence && !evidence.exact ? "≈" : "";
   const memoryHtml = memory ? `<h4>CardMemory lifetime snapshot</h4>
-    <div class="summary-kpis memory-card-kpis"><span>Memory games<strong>${fmtInt(value(memory,"games_played"))}</strong></span><span>Effective W–L–D<strong>${fmtInt(value(memory,"wins"))}–${fmtInt(value(memory,"losses"))}–${fmtInt(value(memory,"draws"))}</strong></span><span>Effectiveness<strong>${fmtRate(value(memory,"effectiveness_rating") ?? .5)}</strong></span><span>Drawn / seen / played<strong>${fmtInt(value(memory,"times_drawn"))} / ${fmtInt(memorySeenGames(memory))} / ${fmtInt(value(memory,"times_played"))}</strong></span><span>Opening effective result<strong>${opening === null ? "—" : `${fmtRate(opening)} · n=${fmtInt(value(memory,"in_opening_hand"))}`}</strong></span><span>Optimal sampled turn<strong>${optimalTurn !== null ? `player turn ${optimalTurn}` : "insufficient evidence"}</strong></span></div>
+    <div class="summary-kpis memory-card-kpis"><span>Deck appearances<strong>${fmtInt(value(memory,"games_played"))}</strong></span><span title="${escapeHTML(evidence ? evidence.source : "No seen evidence")}">Card seen<strong>${evidence ? `${evidencePrefix}${fmtInt(evidence.seen)}` : "—"}</strong></span><span>Drawn / opening<strong>${fmtInt(value(memory,"times_drawn"))} / ${fmtInt(value(memory,"in_opening_hand"))}</strong></span><span title="${escapeHTML(evidence ? evidence.source : "No seen evidence")}">Seen rate<strong>${seenRate === null ? "—" : `${evidencePrefix}${fmtRate(seenRate)}`}</strong></span><span title="${escapeHTML(evidence ? evidence.source : "No play evidence")}">Times played<strong>${evidence && evidence.played !== null ? fmtInt(evidence.played) : "—"}</strong></span><span title="${escapeHTML(evidence ? evidence.source : "No play evidence")}">Played when seen<strong>${conversion === null ? "—" : `${evidencePrefix}${fmtRate(conversion)}`}</strong></span><span>Effectiveness<strong>${fmtRate(value(memory,"effectiveness_rating") ?? .5)}</strong></span><span>Effective W–L–D<strong>${fmtInt(value(memory,"wins"))}–${fmtInt(value(memory,"losses"))}–${fmtInt(value(memory,"draws"))}</strong></span><span>Opening effective result<strong>${opening === null ? "—" : `${fmtRate(opening)} · n=${fmtInt(value(memory,"in_opening_hand"))}`}</strong></span><span>Optimal sampled turn<strong>${optimalTurn !== null ? `player turn ${optimalTurn}` : "insufficient evidence"}</strong></span></div>
+    <div class="metric-contract"><strong>Three different denominators</strong><span><b>Deck prevalence</b> asks how often the card appears across deck-seat records. <b>Seen rate</b> asks how often it appeared in an opening hand or draw. Joined records use DeckStats <code>games_drawn</code>, the exact per-game union, and <code>usage_count</code> for <b>played when seen</b>. CardMemory-only rows show ≈ because drawn + opening can overlap and only provides a bounded estimate. These are kept separate from deck win rate and effectiveness.</span></div>
     <div class="memory-mode ${escapeHTML(value(state.stats,"card_memory_summary.decision_use.mode") || "unknown")}"><strong>${escapeHTML(mode)}</strong><span>This is the selected worker/scope's latest cumulative snapshot, not a reconstruction of memory at an earlier game or checkpoint.</span></div>
     <h4>Recent outcomes · oldest to newest</h4><div class="trend-detail">${memoryTrendHtml(memory)}<span>${escapeHTML(array(value(memory,"performance_trend")).map((score) => number(score) >= .75 ? "W" : number(score) >= .25 ? "D" : "L").join(" ") || "No samples")}</span></div>
     <h4>Performance by player-relative play turn</h4>${renderTurnPerformance(memory)}
@@ -912,7 +1265,7 @@ function renderCardDetail(record) {
     <h4>Identity, printed metadata & optional meta position</h4><pre class="raw">${escapeHTML(pretty(metadata))}</pre>
     <details class="raw-drawer" open><summary>Every CardMemory field for canonical ID ${escapeHTML(record.cardId)}</summary><pre>${escapeHTML(pretty(memory))}</pre></details>` : '<div class="legacy-notice">No CardMemory entry has this exact canonical ID. The viewer did not attempt a name-based fallback.</div>';
   const aggregateHtml = aggregate
-    ? `<h4>DeckStats aggregate · separate counters</h4><div class="detail-tags"><span class="chip">${fmtInt(recordGames(aggregate))} games</span><span class="chip">${fmtRate(recordWinRate(aggregate))} win rate</span><span class="chip">used ${fmtInt(value(aggregate,"usage_count","raw.usage_count"))}</span></div><details class="raw-drawer"><summary>Every DeckStats aggregate field</summary><pre>${escapeHTML(pretty(rawAggregate))}</pre></details>`
+    ? `<h4>DeckStats aggregate · separate counters</h4><div class="detail-tags"><span class="chip">${fmtInt(recordGames(aggregate))} deck appearances</span><span class="chip">${prevalence === null ? "prevalence unavailable" : `${fmtRate(prevalence)} deck prevalence`}</span><span class="chip">${fmtRate(recordWinRate(aggregate))} deck result</span><span class="chip">${fmtInt(value(aggregate,"usage_count","raw.usage_count"))} recorded play events</span></div><details class="raw-drawer"><summary>Every DeckStats aggregate field</summary><pre>${escapeHTML(pretty(rawAggregate))}</pre></details>`
     : '<div class="legacy-notice">This is a CardMemory-only identity with no DeckStats aggregate in the selected scope.</div>';
   $("card-detail").innerHTML = `<p class="eyebrow">Canonical ID ${escapeHTML(record.cardId ?? "not persisted")}</p><h3>${escapeHTML(name)}</h3><div class="detail-tags"><span class="chip">DeckStats ${aggregate ? "present" : "missing"}</span><span class="chip">CardMemory ${memory ? "present" : "missing"}</span></div>${memoryHtml}${aggregateHtml}`;
 }
@@ -1029,10 +1382,23 @@ function bindEvents() {
   $("deck-search").addEventListener("input", renderDeckTable); $("card-search").addEventListener("input", renderCardTable);
   $("game-prev").addEventListener("click", () => { if (state.statsPage > 0) { state.statsPage--; loadStatsGames(); } });
   $("game-next").addEventListener("click", () => { state.statsPage++; loadStatsGames(); });
+  document.addEventListener("change", async (event) => {
+    if (event.target && event.target.id === "trace-actor-filter") {
+      state.actionActorFilter = event.target.value || "all";
+      state.actionPage = 0;
+      await selectEvaluationGame(state.selectedGameKey,false);
+    }
+  });
   document.addEventListener("click", async (event) => {
     const actionPageButton = event.target.closest("button[data-action-page]");
     if (actionPageButton && !actionPageButton.disabled) {
       state.actionPage = Math.max(0,number(actionPageButton.dataset.actionPage));
+      await selectEvaluationGame(state.selectedGameKey,false);
+      return;
+    }
+    const replayPageButton = event.target.closest("button[data-replay-page]");
+    if (replayPageButton && !replayPageButton.disabled) {
+      state.replayPage = Math.max(0,number(replayPageButton.dataset.replayPage));
       await selectEvaluationGame(state.selectedGameKey,false);
       return;
     }
@@ -1042,6 +1408,14 @@ function bindEvents() {
       const pre = actionDetails.querySelector("pre");
       if (pre) pre.textContent = pretty(state.currentActions[index] ?? null);
       actionDetails.dataset.loaded = "true";
+      return;
+    }
+    const replayDetails = event.target.closest("details[data-replay-index]");
+    if (replayDetails && !replayDetails.dataset.loaded) {
+      const index = number(replayDetails.dataset.replayIndex,-1);
+      const pre = replayDetails.querySelector("pre");
+      if (pre) pre.textContent = pretty(state.currentReplayActions[index] ?? null);
+      replayDetails.dataset.loaded = "true";
       return;
     }
     const evaluatorPageButton = event.target.closest("button[data-evaluator-page]");
@@ -1064,6 +1438,7 @@ function bindEvents() {
       const payloads = {
         "full-debug": state.currentFullDebug,
         "evaluator-terminal": state.currentEvaluatorTerminal,
+        "terminal-debug": state.currentTerminalDebug,
         "trace-replay": state.currentTraceReplay,
       };
       const pre = lazyDetails.querySelector("pre");
