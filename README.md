@@ -306,7 +306,7 @@ full-pool coverage counts are in the ROADMAP status snapshot.
 
 ```bash
 python main.py --canary-config round-7.92 \
-  --run-name round-7.92-combat-v5-v1
+  --run-name round-7.92-combat-v5-v2
 ```
 
 No format or deck flags are required for the pinned Standard default. Custom

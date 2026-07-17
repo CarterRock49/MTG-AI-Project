@@ -41,7 +41,7 @@ working-tree counts:
 | Golden scenarios | 404/404 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
-| Discovered unit tests | 428/428 |
+| Discovered unit tests | 430/430 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
 | Observation schema | v3 / `6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137` |
 
@@ -237,6 +237,25 @@ training seed `20260715`, independent evaluation seed `21260715`, Observation
 v3, reward v6, and `combat-v5`. Mismatch in those checked fields fails before
 training. Git/patch provenance, runtime libraries, and the specific GPU model
 are recorded for audit rather than constrained by the canary selector.
+
+### Run 1 result (`round-7.92-combat-v5-v1`) and the delayed-return fix
+
+The first v5 run stopped at 393,256 timesteps when a mask-valid priority pass
+advanced into the end step and Parting Gust returned Namor the Sub-Mariner
+with a +1/+1 counter. Battlefield abilities were registered after enter
+counters, so the counter's immediate layer pass encountered Namor's unresolved
+`*` power before its characteristic-defining ability existed and raised a
+`TypeError`. The pass action itself and its mask were correct.
+
+Battlefield abilities are now registered before enter counters, and Layer 7c
+leaves unresolved symbolic power/toughness alone until a characteristic-
+defining effect resolves it. Replay also restores the recorded opponent
+handicap and turn limit, making the retained 162-action production failure
+artifact deterministic through the repaired transition. The exact replay,
+430 unit tests, 404 golden scenarios, runtime and training smoke suites, and
+the default invariant fuzz gate are green. Curriculum scheduler state is not
+checkpointed, so the 350k checkpoint remains diagnostic only; launch a fresh
+`round-7.92-combat-v5-v2` canary rather than resuming it.
 
 ---
 
@@ -463,7 +482,7 @@ v3 throughput and memory alongside behavior telemetry.
    strict fidelity counters, composite-payment transaction, canary validation,
    and paired qualification interval. Do not launch if that gate regresses.
 2. Launch a fresh Standard candidate with
-   `--canary-config round-7.92 --run-name round-7.92-combat-v5-v1`. The named
+   `--canary-config round-7.92 --run-name round-7.92-combat-v5-v2`. The named
    configuration checks reward `discounted-state-potential-v6`, the full
    resolved `combat-v5` hash, feature width/device class, 1M timesteps, eight
    environments, 100k periodic
@@ -776,7 +795,7 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
   ratchet, expanded strict recovery fidelity telemetry, pinned independent
   train/evaluation seeds in a named canary contract, and changed periodic
   checkpoint qualification from a point estimate to a pair-aware 95%
-  lower-bound gate. The delivery suite is green at 428 unit tests, 404
+  lower-bound gate. The delivery suite is green at 430 unit tests, 404
   scenarios, 9/9 runtime smoke, 13/13 training smoke, and 8/8 default fuzz
   seeds plus the phase-boundary check. The held-out Harvest protocol still needs the same
   interval enforcement before its point-score pass is sufficient evidence.

@@ -683,11 +683,17 @@ class ActionHandler(
                     # The signature has already been inspected, so a TypeError here
                     # came from inside the handler.  Retrying can apply a partial
                     # mutation twice and corrupt zones; fail this action once.
+                    if self.last_handler_error is None:
+                        self.last_handler_error = (
+                            f"{type(handler_e).__name__}: {handler_e}")
                     logging.error(
                         f"TypeError inside handler {action_type} with params "
                         f"{handler_args}: {handler_e}", exc_info=True)
                     action_reward, action_executed = -0.2, False
                 except Exception as handler_e:
+                    if self.last_handler_error is None:
+                        self.last_handler_error = (
+                            f"{type(handler_e).__name__}: {handler_e}")
                     logging.error(f"Error executing handler {action_type} with params {handler_args}: {handler_e}", exc_info=True)
                     action_reward, action_executed = -0.2, False # Fail on general error
             else:

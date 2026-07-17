@@ -223,6 +223,33 @@ class EvaluationDebugReplayTest(unittest.TestCase):
             finally:
                 env.close()
 
+    def test_replay_restores_recorded_opponent_handicap(self):
+        with tempfile.TemporaryDirectory() as root:
+            source = self._environment(root, "handicap-source")
+            replay_env = self._environment(root, "handicap-replay")
+            try:
+                source.set_opponent_handicap(0.2, ["scripted"])
+                source.reset(seed=3357085743, options={
+                    "opponent_profile": "scripted",
+                })
+                payload = source.export_replay()
+                self.assertEqual(payload["opponent_handicap"], 0.2)
+
+                replay_env.replay(payload)
+                self.assertEqual(replay_env.active_opponent_profile, "scripted")
+                self.assertEqual(replay_env.active_opponent_handicap, 0.2)
+                self.assertEqual(
+                    replay_env._episode_metadata()["opponent_handicap"], 0.2)
+                # An explicit replay value is episode-local and must not stage
+                # a handicap for unrelated future resets.
+                replay_env.reset(seed=3357085744, options={
+                    "opponent_profile": "scripted",
+                })
+                self.assertEqual(replay_env.active_opponent_handicap, 0.0)
+            finally:
+                source.close()
+                replay_env.close()
+
     def test_all_terminal_early_returns_attach_exact_debug(self):
         with tempfile.TemporaryDirectory() as root:
             invalid = self._environment(root, "invalid-limit")

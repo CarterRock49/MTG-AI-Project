@@ -102,6 +102,35 @@ class CountedSubtypeCdaTest(unittest.TestCase):
         self.assertEqual(namor.power, 1)
         self.assertEqual(namor.toughness, 4)
 
+    def test_cda_re_registers_before_blink_return_counters_apply(self):
+        game_state, ids = self._game()
+        namor_id = ids["Namor the Sub-Mariner"]
+        namor = game_state._safe_get_card(namor_id)
+
+        self.assertEqual(namor.power, 2)
+        self.assertTrue(game_state.move_card(
+            namor_id, game_state.p1, "battlefield",
+            game_state.p1, "exile", cause="exile_effect"))
+        self.assertFalse(any(
+            data.get("source_id") == namor_id
+            for _, data in game_state.layer_system.layers[7]["a"]))
+
+        self.assertTrue(game_state.move_card(
+            namor_id, game_state.p1, "exile",
+            game_state.p1, "battlefield", cause="delayed_blink_return",
+            context={"enter_counters": [{
+                "type": "+1/+1", "count": 1,
+            }]}))
+
+        layer_effects = [
+            data for _, data in game_state.layer_system.layers[7]["a"]
+            if data.get("source_id") == namor_id
+        ]
+        self.assertEqual(len(layer_effects), 1)
+        self.assertEqual(namor.counters, {"+1/+1": 1})
+        self.assertEqual(namor.power, 3)  # self + helper + the counter
+        self.assertEqual(namor.toughness, 5)
+
     def test_layer_parsers_emit_generic_subtype_count_descriptor(self):
         text = "Champion's power is equal to the number of Knights you control"
         expected = {

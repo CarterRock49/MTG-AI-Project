@@ -841,6 +841,15 @@ class GameStateZonesMixin:
             )
             enters_tapped = event_context.get('enters_tapped', False) or etb_tapped_from_text
             if enters_tapped: final_destination_player.setdefault("tapped_permanents", set()).add(card_id)
+
+            # The object is now on the battlefield, so its static and triggered
+            # abilities must exist before any enter counters invoke an immediate
+            # layer/SBA pass.  In particular, a creature with symbolic ``*``
+            # power needs its CDA registered before +1/+1 counters are applied.
+            if card and self.ability_handler:
+                self.ability_handler.register_card_abilities(
+                    card_id, final_destination_player)
+
             if card and 'saga' in getattr(card,'subtypes',[]): self.add_counter(card_id, "lore", 1)
             if card and 'planeswalker' in getattr(card,'card_types',[]):
                 base_loyalty = getattr(card, 'loyalty', 0)
@@ -873,9 +882,6 @@ class GameStateZonesMixin:
                      # Re-apply layers immediately after registering these effects
                      self.layer_system.apply_all_effects()
             # --- End Impending ETB ---
-
-            # --- Register Abilities FIRST ---
-            if card and self.ability_handler: self.ability_handler.register_card_abilities(card_id, final_destination_player)
 
             # --- Record Offspring Cost Payment *BEFORE* triggering ETB ---
             # The trigger condition will check this context map for the specific card ID instance.

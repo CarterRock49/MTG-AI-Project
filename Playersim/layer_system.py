@@ -488,9 +488,16 @@ class LayerSystem:
                 # Recalculate net change based on potentially cleaned counters.
                 net_change = plus_counters - minus_counters
                 if net_change != 0:
-                    # Check if power/toughness exist before modifying (should exist if creature)
-                    if 'power' in char_dict: char_dict['power'] += net_change
-                    if 'toughness' in char_dict: char_dict['toughness'] += net_change
+                    # A permanent can be on the battlefield briefly before its
+                    # static CDA has been registered (for example, a blink
+                    # return that enters with a counter).  Symbolic printed P/T
+                    # is represented as None during that window.  Do not invent
+                    # a zero base or throw here; the post-entry layer pass will
+                    # apply the CDA first and then these counters.
+                    if isinstance(char_dict.get('power'), (int, float)):
+                        char_dict['power'] += net_change
+                    if isinstance(char_dict.get('toughness'), (int, float)):
+                        char_dict['toughness'] += net_change
                     logging.debug(f"Layer 7c: Applied {net_change:+} P/T from counters to {card_id} (P/T now {char_dict.get('power')}/{char_dict.get('toughness')})")
 
     def _calculate_layer7d_modify(self, effect_data, calculated_characteristics): # Renamed from _calculate_layer7c_modify

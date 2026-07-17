@@ -815,15 +815,27 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.active_opponent_profile = requested_profile
                 # Fixed evaluation always faces full-strength opponents; the
                 # annealed training handicap commits here so opponent strength
-                # stays constant within an episode.  The handicap RNG stream
-                # is derived from the reset seed but independent of the game
-                # and matchmaking streams.
-                self.active_opponent_handicap = (
-                    self._pending_opponent_handicap
-                    if (scheduled_case is None
-                        and requested_profile
-                        in self._pending_handicap_profiles)
-                    else 0.0)
+                # stays constant within an episode. A replay may instead pin
+                # the exact recorded handicap without mutating the staged value
+                # used by later training resets. The handicap RNG stream is
+                # derived from the reset seed but independent of the game and
+                # matchmaking streams.
+                explicit_handicap = (options or {}).get(
+                    "opponent_handicap") if scheduled_case is None else None
+                if explicit_handicap is not None:
+                    explicit_handicap = float(explicit_handicap)
+                    if (not math.isfinite(explicit_handicap)
+                            or not 0.0 <= explicit_handicap <= 1.0):
+                        raise ValueError(
+                            "Opponent handicap must be within [0, 1]")
+                    self.active_opponent_handicap = explicit_handicap
+                else:
+                    self.active_opponent_handicap = (
+                        self._pending_opponent_handicap
+                        if (scheduled_case is None
+                            and requested_profile
+                            in self._pending_handicap_profiles)
+                        else 0.0)
                 self._opponent_handicap_rng = random.Random(
                     _stable_seed(seed, "opponent-handicap"))
 
@@ -4063,6 +4075,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 'agent_is_p1': replay_seat,
                 'opponent_profile': payload.get(
                     'opponent_profile', self.default_opponent_profile),
+                'opponent_handicap': payload.get('opponent_handicap'),
+                'max_turns': payload.get('max_turns'),
                 'stage': payload.get('curriculum_stage'),
                 'stage_index': payload.get('curriculum_stage_index'),
                 'agent_deck': payload.get('agent_deck'),
