@@ -5870,6 +5870,7 @@ class CounterSpellEffect(AbilityEffect):
             return True
 
         countered_count = 0
+        resolved_noop = False
         target_left_stack = False
         # Typically counters one target, but handle list in case of "Counter up to two..."
         for target_id in target_ids:
@@ -5907,6 +5908,12 @@ class CounterSpellEffect(AbilityEffect):
 
             if not can_be_countered:
                 logging.debug(f"Cannot counter {spell.name} - it can't be countered")
+                # An uncounterable spell remains a legal target.  The
+                # counter instruction resolves normally and simply does not
+                # move that spell off the stack.  Report successful effect
+                # resolution so sequenced/modal continuations do not mistake
+                # this rules no-op for an engine fidelity failure.
+                resolved_noop = True
                 continue
 
             # Remove from stack and move to graveyard
@@ -5921,10 +5928,10 @@ class CounterSpellEffect(AbilityEffect):
             break # Default: Counter first valid target
 
         # Check SBAs? Unlikely needed here, main loop handles post-resolution checks.
-        # A target leaving the stack is a successful rules no-op. Preserve
-        # the historical False result when a present target cannot actually
-        # be countered (for example Cavern of Souls).
-        return countered_count > 0 or target_left_stack
+        # A target leaving the stack or being uncounterable is a successful
+        # rules no-op.  False remains reserved for malformed/internal cases,
+        # such as a stack entry whose card object cannot be recovered.
+        return countered_count > 0 or resolved_noop or target_left_stack
 
 class DiscardEffect(AbilityEffect):
     """Effect that causes players to discard cards."""

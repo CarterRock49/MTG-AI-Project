@@ -11478,8 +11478,10 @@ def s_cavern_of_souls_chosen_type_mana():
     counter_ok = CounterSpellEffect().apply(
         gs, opponent["battlefield"][0] if opponent["battlefield"] else None,
         opponent, {"spells": [elf]})
-    assert not counter_ok, "a counterspell claimed to counter the Cavern-funded spell"
-    assert gs.stack, "the uncounterable spell left the stack"
+    assert counter_ok, \
+        "a legal counter attempt against the Cavern-funded spell failed resolution"
+    assert any(item[0] == "SPELL" and item[1] == elf for item in gs.stack), \
+        "the uncounterable spell left the stack"
     assert gs.resolve_top_of_stack(), "the Elf did not resolve"
     assert elf in controller["battlefield"], "the uncountered Elf did not enter"
 
@@ -13209,6 +13211,54 @@ def scenario_three_steps_ahead_counter_mode_end_to_end():
     assert any(item[1] == uncounterable for item in gs.stack), \
         "counter mode affected the unselected uncounterable spell"
     assert player["graveyard"].count(spree_id) == 1
+
+
+@scenario("608.2j / 701.5 / 702.172", "Three Steps Ahead treats an uncounterable target as a successful modal no-op across its discard continuation")
+def scenario_three_steps_ahead_uncounterable_modal_continuation():
+    (gs, _, handler, player, opponent, spree_id, _, _) = _setup_three_steps(
+        SEED + 143, 3, 2)
+    uncounterable = inject_real_card(
+        gs, opponent, "Surrak, Elusive Hunter", "hand")
+    opponent["hand"].remove(uncounterable)
+    gs.add_to_stack("SPELL", uncounterable, opponent, {
+        "source_zone": "hand", "was_cast": True,
+        "requires_target": False, "num_targets": 0,
+    })
+    gs.phase = gs.PHASE_PRIORITY
+    gs.priority_player = player
+    player["mana_pool"] = _three_steps_mana(3, 2)
+    fidelity_before = gs.fidelity_counters["effect_continuation_failures"]
+
+    _cast_three_steps_modes(
+        handler, player, (0, 2), target_spell=uncounterable)
+    assert gs.resolve_top_of_stack(), \
+        "counter-plus-draw Three Steps Ahead did not begin resolving"
+    assert gs.choice_context and gs.choice_context.get("type") == "discard", \
+        "Three Steps Ahead did not pause for its draw-mode discard"
+    pending = gs.choice_context.get("effect_continuation", {})
+    assert pending.get("success") is True \
+        and not pending.get("failure_details"), \
+        f"the uncounterable target poisoned the continuation: {pending}"
+    assert any(item[0] == "SPELL" and item[1] == uncounterable
+               for item in gs.stack), \
+        "Three Steps Ahead removed its uncounterable target"
+
+    contexts_before = list(gs.fidelity_counters[
+        "effect_continuation_failure_contexts"])
+    _apply_public_action(handler, 238, "complete uncounterable Spree discard")
+    assert gs.fidelity_counters["effect_continuation_failures"] == \
+        fidelity_before, \
+        "the legal uncounterable no-op became a continuation fidelity failure"
+    assert gs.fidelity_counters["effect_continuation_failure_contexts"] == \
+        contexts_before, \
+        "the legal uncounterable no-op emitted a fidelity failure context"
+    assert any(item[0] == "SPELL" and item[1] == uncounterable
+               for item in gs.stack), \
+        "the uncounterable target left the stack after continuation resumed"
+    assert player["graveyard"].count(spree_id) == 1
+    assert gs.resolve_top_of_stack(), "Surrak did not resolve after the no-op"
+    assert uncounterable in opponent["battlefield"], \
+        "the uncountered Surrak did not enter the battlefield"
 
 
 @scenario("707.2 / 702.172", "Three Steps Ahead copies either kind of controlled permanent with printed values")
