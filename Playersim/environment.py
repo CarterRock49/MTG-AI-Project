@@ -3349,13 +3349,63 @@ class AlphaZeroMTGEnv(gym.Env):
         live_stack = list(getattr(gs, "stack", ()) or ())
         for item in live_stack[:32]:
             if isinstance(item, tuple) and len(item) >= 3:
-                stack.append({
+                stack_item = {
                     "kind": str(item[0]),
                     "source_id": item[1],
                     "controller": self._evaluation_player_label(item[2]),
-                })
+                }
+                raw_context = item[3] \
+                    if len(item) > 3 and isinstance(item[3], dict) else {}
+                context = {}
+                for key in (
+                        "target_id", "target_card_id", "target_player",
+                        "mode", "x_value", "effect_text", "targeting_text"):
+                    context_value = raw_context.get(key)
+                    if context_value is None:
+                        continue
+                    if isinstance(context_value, str):
+                        context_value = context_value[:512]
+                    context[key] = context_value
+                for key in (
+                        "target_ids", "selected_targets", "modes"):
+                    context_value = raw_context.get(key)
+                    if isinstance(
+                            context_value,
+                            (list, tuple, set, frozenset)):
+                        context[key] = list(context_value)[:32]
+                if context:
+                    stack_item["context"] = context
+                stack.append(stack_item)
             else:
                 stack.append({"kind": type(item).__name__})
+
+        live_attackers = list(
+            getattr(gs, "current_attackers", ()) or ())
+        raw_blocks = getattr(gs, "current_block_assignments", {}) or {}
+        block_assignments = {}
+        if isinstance(raw_blocks, dict):
+            for attacker_id, blocker_ids in list(raw_blocks.items())[:64]:
+                try:
+                    blockers = list(blocker_ids or ())
+                except TypeError:
+                    blockers = []
+                block_assignments[str(attacker_id)] = blockers[:32]
+
+        def bounded_combat_targets(attribute):
+            raw_targets = getattr(gs, attribute, {}) or {}
+            if not isinstance(raw_targets, dict):
+                return {}
+            return {
+                str(attacker_id): target_id
+                for attacker_id, target_id
+                in list(raw_targets.items())[:64]
+            }
+
+        try:
+            active_player = self._evaluation_player_label(
+                gs._get_active_player())
+        except Exception:
+            active_player = None
 
         phase = getattr(gs, "phase", None)
         snapshot = {
@@ -3365,9 +3415,18 @@ class AlphaZeroMTGEnv(gym.Env):
                 phase, str(phase) if phase is not None else None),
             "priority_player": self._evaluation_player_label(
                 getattr(gs, "priority_player", None)),
+            "active_player": active_player,
             "p1": player_snapshot(getattr(gs, "p1", None)),
             "p2": player_snapshot(getattr(gs, "p2", None)),
             "stack": stack,
+            "combat": {
+                "attackers": live_attackers[:64],
+                "block_assignments": block_assignments,
+                "planeswalker_targets": bounded_combat_targets(
+                    "planeswalker_attack_targets"),
+                "battle_targets": bounded_combat_targets(
+                    "battle_attack_targets"),
+            },
         }
         decision_context = self._evaluation_decision_context_snapshot()
         if decision_context is not None:
@@ -3384,6 +3443,12 @@ class AlphaZeroMTGEnv(gym.Env):
             }
         if len(live_stack) > 32:
             snapshot["stack_omitted"] = len(live_stack) - 32
+        if len(live_attackers) > 64:
+            snapshot["combat"]["attackers_omitted"] = \
+                len(live_attackers) - 64
+        if isinstance(raw_blocks, dict) and len(raw_blocks) > 64:
+            snapshot["combat"]["block_assignments_omitted"] = \
+                len(raw_blocks) - 64
         return self._json_safe_replay_value(snapshot)
 
     def _evaluation_action_description(self, action_idx, context):
@@ -3754,8 +3819,10 @@ class AlphaZeroMTGEnv(gym.Env):
         State snapshots intentionally store physical runtime IDs so repeated
         copies remain distinguishable.  Persisting the matching names here
         lets a debugger explain hand/zone/stack deltas without loading the
-        full card database or guessing from evaluator calls.  This is
-        diagnostic metadata only and never participates in replay.
+        full card database or guessing from evaluator calls.  Bounded printed
+        characteristics support offline visual card labels while remaining
+        immutable identity metadata.  This is diagnostic metadata only and
+        never participates in replay.
         """
         gs = getattr(self, "game_state", None)
         if gs is None:
@@ -3915,6 +3982,9 @@ class AlphaZeroMTGEnv(gym.Env):
             if card is None:
                 card = ceased_tokens.get(runtime_id)
             canonical_id = printings.get(runtime_id, runtime_id)
+            printed = getattr(card, "_printed", None)
+            if not isinstance(printed, dict):
+                printed = {}
             entry = {
                 "runtime_id": self._json_safe_replay_value(runtime_id),
                 "canonical_id": self._json_safe_replay_value(canonical_id),
@@ -3922,9 +3992,43 @@ class AlphaZeroMTGEnv(gym.Env):
                     card, "name", f"Unknown Card {runtime_id}")),
                 "owner": player_owner(runtime_id),
             }
-            type_line = getattr(card, "type_line", None)
+            type_line = printed.get(
+                "type_line", getattr(card, "type_line", None))
             if type_line:
                 entry["type_line"] = str(type_line)
+            mana_cost = printed.get(
+                "mana_cost", getattr(card, "mana_cost", None))
+            if mana_cost:
+                entry["mana_cost"] = str(mana_cost)
+            oracle_text = printed.get(
+                "oracle_text", getattr(card, "oracle_text", None))
+            if oracle_text:
+                entry["oracle_text"] = str(oracle_text)[:2048]
+            type_text = str(type_line or "").casefold()
+            characteristic_fields = []
+            if "creature" in type_text:
+                characteristic_fields.extend((
+                    ("base_power", "power", "power"),
+                    ("base_toughness", "toughness", "toughness"),
+                ))
+            if "planeswalker" in type_text:
+                characteristic_fields.append(
+                    ("base_loyalty", "loyalty", "loyalty"))
+            if "battle" in type_text:
+                characteristic_fields.append(
+                    ("base_defense", "defense", "defense"))
+            for output_key, printed_key, attribute in characteristic_fields:
+                amount = printed.get(
+                    printed_key, getattr(card, attribute, None))
+                if amount is not None:
+                    entry[output_key] = self._json_safe_replay_value(amount)
+            colors = printed.get("colors", getattr(card, "colors", None))
+            if isinstance(colors, (list, tuple)):
+                entry["colors"] = self._json_safe_replay_value(
+                    list(colors)[:5])
+            entry["is_token"] = bool(
+                isinstance(runtime_id, str)
+                and runtime_id.startswith("TOKEN_"))
             entries.append(entry)
         return {
             "schema_version": 1,

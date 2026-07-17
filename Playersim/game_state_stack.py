@@ -554,6 +554,9 @@ class GameStateStackMixin:
         The per-controller set records every battlefield permanent that player
         has targeted this turn, even when it has no Valiant ability yet. This
         keeps first-time checks correct if an object gains Valiant later.
+        Creature spells on the stack also emit the event for battlefield
+        watchers such as Surrak, Elusive Hunter, but are deliberately excluded
+        from the permanent-only first-time ledger.
         """
         if not controller or not isinstance(targets, dict):
             return 0
@@ -567,13 +570,21 @@ class GameStateStackMixin:
         emitted = 0
         for target_id in dict.fromkeys(target_ids):
             target_controller, target_zone = self.find_card_location(target_id)
-            if target_zone != "battlefield":
+            if target_zone not in {"battlefield", "stack"}:
                 continue
-            first_time = target_id not in targeted_this_turn
-            targeted_this_turn.add(target_id)
+            first_time = False
+            if target_zone == "battlefield":
+                first_time = target_id not in targeted_this_turn
+                targeted_this_turn.add(target_id)
+            target_card = self._safe_get_card(target_id)
             self.trigger_ability(target_id, "BECOMES_TARGET", {
                 "target_id": target_id,
                 "target_controller": target_controller,
+                "target_zone": target_zone,
+                "target_is_spell": target_zone == "stack",
+                "target_card": target_card,
+                "target_card_types": list(getattr(
+                    target_card, "card_types", []) or []),
                 "targeting_controller": controller,
                 "targeting_source_id": source_id,
                 "first_time_targeted_by_controller_this_turn": first_time,
@@ -1482,6 +1493,11 @@ class GameStateStackMixin:
             oracle_text)
         if evidence_match:
             return {"type": "collect_evidence", "threshold": int(evidence_match.group(1))}
+        blight_match = re.search(
+            r"as an additional cost to cast this spell,\s*you may blight (\d+)",
+            oracle_text)
+        if blight_match:
+            return {"type": "blight", "amount": int(blight_match.group(1))}
         return None
 
     def _begin_casting_choice(self, choice_context):
@@ -1882,6 +1898,38 @@ class GameStateStackMixin:
             int(choice.get("selected_mana_value", 0)) + mana_value)
         return True
 
+    def choose_blight_creature(self, option_index):
+        """Pay blight by staging the chosen creature for -1/-1 counters."""
+        choice = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "blight"):
+            return False
+        options = choice.get("options", [])
+        if not isinstance(option_index, int) or not 0 <= option_index < len(options):
+            return False
+        creature_id = options[option_index]
+        controller = choice.get("controller") or choice.get("player")
+        if (creature_id not in controller.get("battlefield", [])
+                or not self._is_creature(creature_id)):
+            return False
+        cast_context = dict(choice.get("original_cast_context", {}))
+        cast_context["sample_nonmana_cost_complete"] = True
+        cast_context["additional_cost_paid"] = True
+        cast_context["_blight_creature_id"] = creature_id
+        cast_context["_blight_amount"] = max(1, int(choice.get("amount", 1)))
+        return self._resume_after_casting_choice(choice, cast_context)
+
+    def decline_blight_choice(self):
+        """Decline the optional blight cost and resume the pending cast."""
+        choice = self.choice_context
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "blight"):
+            return False
+        cast_context = dict(choice.get("original_cast_context", {}))
+        cast_context["sample_nonmana_cost_complete"] = True
+        cast_context["additional_cost_paid"] = False
+        return self._resume_after_casting_choice(choice, cast_context)
+
     def finish_collect_evidence_choice(self):
         """Decline evidence, or stage exact cards and resume the pending cast."""
         choice = self.choice_context
@@ -1912,6 +1960,9 @@ class GameStateStackMixin:
             targets["X"] = context["X"]
         if "evidence_collected" in context:
             targets["evidence_collected"] = bool(context["evidence_collected"])
+        if "additional_cost_paid" in context:
+            targets["additional_cost_paid"] = bool(
+                context["additional_cost_paid"])
         return targets
 
     @staticmethod
@@ -2972,6 +3023,24 @@ class GameStateStackMixin:
                     })
                 context["sample_nonmana_cost_complete"] = True
                 context["evidence_collected"] = False
+            if sample_additional_cost["type"] == "blight":
+                # Blight N: the caster may put N -1/-1 counters on a creature
+                # they control as the spell's optional additional cost.
+                options = [
+                    battlefield_id
+                    for battlefield_id in player.get("battlefield", [])
+                    if self._is_creature(battlefield_id)]
+                if options:
+                    return self._begin_casting_choice({
+                        "type": "blight",
+                        "player": player, "controller": player,
+                        "card_id": card_id, "source_id": card_id,
+                        "amount": int(sample_additional_cost["amount"]),
+                        "options": options,
+                        "original_cast_context": dict(context),
+                    })
+                context["sample_nonmana_cost_complete"] = True
+                context["additional_cost_paid"] = False
 
         if (sample_additional_cost
                 and sample_additional_cost.get("type") == "return_permanent"
@@ -3208,6 +3277,21 @@ class GameStateStackMixin:
             final_stack_context.pop('_returned_for_additional_cost_index', None)
             final_stack_context.pop('_evidence_choices', None)
             final_stack_context.pop('_evidence_threshold', None)
+            # Blight is paid while casting (CR 601.2h): the staged creature
+            # receives its -1/-1 counters now, before the spell is on the
+            # stack, so the "additional cost was paid" record is only kept
+            # when the counters actually landed.
+            blight_creature_id = final_stack_context.pop(
+                '_blight_creature_id', None)
+            blight_amount = int(
+                final_stack_context.pop('_blight_amount', 0) or 0)
+            if blight_creature_id is not None and blight_amount > 0:
+                if not self.add_counter(
+                        blight_creature_id, '-1/-1', blight_amount):
+                    logging.warning(
+                        "Blight payment for %s failed to place counters; "
+                        "recording the additional cost as unpaid.", card.name)
+                    final_stack_context['additional_cost_paid'] = False
 
             try:
                  self.add_to_stack("SPELL", card_id, player, final_stack_context)

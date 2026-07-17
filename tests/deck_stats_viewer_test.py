@@ -155,9 +155,11 @@ class DeckStatsViewerTest(unittest.TestCase):
                 "schema_version": 1,
                 "entries": [
                     {"runtime_id": 901, "canonical_id": 101,
-                     "name": "Shared Name", "owner": "p1"},
+                     "name": "Shared Name", "owner": "p1",
+                     "type_line": "Instant"},
                     {"runtime_id": 902, "canonical_id": 102,
-                     "name": "Opponent Card", "owner": "p2"},
+                     "name": "Opponent Card", "owner": "p2",
+                     "type_line": "Creature — Test"},
                 ],
                 "recorded_entries": 2,
                 "omitted_entries": 0,
@@ -177,22 +179,64 @@ class DeckStatsViewerTest(unittest.TestCase):
                 "pre": {
                     "turn": 2, "phase_name": "MAIN_PRECOMBAT",
                     "priority_player": "p1", "stack": [],
-                    "p1": {"life": 20, "poison_counters": 0,
-                           "zones": {"hand": {"count": 1,
-                                               "cards": [901]}}},
-                    "p2": {"life": 20, "poison_counters": 0,
-                           "zones": {}},
+                    "p1": {
+                        "life": 20, "poison_counters": 0,
+                        "tapped_permanents": [], "damage_marked": [],
+                        "permanent_counters": [],
+                        "zones": {
+                            "library": {"count": 52, "cards": []},
+                            "hand": {"count": 1, "cards": [901]},
+                            "battlefield": {"count": 0, "cards": []},
+                            "graveyard": {"count": 0, "cards": []},
+                            "exile": {"count": 0, "cards": []},
+                        },
+                    },
+                    "p2": {
+                        "life": 20, "poison_counters": 0,
+                        "tapped_permanents": [], "damage_marked": [],
+                        "permanent_counters": [],
+                        "zones": {
+                            "library": {"count": 53, "cards": []},
+                            "hand": {"count": 0, "cards": []},
+                            "battlefield": {"count": 1, "cards": [902]},
+                            "graveyard": {"count": 0, "cards": []},
+                            "exile": {"count": 0, "cards": []},
+                        },
+                    },
                 },
                 "post": {
                     "turn": 2, "phase_name": "MAIN_PRECOMBAT",
                     "priority_player": "p1",
                     "stack": [{"kind": "spell", "source_id": 901,
                                "controller": "p1"}],
-                    "p1": {"life": 20, "poison_counters": 0,
-                           "zones": {"hand": {"count": 0,
-                                               "cards": []}}},
-                    "p2": {"life": 20, "poison_counters": 0,
-                           "zones": {}},
+                    "p1": {
+                        "life": 20, "poison_counters": 0,
+                        "tapped_permanents": [], "damage_marked": [],
+                        "permanent_counters": [],
+                        "zones": {
+                            "library": {"count": 52, "cards": []},
+                            "hand": {"count": 0, "cards": []},
+                            "battlefield": {"count": 0, "cards": []},
+                            "graveyard": {"count": 0, "cards": []},
+                            "exile": {"count": 0, "cards": []},
+                        },
+                    },
+                    "p2": {
+                        "life": 18, "poison_counters": 0,
+                        "tapped_permanents": [902],
+                        "damage_marked": [{"card_id": 902, "amount": 2}],
+                        "permanent_counters": [{
+                            "card_id": 902,
+                            "counters": {"+1/+1": 1},
+                        }],
+                        "zones": {
+                            "library": {"count": 53, "cards": []},
+                            "hand": {"count": 0, "cards": []},
+                            "battlefield": {"count": 1, "cards": [902]},
+                            "graveyard": {"count": 0, "cards": []},
+                            "exile": {"count": 0, "cards": []},
+                        },
+                    },
                 },
                 "evaluator": {
                     "schema_version": 1,
@@ -1034,6 +1078,22 @@ class DeckStatsViewerTest(unittest.TestCase):
         self.assertNotIn("replay", games[1])
         self.assertEqual(games[2]["debug"]["trace"][0]["action"], 20)
         self.assertEqual(len(games[2]["debug"]["trace"]), 2)
+        arena_step = games[2]["debug"]["trace"][0]
+        self.assertEqual(
+            arena_step["pre"]["p2"]["zones"]["battlefield"]["cards"],
+            [902],
+        )
+        self.assertEqual(
+            arena_step["post"]["p2"]["tapped_permanents"], [902])
+        self.assertEqual(
+            arena_step["post"]["p2"]["damage_marked"],
+            [{"amount": 2, "card_id": 902}],
+        )
+        self.assertEqual(
+            arena_step["post"]["p2"]["permanent_counters"][0]
+            ["counters"]["+1/+1"],
+            1,
+        )
         self.assertEqual(
             games[2]["debug"]["card_catalog"]["entries"][0]["name"],
             "Shared Name",
@@ -1303,6 +1363,45 @@ class DeckStatsViewerTest(unittest.TestCase):
             source,
         )
 
+    def test_arena_replay_frontend_contracts_are_present(self):
+        static_root = REPO_ROOT / "DeckStats_Viewer" / "static"
+        html = (static_root / "index.html").read_text(encoding="utf-8")
+        css = (static_root / "viewer.css").read_text(encoding="utf-8")
+        javascript = (static_root / "viewer.js").read_text(encoding="utf-8")
+
+        for control_id in (
+                "arena-replay", "replay-board", "replay-event-feed",
+                "replay-start", "replay-prev", "replay-play",
+                "replay-next", "replay-end", "replay-scrubber",
+                "replay-frame-label", "replay-speed",
+                "replay-perspective", "replay-reveal-hands",
+                "replay-close"):
+            self.assertIn(f'id="{control_id}"', html)
+
+        for marker in (
+                ".arena-replay {", ".arena-board-surface",
+                ".arena-card.is-tapped", ".replay-event-feed",
+                ".replay-transport", ".replay-scrubber-field"):
+            self.assertIn(marker, css)
+
+        for marker in (
+                "function replayFrameState(",
+                "function buildArenaReplayFrames(",
+                "function renderReplayBoard(",
+                "state.replayFrames = buildArenaReplayFrames(actions,terminal)",
+                '$("replay-prev")', '$("replay-play")',
+                '$("replay-next")', '$("replay-scrubber")',
+                '$("replay-speed")'):
+            self.assertIn(marker, javascript)
+
+        # The visual player augments the complete diagnostic view; it must
+        # not replace the trace, replay, or lazy raw-payload inspection paths.
+        for diagnostic_marker in (
+                "function renderTraceStep(", "Full action timeline",
+                'data-lazy-raw="trace-replay"',
+                "state.currentTraceReplay = {trace,replay}"):
+            self.assertIn(diagnostic_marker, javascript)
+
     def _http_json(self, base_url: str, path: str, *, method="GET"):
         request = Request(
             base_url + path,
@@ -1323,15 +1422,26 @@ class DeckStatsViewerTest(unittest.TestCase):
         thread.start()
         base_url = f"http://127.0.0.1:{server.server_address[1]}"
         try:
-            for path, content_type, marker in (
-                    ("/", "text/html", b"CardMemory health"),
-                    ("/viewer.css", "text/css", b".memory-status"),
-                    ("/viewer.js", "text/javascript", b"Evaluator activity")):
+            for path, content_type, markers in (
+                    ("/", "text/html", (
+                        b"CardMemory health", b'id="arena-replay"',
+                        b'id="replay-scrubber"', b'id="replay-speed"',
+                    )),
+                    ("/viewer.css", "text/css", (
+                        b".memory-status", b".arena-replay",
+                        b".arena-board-surface", b".replay-transport",
+                    )),
+                    ("/viewer.js", "text/javascript", (
+                        b"Evaluator activity", b"buildArenaReplayFrames",
+                        b"replayFrameState", b"renderReplayBoard",
+                    ))):
                 with urlopen(base_url + path, timeout=5) as response:
                     self.assertEqual(response.status, 200)
                     self.assertEqual(response.headers.get_content_type(),
                                      content_type)
-                    self.assertIn(marker, response.read())
+                    body = response.read()
+                    for marker in markers:
+                        self.assertIn(marker, body)
 
             status, health = self._http_json(base_url, "/api/health")
             self.assertEqual(status, 200)
@@ -1363,6 +1473,16 @@ class DeckStatsViewerTest(unittest.TestCase):
             )
             self.assertEqual(
                 selected_debug["debug"]["replay"]["actions"][0]["action"], 20)
+            self.assertEqual(
+                selected_debug["debug"]["trace"][0]["post"]["p2"]
+                ["zones"]["battlefield"]["cards"],
+                [902],
+            )
+            self.assertEqual(
+                selected_debug["debug"]["trace"][0]["post"]["p2"]
+                ["tapped_permanents"],
+                [902],
+            )
             self.assertTrue(selected_debug["replay_available"])
             self.assertTrue(selected_debug["trace_available"])
             self.assertTrue(selected_debug["debug_artifact"]["verified"])

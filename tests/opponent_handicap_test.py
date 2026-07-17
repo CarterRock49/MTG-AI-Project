@@ -1,13 +1,21 @@
-"""Round 7.91 curriculum ramps: annealed handicap and stage turn limits.
+"""Round 7.91/7.93 curriculum ramps: annealed handicap and stage turn limits.
 
 Round 7.91: rounds 7.88-7.90 showed a difficulty cliff between the passive
 and novice profiles (~60% decisive wins collapsing to ~5%).  The handicap
-gives active stages a climbable slope; these tests pin its three promises:
+gives active stages a climbable slope.  Round 7.93: run round-7.92-combat-v5-v3
+showed raw-rate windows ratcheting on noise (6/24 wins, exactly the stage
+floor) with no way back once the agent collapsed at full strength.  These
+tests pin the ratchet's four promises:
 
-1. The trainer ratchets epsilon toward zero only on full windows of wins at
-   the CURRENT epsilon, resets it per stage, and persists it across restore.
-2. Mastery requires the anneal to finish and full-strength profile evidence.
-3. The environment commits a staged handicap only at reset, only for the
+1. The trainer tightens epsilon toward zero only when the 95% Wilson lower
+   bound of a full window at the CURRENT epsilon clears the stage target;
+   a raw rate at the target is not enough.
+2. The ratchet is reversible: when the window's upper bound falls below the
+   target — including at epsilon zero — one rung is handed back, never past
+   the stage's configured start.
+3. Mastery requires the anneal to finish and full-strength profile evidence;
+   epsilon resets per stage and persists across restore.
+4. The environment commits a staged handicap only at reset, only for the
    handicapped profiles, never for fixed evaluation schedules, and the
    handicapped opponent declines optional aggression deterministically.
 """
@@ -38,11 +46,14 @@ HANDICAP_CURRICULUM = {
         {
             "name": "ramp",
             "start_timestep": 0,
+            # Window 4 with target 0.5 is the smallest pair where the 95%
+            # Wilson interval resolves both directions: 4/4 wins has lower
+            # bound ~0.51 (tighten) and 0/4 has upper bound ~0.49 (relax).
             "handicap": {
                 "profiles": ["novice"],
                 "start": 0.50,
                 "step": 0.25,
-                "window_episodes": 2,
+                "window_episodes": 4,
                 "min_decisive_win_rate": 0.5,
             },
             "advance_when": {
@@ -130,9 +141,11 @@ class HandicapRatchetTest(unittest.TestCase):
         record_outcome(callback, "passive", "win", 0.0)
         self.assertEqual(callback._handicap_epsilon, 0.50)
 
-        # A full window at the live epsilon ratchets one step and
+        # A full winning window at the live epsilon ratchets one step and
         # broadcasts the new value.
-        record_outcome(callback, "novice", "win", 0.50)
+        for _ in range(3):
+            record_outcome(callback, "novice", "win", 0.50)
+        self.assertEqual(callback._handicap_epsilon, 0.50)
         record_outcome(callback, "novice", "win", 0.50)
         self.assertEqual(callback._handicap_epsilon, 0.25)
         self.assertEqual(
@@ -141,10 +154,71 @@ class HandicapRatchetTest(unittest.TestCase):
 
         # The window restarts at the new epsilon: the same records do not
         # double-count.
-        record_outcome(callback, "novice", "win", 0.25)
+        for _ in range(3):
+            record_outcome(callback, "novice", "win", 0.25)
         self.assertEqual(callback._handicap_epsilon, 0.25)
         record_outcome(callback, "novice", "win", 0.25)
         self.assertEqual(callback._handicap_epsilon, 0.0)
+
+    def test_noise_level_window_at_the_target_does_not_tighten(self):
+        callback, probe, _ = build_callback()
+        callback.num_timesteps = 1
+
+        # 3/4 wins clears the 0.5 target on the raw rate, but its 95% lower
+        # bound (~0.30) does not.  Round-7.92 flatlined because raw-rate
+        # windows kept strengthening opponents on exactly this evidence.
+        record_outcome(callback, "novice", "loss", 0.50)
+        for _ in range(3):
+            record_outcome(callback, "novice", "win", 0.50)
+        self.assertEqual(callback._handicap_epsilon, 0.50)
+        self.assertEqual(len(probe.handicap_calls()), 1)
+
+        # One more win rolls the loss out of the window; 4/4 is significant.
+        record_outcome(callback, "novice", "win", 0.50)
+        self.assertEqual(callback._handicap_epsilon, 0.25)
+
+    def test_collapse_at_the_live_epsilon_hands_back_one_rung(self):
+        callback, probe, _ = build_callback()
+        callback.num_timesteps = 1
+        for _ in range(4):
+            record_outcome(callback, "novice", "win", 0.50)
+        self.assertEqual(callback._handicap_epsilon, 0.25)
+
+        # A full losing window at the new rung is confidently below the
+        # target: hand the rung back rather than keep training on losses.
+        for _ in range(3):
+            record_outcome(callback, "novice", "loss", 0.25)
+        self.assertEqual(callback._handicap_epsilon, 0.25)
+        record_outcome(callback, "novice", "loss", 0.25)
+        self.assertEqual(callback._handicap_epsilon, 0.50)
+        self.assertEqual(
+            probe.handicap_calls()[-1],
+            ("set_opponent_handicap", (0.50, ["novice"])))
+
+        # The stage's configured start is the ceiling: collapse there holds.
+        calls_before = len(probe.handicap_calls())
+        for _ in range(4):
+            record_outcome(callback, "novice", "loss", 0.50)
+        self.assertEqual(callback._handicap_epsilon, 0.50)
+        self.assertEqual(len(probe.handicap_calls()), calls_before)
+
+    def test_full_strength_collapse_reopens_the_anneal(self):
+        callback, probe, _ = build_callback()
+        callback.num_timesteps = 1
+        for epsilon in (0.50, 0.25):
+            for _ in range(4):
+                record_outcome(callback, "novice", "win", epsilon)
+        self.assertEqual(callback._handicap_epsilon, 0.0)
+
+        # Round-7.92 finished its anneal at full strength, collapsed to a
+        # 2-win window, and had no way back.  Epsilon-zero evidence must
+        # reopen the ramp.
+        for _ in range(4):
+            record_outcome(callback, "novice", "loss", 0.0)
+        self.assertEqual(callback._handicap_epsilon, 0.25)
+        self.assertEqual(
+            probe.handicap_calls()[-1],
+            ("set_opponent_handicap", (0.25, ["novice"])))
 
     def test_mastery_waits_for_anneal_and_full_strength_floor(self):
         callback, _, _ = build_callback()
@@ -152,11 +226,11 @@ class HandicapRatchetTest(unittest.TestCase):
 
         # Weakened wins satisfy the aggregate window but neither the anneal
         # nor the full-strength novice floor.
-        record_outcome(callback, "novice", "win", 0.50)
-        record_outcome(callback, "novice", "win", 0.50)
+        for _ in range(4):
+            record_outcome(callback, "novice", "win", 0.50)
         self.assertEqual(callback._handicap_epsilon, 0.25)
-        record_outcome(callback, "novice", "win", 0.25)
-        record_outcome(callback, "novice", "win", 0.25)
+        for _ in range(4):
+            record_outcome(callback, "novice", "win", 0.25)
         self.assertEqual(callback._handicap_epsilon, 0.0)
         self.assertEqual(callback._active_stage_index, 0)
 
@@ -172,8 +246,8 @@ class HandicapRatchetTest(unittest.TestCase):
     def test_epsilon_resets_per_stage_and_survives_restore(self):
         callback, probe, _ = build_callback()
         callback.num_timesteps = 1
-        record_outcome(callback, "novice", "win", 0.50)
-        record_outcome(callback, "novice", "win", 0.50)
+        for _ in range(4):
+            record_outcome(callback, "novice", "win", 0.50)
         self.assertEqual(callback._handicap_epsilon, 0.25)
 
         restored, restored_probe, _ = build_callback()
@@ -185,7 +259,7 @@ class HandicapRatchetTest(unittest.TestCase):
         # Deadline-free mastery advance to a stage without handicap
         # broadcasts a zero so workers cannot keep a stale epsilon.
         restored.num_timesteps = 10
-        for _ in range(2):
+        for _ in range(4):
             record_outcome(restored, "novice", "win", 0.25)
         for _ in range(2):
             record_outcome(restored, "novice", "win", 0.0)

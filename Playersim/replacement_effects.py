@@ -234,10 +234,15 @@ class ReplacementEffectSystem:
             if effect_id:
                 registered_effects.append(effect_id)
 
-        # 5. Skip step/phase effects
-        if any(phrase in oracle_text.lower() for phrase in ["skip", "additional"]) and any(
-            phase in oracle_text.lower() for phase in
-            ["upkeep", "draw", "combat", "end", "turn", "phase", "step"]):
+        # 5. Skip step/phase effects. Match an actual skip instruction, not
+        # arbitrary substrings: ``earthbend`` contains ``end`` and its
+        # reminder text also says ``additional``, which used to register a
+        # bogus end-step PHASE_CHANGE replacement on Badgermole Cub.
+        normalized_oracle = oracle_text.lower()
+        if (re.search(r"\bskip(?:s|ping)?\b", normalized_oracle)
+                and re.search(
+                    r"\b(?:untap|upkeep|draw|main|combat|end|turn|phase|step)\b",
+                    normalized_oracle)):
             effect_id = self._register_skip_phase_effect(card_id, player, oracle_text)
             if effect_id:
                 registered_effects.append(effect_id)

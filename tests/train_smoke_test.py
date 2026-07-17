@@ -402,6 +402,30 @@ def check_mask_aware_evaluation():
             else:
                 raise AssertionError("named canary accepted configuration drift")
 
+            # Round 7.93 pins the same contract over combat-v6; its recorded
+            # curriculum sha must match the resolved widened-window preset.
+            round_7_93 = m.validate_canary_cli(SimpleNamespace(
+                **m.ROUND_7_93_CANARY["cli"],
+                canary_config="round-7.93", resume=None,
+                optimize_hp=False))
+            m.validate_canary_runtime(
+                round_7_93,
+                lineage={
+                    "card_registry": {"sha256": round_7_93["lineage"][
+                        "card_registry_sha256"]},
+                    "feature_schema": {"sha256": round_7_93["lineage"][
+                        "feature_schema_sha256"]},
+                    "corpus": {"sha256": round_7_93["lineage"][
+                        "corpus_sha256"]},
+                },
+                training_config=round_7_93["training_config"],
+                curriculum=m.resolve_curriculum("combat-v6", canary_decks),
+                schedule_sha256=round_7_93["lineage"][
+                    "evaluation_schedule_sha256"],
+                num_envs=8,
+                selected_device="cuda",
+            )
+
             # When the pair count is not divisible by the deck count, both
             # learned-deck and opponent exposure are still optimally balanced.
             ten_decks = [

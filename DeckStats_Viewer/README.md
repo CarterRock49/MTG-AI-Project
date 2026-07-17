@@ -90,6 +90,25 @@ Failure replays remain separate artifacts and are not misrepresented as
 successful-game traces. Trace, replay, and terminal-only debug availability are
 reported and filtered independently.
 
+For a traced evaluation, **Watch replay** opens a full-screen Arena-style
+battlefield driven exclusively by the verified `trace` pre/post snapshots. The
+learned seat is placed at the bottom by default; perspective and the normally
+concealed top hand can be toggled. The theater renders both players' life,
+resources, hands, libraries, graveyards, exile, battlefield, tap state,
+permanent counters, marked damage, stack, priority, turn, and phase. Newer
+captures also identify the active player and combat attackers/blockers, and
+carry immutable mana cost, rules text, and printed stats for card labels and
+hover details. Playback supports play/pause, single-action stepping, scrubbing,
+speed selection, an action feed, and Space/arrow/Home/End keyboard controls.
+Autoplay coalesces routine priority-only passes while every retained action
+remains reachable by stepping or scrubbing.
+
+The visual player never substitutes the learned-policy `replay.actions` stream
+for a full match trace: that stream omits opponent decisions and intermediate
+states. Replay-only, terminal-only, truncated, and historical records remain
+explicitly labeled, and missing snapshots are either tied to the next exact
+capture or visibly held at the last exact state rather than reconstructed.
+
 When a new sidecar contains EnhancedCardEvaluator diagnostics, the selected game
 shows terminal totals and every evaluator event attached to an atomic action:
 card identity, context/perspective, score components, history source/evidence,

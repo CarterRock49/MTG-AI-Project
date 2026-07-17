@@ -1637,7 +1637,7 @@ class TriggeredAbility(Ability):
                 short_name = re.escape(full_name.split(",")[0].strip())
                 self_entry = bool(
                     re.search(r"\bthis\s+(?:artifact|aura|battle|creature|"
-                              r"enchantment|land|permanent|card)\b.*\benters\b",
+                              r"enchantment|land|permanent|vehicle|card)\b.*\benters\b",
                               self.trigger_condition, re.IGNORECASE)
                     or (source_name and re.search(
                         rf"^\s*when(?:ever)?\s+{source_name}\s+enters\b",
@@ -1805,12 +1805,34 @@ class TriggeredAbility(Ability):
                 # watcher, and the targeting object must be controlled by an
                 # opponent.  Without these gates, choosing the target of the
                 # Recruit trigger itself recursively created another trigger.
-                if (re.search(r"(?:a|another) creature you control becomes "
-                              r"the target", self.trigger_condition,
-                              re.IGNORECASE)
-                        and context.get("target_controller") is not
-                        context.get("controller")):
-                    return False
+                controlled_creature = re.search(
+                    r"(?:a|another) creature you control"
+                    r"(?: or (?:a )?creature spell you control)? becomes "
+                    r"the target",
+                    self.trigger_condition, re.IGNORECASE)
+                if controlled_creature:
+                    if (context.get("target_controller") is not
+                            context.get("controller")):
+                        return False
+                    target_zone = context.get("target_zone", "battlefield")
+                    target_card = context.get("target_card")
+                    if target_card is None:
+                        game_state = context.get("game_state")
+                        target_card = (game_state._safe_get_card(target_id)
+                                       if game_state else None)
+                    target_types = {
+                        str(card_type).lower()
+                        for card_type in getattr(
+                            target_card, "card_types", [])}
+                    if "creature" not in target_types:
+                        return False
+                    allows_creature_spell = bool(re.search(
+                        r"creature spell you control",
+                        self.trigger_condition, re.IGNORECASE))
+                    if target_zone == "stack" and not allows_creature_spell:
+                        return False
+                    if target_zone not in {"battlefield", "stack"}:
+                        return False
                 if (re.search(r"spell or ability an opponent controls",
                               self.trigger_condition, re.IGNORECASE)
                         and context.get("targeting_controller") is
@@ -1832,7 +1854,7 @@ class TriggeredAbility(Ability):
                             break
                 # "this creature/land attacks" only triggers for the attacker
                 # itself, never for other permanents that merely hear the event.
-                if (re.search(r"\bthis\s+(?:creature|permanent|land)\b.*\battacks\b",
+                if (re.search(r"\bthis\s+(?:creature|permanent|land|vehicle)\b.*\battacks\b",
                               self.trigger_condition, re.IGNORECASE)
                         and (attachment_subject_id
                              if attachment_subject_id is not None else source_id)
@@ -1981,6 +2003,22 @@ class TriggeredAbility(Ability):
                               self.trigger_condition, re.IGNORECASE)
                         and context.get("source_card_id") != context.get("event_card_id")):
                     return False
+                # Watchers such as Sensational She-Hulk hear only damage to a
+                # creature their controller controls.
+                if re.search(
+                        r"\ba creature you control is dealt damage\b",
+                        self.trigger_condition, re.IGNORECASE):
+                    game_state = context.get("game_state")
+                    damaged_id = context.get("event_card_id")
+                    damaged_card = context.get("event_card")
+                    if (game_state is None
+                            or game_state.get_card_controller(damaged_id) is not
+                            context.get("controller")
+                            or "creature" not in {
+                                str(card_type).lower()
+                                for card_type in getattr(
+                                    damaged_card, "card_types", [])}):
+                        return False
             if event_type == "BEGINNING_OF_COMBAT":
                 context = context or {}
                 gs = context.get("game_state")
@@ -2293,7 +2331,13 @@ class TriggeredAbility(Ability):
         """
         if getattr(self, 'intervening_if', None):
             return self.intervening_if
-        m = re.search(r'(?:when|whenever|at)\b[^,]*,\s*if\s+([^,]+?),', text or '', re.IGNORECASE)
+        # Only the outer trigger can carry an intervening-if clause. An
+        # unanchored search mistook nested reflexive text such as
+        # "When you do, if it has four ..." (Earthbender Ascension) for a
+        # condition on the parent trigger and suppressed that parent.
+        m = re.match(
+            r'^\s*(?:when|whenever|at)\b[^,]*,\s*if\s+([^,]+?),',
+            text or '', re.IGNORECASE)
         return ("if " + m.group(1).strip()) if m else None
 
     def _intervening_if_met(self, game_state, controller, context=None):
@@ -4421,9 +4465,25 @@ class AddCountersEffect(AbilityEffect):
             effective_count = x_value
             logging.debug(f"AddCountersEffect: Using X={x_value} for counter count.")
         elif self.base_count == "source_power":
+            source_controller, source_zone = game_state.find_card_location(
+                source_id)
             source = game_state._safe_get_card(source_id)
-            effective_count = max(
-                0, safe_int(getattr(source, "power", 0), 0) or 0)
+            if source_zone == "battlefield" and source_controller is not None:
+                layered_power = (
+                    game_state.layer_system.get_characteristic(
+                        source_id, "power")
+                    if getattr(game_state, "layer_system", None)
+                    else getattr(source, "power", 0))
+                effective_count = max(
+                    0, safe_int(layered_power, 0) or 0)
+            else:
+                resolution_context = (
+                    getattr(self, "resolution_context", {}) or {})
+                last_known = (
+                    resolution_context.get("source_last_known") or
+                    resolution_context.get("last_known") or {})
+                effective_count = max(
+                    0, safe_int(last_known.get("power"), 0) or 0)
         else:
             effective_count = text_to_number(self.base_count) # Use original base count
         # --- End X Cost Handling ---
@@ -7162,6 +7222,41 @@ class ManaSpentConditionalEffect(AbilityEffect):
             game_state, source_id, controller, targets,
             context=getattr(self, "resolution_context", {}))
 
+
+class AdditionalCostPaidConditionalEffect(AbilityEffect):
+    """Apply nested effects only if the spell's additional cost was paid.
+
+    The cast transaction records ``additional_cost_paid`` in the stack
+    context (Requiting Hex's optional blight); resolution forwards it into
+    ``targets``. An unpaid cost resolves the sentence as a clean no-op.
+    """
+
+    def __init__(self, nested_effects, condition=None):
+        self.nested_effects = list(nested_effects)
+        nested_text = "; ".join(
+            getattr(effect, "effect_text", "") or ""
+            for effect in self.nested_effects)
+        super().__init__(
+            f"If this spell's additional cost was paid, {nested_text}",
+            condition)
+        self.requires_target = any(
+            getattr(effect, "requires_target", False)
+            for effect in self.nested_effects)
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        paid = bool((targets or {}).get("additional_cost_paid"))
+        if not paid:
+            paid = bool((getattr(self, "resolution_context", {}) or {}).get(
+                "additional_cost_paid"))
+        if not paid:
+            return True
+        success = True
+        for effect in self.nested_effects:
+            if not effect.apply(game_state, source_id, controller, targets):
+                success = False
+        return success
+
+
 class MeldEffect(AbilityEffect):
     """Exile a named meld pair and return the combined result."""
     def __init__(self, result_name=None, condition=None):
@@ -8596,16 +8691,74 @@ class ConditionalExileEffect(AbilityEffect):
 
 
 class ReflectDamageEffect(AbilityEffect):
-    """'...it deals that much damage to any other target', reading the amount
-    from the triggering DAMAGED event. With the rider, a player dealt damage
-    this way can't gain life for the rest of the game (Screaming Nemesis)."""
-    def __init__(self, no_life_gain_rider=False, condition=None):
-        super().__init__("It deals that much damage to any other target", condition)
+    """Deal the triggering DAMAGED amount to the committed target.
+
+    Screaming Nemesis is mandatory, excludes itself, and carries a permanent
+    life-gain rider. Sensational She-Hulk is optional, may target herself, and
+    may perform the instruction only once per turn. For the latter, the target
+    is still chosen when the trigger is stacked; the optional decision happens
+    during resolution, exactly where the printed "you may" belongs.
+    """
+    def __init__(self, no_life_gain_rider=False, exclude_source=True,
+                 optional=False, once_each_turn=False, condition=None):
+        target_text = "any other target" if exclude_source else "any target"
+        prefix = "You may have it deal" if optional else "It deals"
+        super().__init__(
+            f"{prefix} that much damage to {target_text}", condition)
         self.no_life_gain_rider = no_life_gain_rider
+        self.exclude_source = bool(exclude_source)
+        self.optional = bool(optional)
+        self.once_each_turn = bool(once_each_turn)
         self.requires_target = True
 
+    @staticmethod
+    def _usage_key(source_id, source_generation):
+        return (source_id, int(source_generation or 0))
+
+    @classmethod
+    def _already_used(cls, controller, source_id, source_generation, turn):
+        key = cls._usage_key(source_id, source_generation)
+        return controller.setdefault(
+            'reflect_damage_once_each_turn', {}).get(key) == turn
+
+    @classmethod
+    def _mark_used(cls, controller, source_id, source_generation, turn):
+        key = cls._usage_key(source_id, source_generation)
+        controller.setdefault(
+            'reflect_damage_once_each_turn', {})[key] = turn
+
+    @staticmethod
+    def deal_reflected_damage(game_state, source_id, controller, target_id,
+                              amount, no_life_gain_rider=False):
+        """Apply an accepted reflection choice without reopening a choice."""
+        if not isinstance(amount, int) or amount <= 0:
+            return True
+        if target_id in ("p1", "p2"):
+            player = game_state.p1 if target_id == "p1" else game_state.p2
+            dealt = game_state.damage_player(player, amount, source_id)
+            if dealt > 0 and no_life_gain_rider:
+                # CR 614-style continuous restriction with no duration: it
+                # survives every turn-boundary reset for the rest of the game.
+                player["cant_gain_life"] = True
+                logging.debug(
+                    f"ReflectDamageEffect: {player.get('name', '?')} can't "
+                    f"gain life for the rest of the game.")
+            return True
+        card = game_state._safe_get_card(target_id)
+        card_types = {
+            str(card_type).lower()
+            for card_type in getattr(card, 'card_types', [])}
+        if 'planeswalker' in card_types:
+            game_state.damage_planeswalker(target_id, amount, source_id)
+            return True
+        if 'battle' in card_types:
+            game_state.damage_battle(target_id, amount, source_id)
+            return True
+        game_state.apply_damage_to_permanent(target_id, amount, source_id)
+        game_state.check_state_based_actions()
+        return True
+
     def _apply_effect(self, game_state, source_id, controller, targets):
-        amount = 0
         resolution_context = getattr(self, 'resolution_context', None) or {}
         amount = resolution_context.get('amount', 0)
         if not isinstance(amount, int) or amount <= 0:
@@ -8615,28 +8768,42 @@ class ReflectDamageEffect(AbilityEffect):
         if isinstance(targets, dict):
             for ids in targets.values():
                 target_ids.extend(ids if isinstance(ids, list) else [ids])
-        target_ids = [t for t in target_ids if t != source_id]
+        if self.exclude_source:
+            target_ids = [t for t in target_ids if t != source_id]
         if not target_ids:
             return False
         target_id = target_ids[0]
-        if target_id in ("p1", "p2"):
-            player = game_state.p1 if target_id == "p1" else game_state.p2
-            dealt = game_state.damage_player(player, amount, source_id)
-            if dealt > 0 and self.no_life_gain_rider:
-                # CR 614-style continuous restriction with no duration: it
-                # survives every turn-boundary reset for the rest of the game.
-                player["cant_gain_life"] = True
-                logging.debug(
-                    f"ReflectDamageEffect: {player.get('name', '?')} can't "
-                    f"gain life for the rest of the game.")
+        source = game_state._safe_get_card(source_id)
+        source_generation = resolution_context.get(
+            'source_zone_generation', getattr(
+                source, '_zone_change_generation', 0))
+        if (self.once_each_turn
+                and self._already_used(
+                    controller, source_id, source_generation,
+                    game_state.turn)):
             return True
-        card = game_state._safe_get_card(target_id)
-        if card and 'planeswalker' in getattr(card, 'card_types', []):
-            game_state.damage_planeswalker(target_id, amount, source_id)
+        if self.optional:
+            game_state.choice_context = {
+                'type': 'resolution_choice',
+                'choice_kind': 'reflect_damage',
+                'player': controller,
+                'options': ['deal_damage'],
+                'optional': True,
+                'source_id': source_id,
+                'source_generation': source_generation,
+                'target_id': target_id,
+                'amount': amount,
+                'no_life_gain_rider': self.no_life_gain_rider,
+                'once_each_turn': self.once_each_turn,
+                'resume_phase': game_state.PHASE_PRIORITY,
+            }
+            game_state.phase = game_state.PHASE_CHOOSE
+            game_state.priority_player = controller
+            game_state.priority_pass_count = 0
             return True
-        game_state.apply_damage_to_permanent(target_id, amount, source_id)
-        game_state.check_state_based_actions()
-        return True
+        return self.deal_reflected_damage(
+            game_state, source_id, controller, target_id, amount,
+            self.no_life_gain_rider)
 
 
 class AdditionalCombatPhaseEffect(AbilityEffect):

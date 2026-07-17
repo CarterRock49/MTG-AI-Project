@@ -106,7 +106,11 @@ class EvaluationDebugReplayTest(unittest.TestCase):
                 trace_id = add_card("TRACE_ONLY_DEBUG", "Earlier Source")
                 gs.p1["outside_game"] = [outside_id]
                 gs.p2["sideboard"] = [sideboard_id]
-                gs.stack.append(("spell", stack_id, gs.p1, {}))
+                gs.stack.append(("spell", stack_id, gs.p1, {
+                    "target_id": trace_id,
+                    "mode": "draw",
+                    "effect_text": "Draw a card.",
+                }))
                 permanent_id = gs.p1["hand"].pop()
                 gs.p1["battlefield"].append(permanent_id)
                 gs.p1["mana_pool"]["R"] = 2
@@ -120,6 +124,15 @@ class EvaluationDebugReplayTest(unittest.TestCase):
                 gs.p1["land_played"] = True
                 gs.p1["damage_counters"][permanent_id] = 3
                 gs.card_db[permanent_id].counters = {"+1/+1": 2}
+                blocker_id = gs.p2["hand"].pop()
+                gs.p2["battlefield"].append(blocker_id)
+                gs.current_attackers = [permanent_id]
+                gs.current_block_assignments = {
+                    permanent_id: [blocker_id],
+                }
+                gs.planeswalker_attack_targets = {
+                    permanent_id: trace_id,
+                }
                 gs.choice_context = {
                     "type": "resolution_choice",
                     "choice_kind": "outside_game",
@@ -166,6 +179,25 @@ class EvaluationDebugReplayTest(unittest.TestCase):
                 )
                 self.assertEqual(
                     snapshot["valid_actions"]["indices"], [11, 353])
+                self.assertEqual(
+                    snapshot["stack"][0]["context"]["target_id"],
+                    trace_id,
+                )
+                self.assertEqual(
+                    snapshot["stack"][0]["context"]["mode"], "draw")
+                self.assertIn(snapshot["active_player"], ("p1", "p2"))
+                self.assertEqual(
+                    snapshot["combat"]["attackers"], [permanent_id])
+                self.assertEqual(
+                    snapshot["combat"]["block_assignments"][
+                        str(permanent_id)],
+                    [blocker_id],
+                )
+                self.assertEqual(
+                    snapshot["combat"]["planeswalker_targets"][
+                        str(permanent_id)],
+                    trace_id,
+                )
 
                 catalog = env._evaluation_card_catalog()
                 entries = {
@@ -180,6 +212,12 @@ class EvaluationDebugReplayTest(unittest.TestCase):
                 self.assertEqual(entries[sideboard_id]["owner"], "p2")
                 self.assertEqual(entries[stack_id]["name"], "Stack Source")
                 self.assertEqual(entries[trace_id]["name"], "Earlier Source")
+                self.assertEqual(entries[trace_id]["mana_cost"], "{1}")
+                self.assertEqual(
+                    entries[trace_id]["oracle_text"], "Draw a card.")
+                self.assertNotIn("base_power", entries[trace_id])
+                self.assertNotIn("base_toughness", entries[trace_id])
+                self.assertFalse(entries[trace_id]["is_token"])
                 self.assertFalse(catalog["candidate_scan_truncated"])
             finally:
                 env.close()
@@ -229,6 +267,15 @@ class EvaluationDebugReplayTest(unittest.TestCase):
                     entry["name"] == "Evaluation Plains"
                     for entry in catalog["entries"]
                 ))
+                self.assertTrue(all(
+                    entry["oracle_text"] == "{T}: Add {W}."
+                    for entry in catalog["entries"]
+                ))
+                self.assertTrue(all(
+                    "base_power" not in entry
+                    and "base_toughness" not in entry
+                    for entry in catalog["entries"]
+                ))
 
                 trace = debug["trace"]
                 self.assertEqual(
@@ -250,6 +297,11 @@ class EvaluationDebugReplayTest(unittest.TestCase):
                     )
                     self.assertIn("zones", item["post"]["p1"])
                     self.assertIn("stack", item["post"])
+                    self.assertIn("active_player", item["post"])
+                    self.assertIn("combat", item["post"])
+                    self.assertIn("attackers", item["post"]["combat"])
+                    self.assertIn(
+                        "block_assignments", item["post"]["combat"])
                     for seat in ("p1", "p2"):
                         player_state = item["pre"][seat]
                         self.assertIn("mana", player_state)

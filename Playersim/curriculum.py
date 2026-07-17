@@ -329,6 +329,23 @@ COMBAT_CURRICULUM_V5["stages"][3]["handicap"] = {
 }
 
 
+# Round 7.93: the v5 canary (run round-7.92-combat-v5-v3, 925k steps) peaked
+# at a 0.281 evaluation at 200k and decayed once scripted play reached full
+# strength: 24-episode windows ratcheted on noise-level evidence (6/24 wins,
+# exactly the stage floor) and the one-way ratchet offered no path back while
+# the training win rate fell to ~8%.  The trainer now gates both directions
+# on the window's 95% Wilson interval, and v6 widens the ratchet windows so
+# the interval can resolve either way: at 48 episodes a 0.25 target tightens
+# on 18/48 (37.5%) and hands a rung back at 6/48 (12.5%) or worse, where 24
+# episodes would need 11/24 to tighten yet relax only at 1/24.
+COMBAT_CURRICULUM_V6 = deepcopy(COMBAT_CURRICULUM_V5)
+COMBAT_CURRICULUM_V6.update({"id": "combat-v6", "version": 6})
+for stage in COMBAT_CURRICULUM_V6["stages"]:
+    if stage.get("handicap"):
+        stage["handicap"]["window_episodes"] = 48
+del stage
+
+
 def _stable_seed(*parts) -> int:
     payload = ":".join(str(part) for part in parts).encode("utf-8")
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
@@ -349,6 +366,7 @@ def resolve_curriculum(name, decks):
         "combat-v3": COMBAT_CURRICULUM_V3,
         "combat-v4": COMBAT_CURRICULUM_V4,
         "combat-v5": COMBAT_CURRICULUM_V5,
+        "combat-v6": COMBAT_CURRICULUM_V6,
     }
     if name not in presets:
         raise ValueError(f"Unknown curriculum: {name}")

@@ -745,7 +745,9 @@ class EffectFactory:
             return [SearchLibraryEffect(
                 search_type="basic plains or small creature",
                 destination="hand", count=1,
-                policy_choice=True, optional=False)]
+                # A restricted search of a hidden library may legally fail to
+                # find even when an eligible card is present (CR 701.19b).
+                policy_choice=True, optional=True)]
         if (source_key == "combustion technique"
                 and "number of lesson cards" in lowered):
             from .ability_types import LessonDamageWithExileEffect
@@ -961,15 +963,27 @@ class EffectFactory:
                 max_mana_value=int(anoint_match.group(1)),
                 corrupted_poison_threshold=threshold)]
 
-        # "...deals that much damage to any other target" with Screaming
-        # Nemesis's life-gain shutoff rider. The rider modifies the damage
-        # sentence, so both stay one atomic effect.
-        if re.search(r"deals that much damage to any other target",
-                     effect_text, re.IGNORECASE):
+        # Damage reflected from the triggering DAMAGED event. Screaming
+        # Nemesis says "any other target" and is mandatory; Sensational
+        # She-Hulk says "you may have ... deal ... to any target" and can use
+        # herself. Keep the life-gain rider / optional once-per-turn choice in
+        # the same atomic effect instead of losing them during clause splits.
+        reflected_damage = re.search(
+            r"(?P<optional>you may have\s+)?"
+            r"(?:it|this creature|[a-z0-9 .'\u2019\-]+?)\s+deals?\s+"
+            r"that much damage to any\s+(?P<other>other\s+)?target",
+            effect_text, re.IGNORECASE)
+        if reflected_damage:
             from .ability_types import ReflectDamageEffect
             rider = bool(re.search(r"can't gain life for the rest of the game",
                                    effect_text, re.IGNORECASE))
-            return [ReflectDamageEffect(no_life_gain_rider=rider)]
+            return [ReflectDamageEffect(
+                no_life_gain_rider=rider,
+                exclude_source=bool(reflected_damage.group("other")),
+                optional=bool(reflected_damage.group("optional")),
+                once_each_turn=bool(re.search(
+                    r"do this only once each turn",
+                    effect_text, re.IGNORECASE)))]
 
         # Ouroboroid-style mass counters derive X from the source's current
         # power.  The generic comma splitter severs the ``where X`` rider,
@@ -1138,6 +1152,25 @@ class EffectFactory:
         reflexive_effect = EffectFactory._extract_reflexive_trigger(effect_text)
         if reflexive_effect:
             return [reflexive_effect]
+
+        # "If this spell's additional cost was paid, X." resolves from the
+        # cast record (Requiting Hex's blight). Carve the sentence out BEFORE
+        # clause splitting; otherwise X parses as an unconditional effect.
+        paid_rider = re.search(
+            r"(?:^|(?<=\.))\s*if this spell(?:'|’)?s additional cost "
+            r"was paid,\s*(?P<rider>[^.\n]+)\.?",
+            effect_text, re.IGNORECASE)
+        if paid_rider:
+            from .ability_types import AdditionalCostPaidConditionalEffect
+            remainder = (effect_text[:paid_rider.start()]
+                         + effect_text[paid_rider.end():]).strip()
+            effects = (EffectFactory.create_effects(
+                remainder, targets, source_name) if remainder else [])
+            nested = EffectFactory.create_effects(
+                paid_rider.group("rider").strip(), targets, source_name)
+            if nested:
+                effects.append(AdditionalCostPaidConditionalEffect(nested))
+            return effects
 
         # An exile followed by a delayed pronoun return is one linked action.
         # Parse it before generic delayed-trigger extraction so registration

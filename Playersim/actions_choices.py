@@ -2014,6 +2014,26 @@ class ChoiceHandlersMixin:
                 for grave_card in list(player.get('graveyard', [])):
                     gs.move_card(grave_card, player, 'graveyard', player,
                                  'exile', cause='strategic_betrayal')
+            elif kind == 'reflect_damage':
+                from .ability_types import ReflectDamageEffect
+                if option != 'deal_damage':
+                    return -0.1, False
+                source_id = ctx.get('source_id')
+                source_generation = ctx.get('source_generation', 0)
+                if ctx.get('once_each_turn'):
+                    if ReflectDamageEffect._already_used(
+                            player, source_id, source_generation, gs.turn):
+                        return -0.1, False
+                    # Mark before dealing damage so targeting She-Hulk or
+                    # another controlled creature cannot recursively offer a
+                    # second use of the same once-per-turn instruction.
+                    ReflectDamageEffect._mark_used(
+                        player, source_id, source_generation, gs.turn)
+                if not ReflectDamageEffect.deal_reflected_damage(
+                        gs, source_id, player, ctx.get('target_id'),
+                        int(ctx.get('amount', 0) or 0),
+                        bool(ctx.get('no_life_gain_rider', False))):
+                    return -0.1, False
             elif kind == 'connive_begin':
                 from .ability_types import ConniveEffect
                 continuation = ctx.get('effect_continuation')
@@ -2266,13 +2286,15 @@ class ChoiceHandlersMixin:
             return (0.05 if success else -0.1), success
         casting_choice = getattr(gs, 'choice_context', None)
         if casting_choice and casting_choice.get('type') in (
-                'casting_additional_return', 'collect_evidence'):
+                'casting_additional_return', 'collect_evidence', 'blight'):
             player = gs.p1 if gs.agent_is_p1 else gs.p2
             if casting_choice.get('player') is not player:
                 logging.warning("Casting-cost choice called for the wrong player.")
                 return -0.2, False
             if casting_choice.get('type') == 'casting_additional_return':
                 success = gs.choose_casting_additional_return(param)
+            elif casting_choice.get('type') == 'blight':
+                success = gs.choose_blight_creature(param)
             else:
                 success = gs.choose_collect_evidence_card(param)
             return (0.02 if success else -0.1), success
@@ -2321,6 +2343,9 @@ class ChoiceHandlersMixin:
                 return self._handle_play_land(None, context=action_context)
             if handler == 'play_spell':
                 return self._handle_play_spell(None, context=action_context)
+            if handler == 'warp_cast':
+                return self._handle_plot_card(
+                    action_context.get('hand_idx'), context=action_context)
             if handler == 'play_from_graveyard':
                 return self._handle_play_from_graveyard(
                     None, context=action_context)

@@ -424,7 +424,10 @@ class DeckStatsTracker:
             "games_not_drawn": int,
             "wins_when_not_drawn": float,
             "games_in_opening_hand": int,
-            "wins_when_in_opening_hand": float
+            "wins_when_in_opening_hand": float,
+            "drawn_win_rate": float,
+            "not_drawn_win_rate": float,
+            "opening_hand_win_rate": float
         }
         
         # Process top-level fields
@@ -2206,7 +2209,15 @@ class DeckStatsTracker:
             "draws": 0,
             "usage_count": 0,
             "win_rate": 0,
+            "games_drawn": 0,
+            "wins_when_drawn": 0.0,
+            "games_not_drawn": 0,
+            "wins_when_not_drawn": 0.0,
+            "games_in_opening_hand": 0,
+            "wins_when_in_opening_hand": 0.0,
             "drawn_win_rate": 0,
+            "not_drawn_win_rate": 0,
+            "opening_hand_win_rate": 0,
             "performance_by_turn": {},
             "performance_by_position": {
                 "ahead": {"wins": 0, "losses": 0, "played": 0},
@@ -2262,6 +2273,18 @@ class DeckStatsTracker:
                 stats["losses"] += card_perf.get("losses", 0)
                 stats["draws"] += card_perf.get("draws", 0)
                 stats["usage_count"] += card_perf.get("usage_count", 0)
+                stats["games_drawn"] += card_perf.get(
+                    "games_drawn", 0)
+                stats["wins_when_drawn"] += card_perf.get(
+                    "wins_when_drawn", 0)
+                stats["games_not_drawn"] += card_perf.get(
+                    "games_not_drawn", 0)
+                stats["wins_when_not_drawn"] += card_perf.get(
+                    "wins_when_not_drawn", 0)
+                stats["games_in_opening_hand"] += card_perf.get(
+                    "games_in_opening_hand", 0)
+                stats["wins_when_in_opening_hand"] += card_perf.get(
+                    "wins_when_in_opening_hand", 0)
 
                 for position in ["ahead", "parity", "behind"]:
                     if position in card_perf.get(
@@ -2287,6 +2310,17 @@ class DeckStatsTracker:
             stats["win_rate"] = (
                 stats["wins"] + 0.5 * stats["draws"]
             ) / stats["games_played"]
+        if stats["games_drawn"] > 0:
+            stats["drawn_win_rate"] = (
+                stats["wins_when_drawn"] / stats["games_drawn"])
+        if stats["games_not_drawn"] > 0:
+            stats["not_drawn_win_rate"] = (
+                stats["wins_when_not_drawn"]
+                / stats["games_not_drawn"])
+        if stats["games_in_opening_hand"] > 0:
+            stats["opening_hand_win_rate"] = (
+                stats["wins_when_in_opening_hand"]
+                / stats["games_in_opening_hand"])
         
         self._individual_card_cache[card_file] = stats
         if self.save(card_file, stats):
@@ -3123,6 +3157,15 @@ class DeckStatsTracker:
                 "draws": 0,
                 "usage_count": 0,
                 "win_rate": 0,
+                "games_drawn": 0,
+                "wins_when_drawn": 0.0,
+                "games_not_drawn": 0,
+                "wins_when_not_drawn": 0.0,
+                "games_in_opening_hand": 0,
+                "wins_when_in_opening_hand": 0.0,
+                "drawn_win_rate": 0.0,
+                "not_drawn_win_rate": 0.0,
+                "opening_hand_win_rate": 0.0,
                 "archetypes": {},
                 "by_game_stage": {
                     "early": {"games": 0, "wins": 0, "draws": 0},
@@ -3153,6 +3196,24 @@ class DeckStatsTracker:
                 }
             if "archetypes" not in card_stats:
                 card_stats["archetypes"] = {}
+
+            # Individual-card files written before exact draw telemetry did
+            # not contain these counters. Preserve their accumulated outcome
+            # data while starting exact telemetry from the first flagged
+            # update rather than guessing whether an old game saw the card.
+            telemetry_defaults = {
+                "games_drawn": 0,
+                "wins_when_drawn": 0.0,
+                "games_not_drawn": 0,
+                "wins_when_not_drawn": 0.0,
+                "games_in_opening_hand": 0,
+                "wins_when_in_opening_hand": 0.0,
+                "drawn_win_rate": 0.0,
+                "not_drawn_win_rate": 0.0,
+                "opening_hand_win_rate": 0.0,
+            }
+            for field, default in telemetry_defaults.items():
+                card_stats.setdefault(field, default)
             
             # Add draws field if it doesn't exist
             if "draws" not in card_stats:
@@ -3168,6 +3229,9 @@ class DeckStatsTracker:
                 if "draws" not in card_stats["by_game_state"][state]:
                     card_stats["by_game_state"][state]["draws"] = 0
 
+        # Normalize legacy numeric strings/nulls before incrementing them.
+        card_stats = self._validate_stats_types(card_stats)
+
         # Update basic stats
         card_stats["games_played"] += 1
         card_stats["wins"] += stats_update.get("wins", 0)
@@ -3176,6 +3240,43 @@ class DeckStatsTracker:
 
         if stats_update.get("was_played", False):
             card_stats["usage_count"] += 1
+
+        # ``games_drawn`` is the exact per-game seen union used by the viewer:
+        # a card counts once when it was either in the final opening hand or
+        # drawn later, even when both flags are true. Older private callers may
+        # omit both flags; do not fabricate not-drawn evidence for those calls.
+        has_draw_telemetry = (
+            "was_drawn" in stats_update
+            or "in_opening_hand" in stats_update)
+        if has_draw_telemetry:
+            was_drawn = bool(stats_update.get("was_drawn", False))
+            in_opening_hand = bool(
+                stats_update.get("in_opening_hand", False))
+            was_seen = was_drawn or in_opening_hand
+            outcome_points = (
+                stats_update.get("wins", 0)
+                + 0.5 * stats_update.get("draws", 0))
+
+            if was_seen:
+                card_stats["games_drawn"] += 1
+                card_stats["wins_when_drawn"] += outcome_points
+            else:
+                card_stats["games_not_drawn"] += 1
+                card_stats["wins_when_not_drawn"] += outcome_points
+
+            if in_opening_hand:
+                card_stats["games_in_opening_hand"] += 1
+                card_stats["wins_when_in_opening_hand"] += outcome_points
+
+        card_stats["drawn_win_rate"] = (
+            card_stats["wins_when_drawn"]
+            / max(1, card_stats["games_drawn"]))
+        card_stats["not_drawn_win_rate"] = (
+            card_stats["wins_when_not_drawn"]
+            / max(1, card_stats["games_not_drawn"]))
+        card_stats["opening_hand_win_rate"] = (
+            card_stats["wins_when_in_opening_hand"]
+            / max(1, card_stats["games_in_opening_hand"]))
 
         # Update win rate (count draws as 0.5 wins)
         if card_stats["games_played"] > 0:

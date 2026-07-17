@@ -1340,6 +1340,23 @@ class AbilityHandler:
         keyword_lower = keyword_name.lower().strip() # Ensure clean keyword
         full_text = (full_keyword_text or keyword_name).lower().strip() # Use full text if provided
 
+        # Card stores intrinsic keywords as a binary vector, so rebuilding the
+        # keyword name above normally loses a printed numeric parameter.  Crew
+        # needs that number for its non-mana activation cost; recover the
+        # intrinsic declaration rather than silently using the generic Crew 1
+        # fallback.  Checking the line with Card's intrinsic-keyword parser
+        # avoids borrowing a value from text that merely grants Crew elsewhere.
+        if (keyword_lower == "crew"
+                and not re.search(r"\bcrew\s+(?:\d+|x)\b", full_text,
+                                  re.IGNORECASE)):
+            for oracle_line in str(
+                    getattr(card, "oracle_text", "") or "").splitlines():
+                if ("crew" in Card.intrinsic_keyword_names(oracle_line)
+                        and re.search(r"\bcrew\s+(?:\d+|x)\b", oracle_line,
+                                      re.IGNORECASE)):
+                    full_text = oracle_line.lower().strip()
+                    break
+
         # --- Basic validation ---
         if not keyword_lower or not full_text:
             logging.warning(f"Skipping keyword ability creation due to empty keyword/text.")
@@ -1485,7 +1502,25 @@ class AbilityHandler:
             else: current_value = "ward_generic" # Fallback
             is_parametrized_keyword = True
         elif keyword_lower in ["annihilator", "afflict", "fading", "vanishing", "rampage", "poisonous", "afterlife", "cascade", "reinforce", "crew", "scavenge", "monstrosity", "adapt", "discover", "frenzy"]:
-            current_value = _parse_value(full_text, keyword_lower)
+            # Scryfall's keyword vector retains only the base word (``Crew``),
+            # while the parameter lives in the face/oracle text (``Crew 4``).
+            # Search every source text before accepting the generic default;
+            # otherwise every real Vehicle silently registers as Crew 1.
+            current_value = None
+            keyword_pattern = re.escape(keyword_lower)
+            for source_text in _keyword_source_texts():
+                value_match = re.search(
+                    rf"\b{keyword_pattern}\s+(\d+|x)\b",
+                    source_text, re.IGNORECASE)
+                if not value_match:
+                    continue
+                value_text = value_match.group(1)
+                current_value = (
+                    value_text if value_text.lower() == 'x'
+                    else int(value_text))
+                break
+            if current_value is None:
+                current_value = _parse_value(full_text, keyword_lower)
             is_parametrized_keyword = True
         elif keyword_lower in ["cycling", "equip", "fortify", "reconfigure", "unearth", "flashback", "bestow", "dash", "buyback", "madness", "transmute", "channel", "kicker", "entwine", "overload", "splice", "surge", "embalm", "eternalize", "jump-start", "escape", "awaken", "level up", "retrace", "ninjutsu"]:
             cost_str = _parse_cost(full_text, keyword_lower)
@@ -1634,7 +1669,9 @@ class AbilityHandler:
                            else current_value if current_value is not None
                            else "{0}")
             effect_desc_tmpl = activated_map[keyword_lower]
-            val_str = str(_parse_value(full_text, keyword_lower)) # Ensure N value parsed correctly for effect text
+            val_str = str(
+                current_value if current_value is not None
+                else _parse_value(full_text, keyword_lower))
             effect_desc = effect_desc_tmpl.format(N=val_str)
 
             # Cost is parsed from current_value/cost_str for ActivatedAbility
@@ -2051,6 +2088,8 @@ class AbilityHandler:
              trigger_check_context['source_card'] = source_card
              trigger_check_context['controller'] = controller # Player controlling the source
              trigger_check_context['source_zone'] = zone_name # Pass current zone
+             trigger_check_context['source_zone_generation'] = int(getattr(
+                 source_card, '_zone_change_generation', 0) or 0)
 
              # --- Event Matching & Condition Check ---
              try:

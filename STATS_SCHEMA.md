@@ -80,8 +80,9 @@ work queue.
 Validated fields per deck record: `name`, `card_list`, `archetype`, `games`,
 `wins`, `losses`, `draws` (invariant: wins+losses+draws == games),
 `avg_game_length`, plus per-stage breakdowns. Card records carry `games`,
-`wins`, `losses`, `draws`, `win_rate`, `usage_count`. Deck identity is a
-fingerprint of the card list; name mappings live under `meta/`.
+`wins`, `losses`, `draws`, `win_rate`, `usage_count`, exact draw/opening
+counters, and their outcome-weighted win rates. Deck identity is a fingerprint
+of the card list; name mappings live under `meta/`.
 
 Tracker metadata written by the current engine carries version `3.2.0`.
 `meta.total_games` is a match count, while card/archetype `games` values count
@@ -98,11 +99,14 @@ them through the current tracker/viewer normalization or rebuild them from the
 game log before using prevalence in deck-builder features.
 
 Draw/opening/play telemetry is sourced directly from GameState as of Round
-7.37: `games_drawn` and `draw_performance_by_turn` use completed draws,
-`games_in_opening_hand` uses the final post-mulligan hand, and play-turn maps
-use the turn on which the card was actually played. Outputs produced before
-Round 7.37 have zero or inferred values in these fields and must not be mixed
-with current card-performance aggregates.
+7.37: `games_drawn` is the exact per-game union of a completed draw or final
+post-mulligan opening-hand presence, `games_not_drawn` is its complement,
+`draw_performance_by_turn` uses completed draws, and play-turn maps use the turn
+on which the card was actually played. Individual `/cards` files persist these
+counts plus `games_in_opening_hand`; an opening-hand card drawn again still
+contributes only once to `games_drawn`. Outputs produced before Round 7.37 have
+zero or inferred values in these fields and must not be mixed with current
+card-performance aggregates.
 
 ## CardMemory and StrategyMemory diagnostics
 
@@ -298,10 +302,18 @@ not published if any required sidecar fails. A payload contains:
 - `trace`: one contiguous sequence of both learned and opponent atomic actions.
   Each event records sequence number, actor/seat, action index/type/parameter,
   concise label, selected context, and compact pre/post states. State snapshots
-  include turn, phase, priority, life, poison, public and omniscient changing
-  zones, stack summary, and library counts. Learned actions additionally carry
-  the resulting reward components and diagnostics. Trace capture retains at
-  most 8,192 events and 8 MiB of compact JSON, with a 512 KiB limit per entry.
+  include turn, phase, active player, priority, life, poison, energy, experience,
+  mana pools, land-play state, public and omniscient changing zones, stack
+  summary with bounded target/mode context, library counts, tap state, marked
+  damage, permanent counters, and a
+  bounded combat summary (`attackers`, blocker assignments, and planeswalker or
+  battle attack targets). The root `card_catalog` maps physical runtime IDs to
+  canonical IDs, owner, name, type line, and—when captured—immutable mana cost,
+  bounded rules text, colors, token status, and printed power/toughness,
+  loyalty, or defense. Older schema-v1 sidecars may omit these additive fields.
+  Learned actions additionally carry the resulting reward components and
+  diagnostics. Trace capture retains at most 8,192 events and 8 MiB of compact
+  JSON, with a 512 KiB limit per entry.
   Newly captured events may also carry `evaluator` schema version 1: a bounded,
   explicitly non-causal window of EnhancedCardEvaluator activity observed
   before/during that atomic action. Each evaluator record preserves
@@ -349,6 +361,11 @@ terminal-debug availability are reported independently. Unsupported or
 malformed CardMemory/StrategyMemory is raw-only, while large evaluator event
 lists and raw payloads use paginated or lazy detail rendering so the complete
 captured information remains inspectable without blocking initial page load.
+For traces with readable states, the viewer also exposes a full-screen visual
+match player. Its frame zero is the first retained pre-action state and each
+following frame uses the corresponding atomic action's post-state; it does not
+fabricate a game from terminal summaries or the learned-only deterministic
+replay stream.
 
 ## Fixture harvest protocol
 

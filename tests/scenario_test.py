@@ -2685,6 +2685,160 @@ def s_analyze_the_pollen_declines_evidence():
         "declined Analyze incorrectly used the creature-or-land search"
 
 
+@scenario("601.2b", "a modal spell is castable when only its untargeted mode is legal")
+def s_bushwhack_castable_via_untargeted_mode():
+    gs = fresh(SEED + 260)
+    env = get_env(); handler = env.action_handler
+    controller = gs.p1
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    whack = inject_real_card(gs, controller, "Bushwhack", "hand")
+    basic = inject_card(gs, {
+        "name": "Bushwhack Basic", "mana_cost": "", "cmc": 0,
+        "type_line": "Basic Land - Forest", "oracle_text": "",
+    })
+    controller["library"] = [basic]
+    gs._last_card_locations[basic] = (controller, "library")
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 0, 'R': 0, 'G': 1, 'C': 0}
+    # No creature on either battlefield: the fight mode has no targets, but
+    # the basic-land search mode needs none, so the spell must stay castable.
+    assert not any(
+        gs._is_creature(cid)
+        for player in (gs.p1, gs.p2) for cid in player["battlefield"]), \
+        "scenario precondition: the battlefield must be empty of creatures"
+    hand_index = controller["hand"].index(whack)
+    cast_action = 20 + hand_index
+    assert handler.generate_valid_actions()[cast_action], \
+        "Bushwhack was not castable although its untargeted mode is legal"
+    handler.current_valid_actions = handler.generate_valid_actions()
+    _, _, _, info = handler.apply_action(cast_action)
+    assert not info.get("execution_failed"), info.get("error_message")
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context \
+        and gs.choice_context.get("type") == "choose_mode", \
+        "Bushwhack did not open its mode choice"
+    assert gs.modal_mode_is_selectable(gs.choice_context, 0), \
+        "the untargeted search mode was not selectable"
+    assert not gs.modal_mode_is_selectable(gs.choice_context, 1), \
+        "the fight mode was selectable without any legal fight targets"
+    _, ok = handler._handle_choose_mode(0, {})
+    assert ok, "choosing the search mode failed"
+    assert gs.stack, "the cast did not reach the stack after the mode choice"
+    assert gs.resolve_top_of_stack(), "Bushwhack did not resolve"
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context \
+        and gs.choice_context.get("type") == "dig_select", \
+        "the search mode did not open its library selection"
+    assert basic in gs.choice_context.get("options", []), \
+        "the staged basic land was not offered by the search"
+    _, ok = handler._handle_choose_mode(
+        gs.choice_context["options"].index(basic), {})
+    assert ok, "selecting the searched basic failed"
+    assert basic in controller["hand"], \
+        "the basic-land search mode did not put the basic into hand"
+
+
+@scenario("601.2b / blight", "paying blight puts the counter and unlocks the paid rider")
+def s_requiting_hex_blight_paid():
+    gs = fresh(SEED + 261)
+    env = get_env(); handler = env.action_handler
+    controller, opponent = gs.p1, gs.p2
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    hexx = inject_real_card(gs, controller, "Requiting Hex", "hand")
+    carrier = inject_into_zone(gs, controller, {
+        "name": "Blight Carrier", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Creature - Bear", "oracle_text": "",
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    victim = inject_into_zone(gs, opponent, {
+        "name": "Hex Victim", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature - Rat", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 1, 'R': 0, 'G': 0, 'C': 0}
+    life_before = controller["life"]
+    hand_index = controller["hand"].index(hexx)
+    handler.current_valid_actions = handler.generate_valid_actions()
+    assert handler.current_valid_actions[20 + hand_index], \
+        "Requiting Hex was not castable"
+    _, _, _, info = handler.apply_action(20 + hand_index)
+    assert not info.get("execution_failed"), info.get("error_message")
+    assert gs.phase == gs.PHASE_CHOOSE and gs.choice_context \
+        and gs.choice_context.get("type") == "blight", \
+        "casting Requiting Hex did not offer the optional blight cost"
+    choice_mask = handler.generate_valid_actions()
+    blight_index = gs.choice_context["options"].index(carrier)
+    assert choice_mask[353 + blight_index], \
+        "the blight creature choice was missing from the action mask"
+    assert choice_mask[11], "declining blight was missing from the action mask"
+    _, ok = handler._handle_choose_mode(blight_index, {})
+    assert ok, "paying blight failed"
+    if gs.phase == gs.PHASE_TARGETING:
+        candidates = handler._get_target_selection_candidates(
+            controller, gs.targeting_context)
+        assert victim in candidates, "the MV1 victim was not targetable"
+        handler.current_valid_actions = handler.generate_valid_actions()
+        handler.apply_action(274 + candidates.index(victim))
+    # CR 601.2h pays costs after mode/target choices: the counter lands when
+    # the finished cast reaches the stack, before resolution.
+    assert gs._safe_get_card(carrier).counters.get("-1/-1", 0) == 1, \
+        "paying blight did not put a -1/-1 counter on the chosen creature"
+    assert gs.stack and gs.stack[-1][3].get("additional_cost_paid") is True, \
+        "the completed cast did not remember that blight was paid"
+    assert gs.resolve_top_of_stack(), "Requiting Hex did not resolve"
+    assert victim in opponent["graveyard"], "the MV1 creature was not destroyed"
+    assert controller["life"] == life_before + 2, \
+        "the paid-cost rider did not grant 2 life"
+
+
+@scenario("601.2b / blight", "declining blight skips the counter and the paid rider")
+def s_requiting_hex_blight_declined():
+    gs = fresh(SEED + 262)
+    env = get_env(); handler = env.action_handler
+    controller, opponent = gs.p1, gs.p2
+    gs.agent_is_p1 = True
+    gs.priority_player = controller
+    gs.priority_pass_count = 0
+    gs.stack.clear()
+    hexx = inject_real_card(gs, controller, "Requiting Hex", "hand")
+    carrier = inject_into_zone(gs, controller, {
+        "name": "Declined Blight Carrier", "mana_cost": "{2}", "cmc": 2,
+        "type_line": "Creature - Bear", "oracle_text": "",
+        "power": 3, "toughness": 3,
+    }, "battlefield")
+    victim = inject_into_zone(gs, opponent, {
+        "name": "Declined Hex Victim", "mana_cost": "{1}", "cmc": 1,
+        "type_line": "Creature - Rat", "oracle_text": "",
+        "power": 1, "toughness": 1,
+    }, "battlefield")
+    controller["mana_pool"] = {'W': 0, 'U': 0, 'B': 1, 'R': 0, 'G': 0, 'C': 0}
+    life_before = controller["life"]
+    hand_index = controller["hand"].index(hexx)
+    handler.current_valid_actions = handler.generate_valid_actions()
+    assert handler.current_valid_actions[20 + hand_index]
+    _, _, _, info = handler.apply_action(20 + hand_index)
+    assert not info.get("execution_failed"), info.get("error_message")
+    assert gs.choice_context and gs.choice_context.get("type") == "blight"
+    handler._handle_pass_priority(None)
+    assert gs._safe_get_card(carrier).counters.get("-1/-1", 0) == 0, \
+        "declining blight still put a -1/-1 counter on a creature"
+    if gs.phase == gs.PHASE_TARGETING:
+        candidates = handler._get_target_selection_candidates(
+            controller, gs.targeting_context)
+        handler.current_valid_actions = handler.generate_valid_actions()
+        handler.apply_action(274 + candidates.index(victim))
+    assert gs.stack and gs.stack[-1][3].get("additional_cost_paid") is False, \
+        "the completed cast did not record blight as unpaid"
+    assert gs.resolve_top_of_stack(), "declined Requiting Hex did not resolve"
+    assert victim in opponent["graveyard"], \
+        "declining blight must not stop the destroy effect"
+    assert controller["life"] == life_before, \
+        "the paid-cost rider granted life although blight was declined"
+
+
 @scenario("707.2", "a token copy uses printed characteristics, not current ones")
 def s_token_copy_printed_values():
     gs = fresh()
@@ -16034,7 +16188,11 @@ def s_crew_mask_matches_execution():
 
     # An untapped creature with enough power restores both legality and the
     # staged crew chooser transaction.
-    crew_body = inject_real_card(gs, me, "Llanowar Elves", "battlefield")
+    crew_body = inject_into_zone(gs, me, {
+        "name": "Crew Four-Power Body", "mana_cost": "{3}", "cmc": 3,
+        "type_line": "Creature - Giant", "oracle_text": "",
+        "power": 4, "toughness": 4,
+    }, "battlefield")
     me.get('entered_battlefield_this_turn', set()).discard(crew_body)
     assert gs.ability_handler.can_activate_ability(vehicle, crew_idx, me), \
         "crew not activatable despite available creature power"

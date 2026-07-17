@@ -424,6 +424,9 @@ class GameStateTurnMixin:
                 if choice_type == "collect_evidence":
                     self.finish_collect_evidence_choice()
                     return
+                if choice_type == "blight":
+                    self.decline_blight_choice()
+                    return
 
             # --- 1. Critical Recovery: If priority is lost (None), reset to Active Player ---
             # This fixes the infinite NO_OP loop bug.

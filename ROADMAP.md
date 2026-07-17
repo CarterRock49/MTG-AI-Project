@@ -1,4 +1,4 @@
-# Playersim roadmap — current as of July 16, 2026
+# Playersim roadmap — current as of July 17, 2026
 
 ## Mission and scope
 
@@ -60,15 +60,15 @@ perspective are recomputed for each decision.
 ### Non-negotiable lineage rules
 
 - **Start every new policy from the Round 7.89 Observation v3 boundary, using
-  the current Round 7.92 reward/curriculum contract.** Observation v3 corrects learned
+  the current Round 7.93 reward/curriculum contract.** Observation v3 corrects learned
   mana, land-development, resource-advantage, and strategic-viability
   semantics. Adaptive card/deck history is recorded but excluded from live
   evaluator advice by default so worker-local histories cannot make the same
   public state nonstationary. Recorded archetypes are canonical and play-turn
   analytics are player-relative; targetable observations match the active
   target instruction. Do not resume an Observation v2 checkpoint into this
-  lineage. Fresh Round 7.92 training uses
-  `discounted-state-potential-v6` and `combat-v5`; do not resume an older
+  lineage. Fresh Round 7.93 training uses
+  `discounted-state-potential-v6` and `combat-v6`; do not resume an older
   curriculum checkpoint.
 - Resume now verifies the companion manifest's reward contract and Observation
   version/hash. Curriculum continuation is intentionally rejected until its
@@ -799,6 +799,45 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
   scenarios, 9/9 runtime smoke, 13/13 training smoke, and 8/8 default fuzz
   seeds plus the phase-boundary check. The held-out Harvest protocol still needs the same
   interval enforcement before its point-score pass is sufficient evidence.
+- **7.93:** diagnosed the round-7.92 flatline (evaluation peaked at 0.281 at
+  200k, then decayed once every stage fell to its deadline and 24-episode
+  raw-rate windows ratcheted scripted play to full strength on noise-level
+  evidence — 6/24 wins, exactly the stage floor — while the training win
+  rate collapsed to ~8% with no path back). The handicap ratchet now gates
+  both directions on the window's 95% Wilson interval and is reversible: a
+  window confidently below target hands one rung back, never past the
+  stage's configured start, including at epsilon zero. `combat-v6` widens
+  the ratchet windows to 48 episodes so the interval can resolve either way,
+  and the `round-7.93` canary pins the otherwise-unchanged 7.92 contract
+  over it. The Three Steps Ahead modal continuation failure that ended the
+  run was fixed separately. A low-play-rate card audit of ten suspects
+  through the production mask/cast/trigger paths cleared eight as fully
+  functional and fixed two real gaps: `_targets_available` now applies CR
+  601.2b to modal spells through the shared `modal_mode_is_selectable`
+  predicate (Bushwhack was uncastable whenever its fight mode lacked
+  targets), and blight is now a supported optional additional casting cost
+  with its paid/unpaid record gating "if this spell's additional cost was
+  paid" riders at resolution (Requiting Hex previously skipped the cost and
+  granted its life unconditionally). Three golden scenarios pin the fixes.
+- **Post-7.93 low-play follow-up:** audited the eighteen reported cards against
+  their opportunity-adjusted usage, production action masks, parsing, event
+  routing, and resolution paths. The audit repaired modal Charm selection,
+  stack-target and controller scoping for Surrak, nested intervening-if parsing
+  for Earthbender Ascension, Crew-value/self-trigger recovery for Lumbering
+  Worldwagon, Warp access beyond the first eight hand slots, optional and
+  once-per-turn reflected damage for Jennifer Walters, layered/LKI source power
+  for Ouroboroid, fail-to-find library search for Starfield Shepherd, and a
+  false Badgermole replacement registration caused by reminder text. Exact
+  per-game drawn/opening-hand counts are now retained in individual card stats,
+  so the viewer can distinguish a card that was never seen from one declined
+  despite being available. Icetill Explorer, Seam Rip, Spider Manifestation,
+  Sage of the Skies, Deadly Cover-Up, Iroh's Demonstration, M.O.D.O.K., and Day
+  of Judgment were cleared through their existing production paths. North Wind
+  Avatar's wish resolution is functional when an outside-the-game pool is
+  supplied; current deck data does not define such a pool, so no targets are
+  invented. The delivery gate is green at 471 discovered unit tests and 408
+  scenarios, plus all eight default invariant-fuzz seeds and the controlled
+  phase-boundary check.
 
 ### Institutional lessons retained from the silent-bug catalog
 

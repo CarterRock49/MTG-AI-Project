@@ -1019,7 +1019,23 @@ ROUND_7_92_CANARY = {
         "selected_device": "cuda",
     },
 }
-CANARY_CONFIGS = {ROUND_7_92_CANARY["id"]: ROUND_7_92_CANARY}
+# Round 7.93 reruns the 7.92 contract after the Three Steps Ahead modal
+# continuation fix, with the confidence-gated reversible handicap ratchet and
+# combat-v6's 48-episode ratchet windows.  Every other input is identical.
+ROUND_7_93_CANARY = {
+    **ROUND_7_92_CANARY,
+    "id": "round-7.93",
+    "cli": {**ROUND_7_92_CANARY["cli"], "curriculum": "combat-v6"},
+    "runtime": {
+        **ROUND_7_92_CANARY["runtime"],
+        "curriculum_sha256": (
+            "8a47648d41234ecac04285e8e08ed35981c95e28f088da4fbc5c285535823c3b"),
+    },
+}
+CANARY_CONFIGS = {
+    config["id"]: config
+    for config in (ROUND_7_92_CANARY, ROUND_7_93_CANARY)
+}
 
 
 def utc_timestamp():
@@ -3002,11 +3018,12 @@ class CurriculumProgressCallback(BaseCallback):
         config = self._stage_handicap()
         if config is None or self._handicap_epsilon is None:
             return False
-        current = float(self._handicap_epsilon)
+        # Full-strength (epsilon-zero) evidence stays in the window so a
+        # collapse after the anneal completes can hand a rung back.
         return (
-            current > 0.0
-            and record["opponent_profile"] in set(config["profiles"])
-            and float(record.get("opponent_handicap", 0.0)) == current
+            record["opponent_profile"] in set(config["profiles"])
+            and float(record.get("opponent_handicap", 0.0))
+            == float(self._handicap_epsilon)
         )
 
     def _handicap_rates(self):
@@ -3024,14 +3041,19 @@ class CurriculumProgressCallback(BaseCallback):
         window = int(config["window_episodes"])
         records = records[-window:]
         episodes = len(records)
+        win_rate = sum(
+            record["outcome"] == "win" for record in records) \
+            / max(1, episodes)
+        lower_bound, upper_bound = wilson_score_bounds(win_rate, episodes)
         return {
             "episodes": episodes,
-            "decisive_win_rate": sum(
-                record["outcome"] == "win" for record in records)
-                / max(1, episodes),
+            "decisive_win_rate": win_rate,
+            "lower_bound": lower_bound,
+            "upper_bound": upper_bound,
             "window": window,
             "target": float(config["min_decisive_win_rate"]),
             "step": float(config["step"]),
+            "start": float(config["start"]),
             "profiles": sorted(profiles),
         }
 
@@ -3050,14 +3072,27 @@ class CurriculumProgressCallback(BaseCallback):
 
     def _maybe_ratchet_handicap(self):
         if (self.progression != "mastery" or not self._handicap_enabled
-                or not float(self._handicap_epsilon or 0.0)):
+                or self._handicap_epsilon is None):
             return
         rates = self._handicap_rates()
-        if (rates is None or rates["episodes"] < rates["window"]
-                or rates["decisive_win_rate"] < rates["target"]):
+        if rates is None or rates["episodes"] < rates["window"]:
             return
         previous = float(self._handicap_epsilon)
-        self._handicap_epsilon = max(0.0, round(previous - rates["step"], 6))
+        # Both directions gate on the window's 95% Wilson interval, not the
+        # raw rate: round-7.92 ratcheted to full strength on windows sitting
+        # exactly at the target (6/24 wins) and its one-way ratchet left no
+        # path back once the win rate collapsed there.
+        if previous > 0.0 and rates["lower_bound"] >= rates["target"]:
+            self._handicap_epsilon = max(
+                0.0, round(previous - rates["step"], 6))
+            direction = "ratcheted"
+        elif (previous < rates["start"]
+                and rates["upper_bound"] < rates["target"]):
+            self._handicap_epsilon = min(
+                rates["start"], round(previous + rates["step"], 6))
+            direction = "relaxed"
+        else:
+            return
         # Evidence is specific to one epsilon; the next step must earn a fresh
         # qualifying window rather than wait for stale records to age out.
         self._handicap_outcomes.clear()
@@ -3065,12 +3100,14 @@ class CurriculumProgressCallback(BaseCallback):
             "set_opponent_handicap", float(self._handicap_epsilon),
             rates["profiles"])
         self._persist_mastery_state()
-        logging.info(
-            "Opponent handicap ratcheted from %.2f to %.2f for profiles %s "
-            "at timestep %s (win rate %.2f over %s episodes)",
-            previous, self._handicap_epsilon, rates["profiles"],
+        log = logging.warning if direction == "relaxed" else logging.info
+        log(
+            "Opponent handicap %s from %.2f to %.2f for profiles %s "
+            "at timestep %s (win rate %.2f, 95%% interval %.2f-%.2f over "
+            "%s episodes)",
+            direction, previous, self._handicap_epsilon, rates["profiles"],
             self.num_timesteps, rates["decisive_win_rate"],
-            rates["episodes"])
+            rates["lower_bound"], rates["upper_bound"], rates["episodes"])
 
     def _mastery_ready(self):
         if self._active_stage_index >= len(self.curriculum["stages"]) - 1:
@@ -3198,6 +3235,12 @@ class CurriculumProgressCallback(BaseCallback):
                 self.logger.record(
                     "curriculum/handicap_decisive_win_rate",
                     handicap_rates["decisive_win_rate"])
+                self.logger.record(
+                    "curriculum/handicap_win_rate_lower_bound",
+                    handicap_rates["lower_bound"])
+                self.logger.record(
+                    "curriculum/handicap_win_rate_upper_bound",
+                    handicap_rates["upper_bound"])
 
     def _broadcast(self, force=False, stage_index=None):
         if stage_index is None:
@@ -3417,6 +3460,29 @@ def _paired_qualification_units(episodes):
     return units
 
 
+def wilson_score_bounds(rate, count, z=1.959963984540054):
+    """Two-sided 95% Wilson score interval for a binomial rate.
+
+    An empty sample returns the neutral (0.0, 1.0) interval so callers can
+    gate on either bound without special-casing missing evidence.
+    """
+    if count <= 0:
+        return 0.0, 1.0
+    z_squared = z * z
+    denominator = 1.0 + z_squared / count
+    center = (rate + z_squared / (2.0 * count)) / denominator
+    half_width = (
+        z * math.sqrt(
+            rate * (1.0 - rate) / count
+            + z_squared / (4.0 * count * count))
+        / denominator
+    )
+    return (
+        max(0.0, center - half_width),
+        min(1.0, center + half_width),
+    )
+
+
 def qualification_score_interval(episodes):
     """Conservative 95% interval that respects paired-seat case clustering.
 
@@ -3430,18 +3496,7 @@ def qualification_score_interval(episodes):
         raise ValueError("qualification interval requires at least one episode")
     total_points = sum(_qualification_points(item) for item in episodes)
     score = total_points / count
-    z = 1.959963984540054
-    z_squared = z * z
-    denominator = 1.0 + z_squared / count
-    wilson_center = (score + z_squared / (2.0 * count)) / denominator
-    wilson_half_width = (
-        z * math.sqrt(
-            score * (1.0 - score) / count
-            + z_squared / (4.0 * count * count))
-        / denominator
-    )
-    wilson_lower = max(0.0, wilson_center - wilson_half_width)
-    wilson_upper = min(1.0, wilson_center + wilson_half_width)
+    wilson_lower, wilson_upper = wilson_score_bounds(score, count)
     interval = {
         "method": "wilson-score",
         "confidence": 0.95,
@@ -4500,9 +4555,9 @@ def main():
                              "(default: formats/<format> when --format is given)")
     parser.add_argument(
         "--curriculum",
-        choices=("combat-v5", "combat-v4", "combat-v3", "combat-v2",
-                 "combat-v1", "none"),
-        default="combat-v5",
+        choices=("combat-v6", "combat-v5", "combat-v4", "combat-v3",
+                 "combat-v2", "combat-v1", "none"),
+        default="combat-v6",
         help="Deterministic training opponent curriculum (evaluation stays fixed)")
     parser.add_argument(
         "--canary-config", choices=tuple(CANARY_CONFIGS), default=None,

@@ -372,6 +372,87 @@ class DeckStatsIntegrityTest(unittest.TestCase):
             self.assertEqual(tracker.get_card_stats(1)["wins"], 1)
             self.assertEqual(tracker.get_card_stats(2)["losses"], 1)
 
+    def test_individual_card_file_persists_exact_draw_union(self):
+        cards = {1: SimpleNamespace(name="Telemetry Card", cmc=2)}
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self._tracker(directory, cards)
+            base_update = {
+                "id": 1,
+                "game_stage": "mid",
+                "game_state": "parity",
+                "deck_archetype": "midrange",
+            }
+            updates = [
+                {"wins": 1, "was_drawn": False,
+                 "in_opening_hand": True},
+                {"losses": 1, "was_drawn": True,
+                 "in_opening_hand": False},
+                {"draws": 1, "was_drawn": False,
+                 "in_opening_hand": False},
+                {"draws": 1, "was_drawn": True,
+                 "in_opening_hand": True},
+            ]
+            for update in updates:
+                self.assertTrue(tracker._save_individual_card_stats(
+                    "Telemetry Card", {**base_update, **update}))
+
+            self.assertTrue(tracker._flush_auxiliary_stats())
+            card_path = (
+                Path(directory)
+                / tracker._card_stats_file("Telemetry Card", 1))
+            payload = json.loads(card_path.read_text(encoding="utf-8"))
+
+            self.assertEqual(payload["games_played"], 4)
+            self.assertEqual(payload["games_drawn"], 3)
+            self.assertEqual(payload["games_not_drawn"], 1)
+            self.assertEqual(payload["games_in_opening_hand"], 2)
+            self.assertEqual(payload["wins_when_drawn"], 1.5)
+            self.assertEqual(payload["wins_when_not_drawn"], 0.5)
+            self.assertEqual(payload["wins_when_in_opening_hand"], 1.5)
+            self.assertEqual(payload["drawn_win_rate"], 0.5)
+            self.assertEqual(payload["not_drawn_win_rate"], 0.5)
+            self.assertEqual(payload["opening_hand_win_rate"], 0.75)
+
+    def test_individual_card_draw_telemetry_migrates_missing_fields(self):
+        cards = {1: SimpleNamespace(name="Legacy Telemetry", cmc=2)}
+        with tempfile.TemporaryDirectory() as directory:
+            tracker = self._tracker(directory, cards)
+            card_file = tracker._card_stats_file("Legacy Telemetry", 1)
+            self.assertTrue(tracker.save(card_file, {
+                "id": 1,
+                "name": "Legacy Telemetry",
+                "games_played": 4,
+                "wins": 2,
+                "losses": 2,
+                "draws": 0,
+                "usage_count": 1,
+                "win_rate": 0.5,
+                "archetypes": {},
+                "by_game_stage": {},
+                "by_game_state": {},
+            }))
+            tracker._individual_card_cache.clear()
+
+            self.assertTrue(tracker._save_individual_card_stats(
+                "Legacy Telemetry", {
+                    "id": 1,
+                    "losses": 1,
+                    "was_drawn": False,
+                    "in_opening_hand": False,
+                    "game_stage": "late",
+                    "game_state": "behind",
+                    "deck_archetype": "control",
+                }))
+            migrated = tracker._individual_card_cache[card_file]
+
+            self.assertEqual(migrated["games_played"], 5)
+            self.assertEqual(migrated["games_drawn"], 0)
+            self.assertEqual(migrated["games_not_drawn"], 1)
+            self.assertEqual(migrated["games_in_opening_hand"], 0)
+            self.assertEqual(migrated["drawn_win_rate"], 0.0)
+            self.assertEqual(migrated["not_drawn_win_rate"], 0.0)
+            self.assertEqual(migrated["opening_hand_win_rate"], 0.0)
+
     def test_same_name_card_ids_keep_distinct_global_aggregates(self):
         cards = {
             10: SimpleNamespace(name="Shared Name", cmc=1),

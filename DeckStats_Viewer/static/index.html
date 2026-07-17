@@ -182,6 +182,47 @@
       <footer><span>Playersim Stats Workbench</span><span id="footer-root">Local artifact view</span></footer>
     </main>
   </div>
+
+  <section id="arena-replay" class="arena-replay hidden" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="replay-theater-title">
+    <header class="replay-theater-header">
+      <div>
+        <p class="eyebrow">Visual match replay</p>
+        <h2 id="replay-theater-title">Arena battlefield</h2>
+        <p id="replay-theater-subtitle">Verified action trace</p>
+      </div>
+      <div class="replay-theater-actions">
+        <button id="replay-perspective" class="replay-tool-button" type="button" aria-label="Switch battlefield perspective">Agent at bottom</button>
+        <button id="replay-reveal-hands" class="replay-tool-button" type="button" aria-pressed="false">Reveal top hand</button>
+        <button id="replay-close" class="replay-close" type="button" aria-label="Close match replay">×</button>
+      </div>
+    </header>
+
+    <div class="replay-theater-stage">
+      <div id="replay-board" class="replay-board" aria-label="Visual battlefield state"></div>
+      <aside class="replay-event-rail" aria-label="Replay event details">
+        <div id="replay-current-event" class="replay-current-event" aria-live="polite"></div>
+        <div class="replay-feed-heading"><span>Action feed</span><small id="replay-feed-range"></small></div>
+        <div id="replay-event-feed" class="replay-event-feed"></div>
+        <div class="replay-keyboard-help"><kbd>Space</kbd> play · <kbd>←</kbd><kbd>→</kbd> step · <kbd>Home</kbd><kbd>End</kbd> jump · autoplay coalesces priority-only passes</div>
+      </aside>
+    </div>
+
+    <footer class="replay-transport" aria-label="Replay controls">
+      <div class="replay-transport-buttons">
+        <button id="replay-start" type="button" aria-label="Jump to start">|‹</button>
+        <button id="replay-prev" type="button" aria-label="Previous action">‹</button>
+        <button id="replay-play" class="replay-play" type="button" aria-label="Play replay" aria-pressed="false">▶</button>
+        <button id="replay-next" type="button" aria-label="Next action">›</button>
+        <button id="replay-end" type="button" aria-label="Jump to end">›|</button>
+      </div>
+      <label class="replay-scrubber-field" for="replay-scrubber">
+        <span class="sr-only">Replay position</span>
+        <input id="replay-scrubber" type="range" min="0" max="0" value="0" step="1">
+        <strong id="replay-frame-label">State 0 / 0</strong>
+      </label>
+      <label class="replay-speed-field" for="replay-speed"><span>Speed</span><select id="replay-speed"><option value="0.5">0.5×</option><option value="1" selected>1×</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="4">4×</option></select></label>
+    </footer>
+  </section>
   <script src="/viewer.js" defer></script>
 </body>
 </html>

@@ -222,6 +222,33 @@ class CurriculumSchedulerTest(unittest.TestCase):
         self.assertEqual(v4["stages"][0]["max_turns"], 20)
         self.assertIsNone(v4["stages"][3].get("handicap"))
 
+    def test_v6_widens_ratchet_windows_for_interval_gating(self):
+        spec = resolve_curriculum("combat-v6", DECKS)
+        self.assertEqual(spec["id"], "combat-v6")
+        self.assertEqual(spec["version"], 6)
+
+        # 24-episode windows ratcheted round-7.92 to full strength on
+        # noise-level evidence; 48 episodes let the trainer's 95% interval
+        # gate resolve in both directions.
+        goldfish, race, bridge, full_pool = spec["stages"]
+        self.assertIsNone(goldfish.get("handicap"))
+        for stage in (race, bridge, full_pool):
+            self.assertEqual(stage["handicap"]["window_episodes"], 48)
+
+        # Everything else carries over from v5, which stays untouched for
+        # reproducibility (round-7.92 pins its resolved sha).
+        v5 = resolve_curriculum("combat-v5", DECKS)
+        for stage_v5, stage_v6 in zip(v5["stages"], spec["stages"]):
+            handicap_v5 = dict(stage_v5.get("handicap") or {})
+            handicap_v6 = dict(stage_v6.get("handicap") or {})
+            if handicap_v5:
+                self.assertEqual(handicap_v5.pop("window_episodes"), 24)
+                self.assertEqual(handicap_v6.pop("window_episodes"), 48)
+            self.assertEqual(handicap_v5, handicap_v6)
+            self.assertEqual(
+                stage_v5.get("advance_when"), stage_v6.get("advance_when"))
+            self.assertEqual(stage_v5.get("max_turns"), stage_v6.get("max_turns"))
+
     def test_v4_handicap_and_turn_limit_validation_fails_closed(self):
         def broken(mutate):
             spec = deepcopy(COMBAT_CURRICULUM_V4)

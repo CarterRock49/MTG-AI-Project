@@ -11,6 +11,10 @@ const state = {
   actionActorFilter: "all", replayPage: 0, replayPageSize: 100,
   currentReplayActions: [], currentCardCatalog: {}, currentTerminalDebug: null,
   currentFullDebug: null, currentTraceReplay: null,
+  replayGameKey: null, replayFrames: [], replayFrameIndex: 0,
+  replayPlaying: false, replayTimer: null, replaySpeed: 1,
+  replayPerspective: "p1", replayAgentSeat: "p1",
+  replayRevealHands: false, replayGame: null, replayCatalog: {},
 };
 
 const $ = (id) => document.getElementById(id);
@@ -484,6 +488,606 @@ function renderTraceStep(step, absoluteIndex, catalog) {
   return `<article class="trace-step actor-${escapeHTML(actor)}"><span class="seq">${String(value(step,"sequence") ?? absoluteIndex).padStart(3,"0")}</span><div><div class="trace-heading"><strong>${escapeHTML(actor)} · ${escapeHTML(label)}</strong><span class="chip">action ${escapeHTML(action ?? "—")}</span></div><small>${escapeHTML(timing || "timing not captured")}${evaluatorCount ? ` · ${fmtInt(evaluatorCount)} evaluator events` : ""}${transitionSummary.length ? ` · ${escapeHTML(transitionSummary.join(" · "))}` : ""}</small>${identities.length ? `<div class="action-identities">${identities.map((item) => `<span>${escapeHTML(item)}</span>`).join("")}</div>` : ""}${renderDecisionSnapshot(step,catalog)}${renderStateDelta(step,catalog)}<details class="raw-drawer action-raw" data-action-index="${absoluteIndex}"><summary>Complete recorded action/context JSON</summary><pre class="lazy-raw">Open to materialize this action’s JSON.</pre></details></div></article>`;
 }
 
+function replayFrameState(step, boundary = "post") {
+  if (!step || typeof step !== "object") return null;
+  const snapshot = boundary === "pre"
+    ? value(step,"pre","state_before")
+    : value(step,"post","state_after");
+  return snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+    ? snapshot
+    : null;
+}
+
+function isReplayState(snapshot) {
+  return Boolean(snapshot && typeof snapshot === "object" && !Array.isArray(snapshot)
+    && (snapshot.p1 || snapshot.p2 || snapshot.turn !== undefined
+      || snapshot.phase !== undefined || snapshot.phase_name !== undefined));
+}
+
+function buildArenaReplayFrames(actions, terminal) {
+  const trace = array(actions);
+  let firstActionIndex = trace.findIndex((step) => isReplayState(replayFrameState(step,"pre")));
+  let openingSource = "pre";
+  if (firstActionIndex < 0) {
+    firstActionIndex = trace.findIndex((step) => isReplayState(replayFrameState(step,"post")));
+    openingSource = "post";
+  }
+  if (firstActionIndex < 0) return [];
+
+  const openingState = replayFrameState(trace[firstActionIndex],openingSource);
+  const frames = [{
+    kind:"opening", snapshot:openingState, before:null, action:null,
+    eventIndex:firstActionIndex, stateSource:openingSource,
+    degraded:firstActionIndex > 0 || openingSource !== "pre",
+  }];
+  let lastState = openingState;
+  for (let index = firstActionIndex; index < trace.length; index++) {
+    const step = trace[index];
+    const before = replayFrameState(step,"pre") || lastState;
+    const exactPost = replayFrameState(step,"post");
+    const nextPre = index + 1 < trace.length
+      ? replayFrameState(trace[index + 1],"pre") : null;
+    const snapshot = exactPost || nextPre || lastState;
+    if (!isReplayState(snapshot)) continue;
+    const stateSource = exactPost ? "post" : nextPre ? "next-pre" : "carry-forward";
+    frames.push({
+      kind:"action", snapshot, before, action:step, eventIndex:index,
+      stateSource, degraded:stateSource !== "post",
+    });
+    lastState = snapshot;
+  }
+
+  const finalState = value(terminal || {},"final_state");
+  if (isReplayState(finalState)) {
+    let differs = true;
+    try { differs = JSON.stringify(finalState) !== JSON.stringify(lastState); }
+    catch (_) { differs = finalState !== lastState; }
+    if (differs) frames.push({
+      kind:"terminal", snapshot:finalState, before:lastState, action:null,
+      eventIndex:trace.length, stateSource:"terminal", degraded:false,
+    });
+  }
+  return frames;
+}
+
+function replaySnapshotCardIds(snapshot) {
+  const ids = new Set();
+  for (const seat of ["p1","p2"]) {
+    for (const zone of ["hand","battlefield","graveyard","exile","outside_game","sideboard"]) {
+      for (const cardId of zoneSnapshot(snapshot,seat,zone).cards) ids.add(String(cardId));
+    }
+    for (const cardId of array(value(snapshot,`${seat}.tapped_permanents`))) ids.add(String(cardId));
+  }
+  for (const item of array(value(snapshot,"stack"))) {
+    const cardId = value(item || {},"source_id","card_id");
+    if (cardId !== undefined && cardId !== null) ids.add(String(cardId));
+  }
+  return ids;
+}
+
+function replayContextCardIds(action) {
+  const context = value(action || {},"context") || {};
+  const ids = new Set();
+  if (!context || typeof context !== "object" || Array.isArray(context)) return ids;
+  const singular = [
+    "card_id","source_id","target_id","target_card_id","attacker_id",
+    "blocker_id","land_id","permanent_id","creature_id","discard_card_id",
+    "sacrifice_card_id",
+  ];
+  for (const key of singular) {
+    const cardId = context[key];
+    if (cardId !== undefined && cardId !== null) ids.add(String(cardId));
+  }
+  for (const key of ["card_ids","target_ids","selected_target_ids","valid_target_ids"]) {
+    for (const cardId of array(context[key])) ids.add(String(cardId));
+  }
+  return ids;
+}
+
+function replayFocusCardIds(frame) {
+  const focus = replayContextCardIds(frame && frame.action);
+  if (!frame || !isReplayState(frame.before) || !isReplayState(frame.snapshot)) return focus;
+  const beforeIds = replaySnapshotCardIds(frame.before);
+  const afterIds = replaySnapshotCardIds(frame.snapshot);
+  for (const cardId of beforeIds) if (!afterIds.has(cardId)) focus.add(cardId);
+  for (const cardId of afterIds) if (!beforeIds.has(cardId)) focus.add(cardId);
+  for (const seat of ["p1","p2"]) {
+    const beforeTapped = new Set(array(value(frame.before,`${seat}.tapped_permanents`)).map(String));
+    const afterTapped = new Set(array(value(frame.snapshot,`${seat}.tapped_permanents`)).map(String));
+    for (const cardId of beforeTapped) if (!afterTapped.has(cardId)) focus.add(cardId);
+    for (const cardId of afterTapped) if (!beforeTapped.has(cardId)) focus.add(cardId);
+  }
+  return focus;
+}
+
+function replayDeckForSeat(game, seat) {
+  const explicit = value(game,`${seat}_deck`,`case.${seat}_deck`,`raw.case.${seat}_deck`);
+  if (explicit) return String(explicit);
+  const agentSeat = gameSeat(game).toLowerCase();
+  return String(seat === agentSeat
+    ? value(game,"agent_deck","case.agent_deck","raw.agent_deck") || "Learned deck"
+    : value(game,"opponent_deck","case.opponent_deck","raw.opponent_deck") || "Opponent deck");
+}
+
+function replayCardKind(identity) {
+  const typeLine = String(value(identity || {},"type_line") || "").toLowerCase();
+  if (typeLine.includes("land")) return "land";
+  if (typeLine.includes("creature")) return "creature";
+  if (typeLine.includes("planeswalker")) return "planeswalker";
+  if (typeLine.includes("artifact")) return "artifact";
+  if (typeLine.includes("enchantment")) return "enchantment";
+  if (typeLine.includes("instant") || typeLine.includes("sorcery")) return "spell";
+  return "unknown";
+}
+
+function replayPermanentAnnotations(snapshot, seat) {
+  const counters = new Map();
+  for (const item of array(value(snapshot,`${seat}.permanent_counters`))) {
+    const cardId = value(item || {},"card_id");
+    if (cardId !== undefined && cardId !== null) counters.set(String(cardId),value(item,"counters") || {});
+  }
+  const damage = new Map();
+  for (const item of array(value(snapshot,`${seat}.damage_marked`))) {
+    const cardId = value(item || {},"card_id");
+    if (cardId !== undefined && cardId !== null) damage.set(String(cardId),number(value(item,"amount")));
+  }
+  return {counters,damage};
+}
+
+function replayCombatState(snapshot) {
+  const combat = value(snapshot || {},"combat") || {};
+  const attackers = new Set(array(value(combat,"attackers","current_attackers")).map(String));
+  const blockers = new Set();
+  const targets = new Map();
+  for (const [,items] of objectEntries(value(combat,"block_assignments","current_block_assignments") || {})) {
+    for (const cardId of array(items)) blockers.add(String(cardId));
+  }
+  for (const [attackerId,targetId] of objectEntries(value(combat,"planeswalker_targets") || {})) {
+    targets.set(String(attackerId),{kind:"planeswalker",targetId});
+  }
+  for (const [attackerId,targetId] of objectEntries(value(combat,"battle_targets") || {})) {
+    targets.set(String(attackerId),{kind:"battle",targetId});
+  }
+  return {attackers,blockers,targets};
+}
+
+function renderReplayCard(cardId, options = {}) {
+  const identity = cardIdentity(cardId,options.catalog);
+  const kind = replayCardKind(identity);
+  const name = value(identity || {},"name","card_name") || `Card #${cardId}`;
+  const typeLine = value(identity || {},"type_line") || (kind === "unknown" ? "Identity not captured" : kind);
+  const manaCost = value(identity || {},"mana_cost") || "";
+  const oracleText = value(identity || {},"oracle_text","rules_text") || "";
+  const power = value(identity || {},"power","base_power"), toughness = value(identity || {},"toughness","base_toughness");
+  const loyalty = value(identity || {},"loyalty","base_loyalty"), defense = value(identity || {},"defense","base_defense");
+  const counters = options.counters && options.counters.get(String(cardId));
+  const counterText = objectEntries(counters || {}).map(([counter,amount]) => `${counter} ${amount}`).join(" · ");
+  const damage = options.damage && options.damage.get(String(cardId));
+  const classes = [
+    "arena-card",`card-${kind}`,options.tapped ? "is-tapped" : "",
+    options.focus ? "is-focus" : "",options.attacking ? "is-attacking" : "",
+    options.blocking ? "is-blocking" : "",options.hand ? "is-hand-card" : "",
+  ].filter(Boolean).join(" ");
+  const title = [name,typeLine,oracleText,`runtime #${cardId}`].filter(Boolean).join("\n");
+  const stats = power !== undefined && power !== null && toughness !== undefined && toughness !== null
+    ? `<span class="arena-card-stats">${escapeHTML(power)}/${escapeHTML(toughness)}</span>`
+    : loyalty !== undefined && loyalty !== null
+      ? `<span class="arena-card-stats">L ${escapeHTML(loyalty)}</span>`
+      : defense !== undefined && defense !== null
+        ? `<span class="arena-card-stats">D ${escapeHTML(defense)}</span>` : "";
+  return `<span class="arena-card-slot ${options.tapped ? "slot-tapped" : ""}"><article class="${classes}" data-card-id="${escapeHTML(cardId)}" title="${escapeHTML(title)}"><span class="arena-card-topline"><i>${escapeHTML(kind === "unknown" ? "?" : kind.slice(0,1).toUpperCase())}</i>${manaCost ? `<b>${escapeHTML(manaCost)}</b>` : ""}</span><strong>${escapeHTML(compact(name,28))}</strong><small>${escapeHTML(compact(typeLine,36))}</small><span class="arena-card-footer">${counterText ? `<em>${escapeHTML(counterText)}</em>` : ""}${damage ? `<em class="damage">${fmtInt(damage)} dmg</em>` : ""}${options.attacking ? `<em class="combat">${escapeHTML(options.combatLabel || "attacking")}</em>` : options.blocking ? "<em class=\"combat\">blocking</em>" : ""}${stats}</span></article></span>`;
+}
+
+function renderReplayCardBack(label = "Hidden card", className = "") {
+  return `<span class="arena-card-slot"><span class="arena-card-back ${escapeHTML(className)}" title="${escapeHTML(label)}"><i></i><b>P</b></span></span>`;
+}
+
+function renderReplayHand(snapshot, seat, {hidden,catalog,focus}) {
+  const hand = zoneSnapshot(snapshot,seat,"hand");
+  const visibleCards = hand.cards.slice(0,12);
+  const displayCount = Math.min(12,Math.max(hand.count,visibleCards.length));
+  const cards = [];
+  for (let index = 0; index < displayCount; index++) {
+    const cardId = visibleCards[index];
+    cards.push(hidden || cardId === undefined
+      ? renderReplayCardBack(hidden ? "Opponent card" : "Card identity not captured",hidden ? "is-hidden" : "is-unknown")
+      : renderReplayCard(cardId,{catalog,focus:focus.has(String(cardId)),hand:true}));
+  }
+  if (!cards.length) cards.push('<span class="arena-empty-zone">No cards</span>');
+  const overflow = Math.max(0,hand.count - displayCount);
+  return `<div class="arena-hand ${hidden ? "is-concealed" : "is-revealed"}" aria-label="${seat.toUpperCase()} hand, ${fmtInt(hand.count)} cards">${cards.join("")}${overflow ? `<span class="arena-hand-overflow">+${fmtInt(overflow)}</span>` : ""}</div>`;
+}
+
+function renderReplayMana(snapshot, seat) {
+  const mana = value(snapshot || {},`${seat}.mana`) || {};
+  const pools = value(mana,"normal") || {};
+  const order = ["W","U","B","R","G","C"];
+  const pips = [];
+  for (const color of order) {
+    const amount = number(pools[color]);
+    if (amount > 0) pips.push(`<span class="mana-pip mana-${color.toLowerCase()}">${escapeHTML(color)}<b>${fmtInt(amount)}</b></span>`);
+  }
+  for (const [color,rawAmount] of objectEntries(pools)) {
+    if (order.includes(color) || number(rawAmount) <= 0) continue;
+    pips.push(`<span class="mana-pip mana-c">${escapeHTML(compact(color,3))}<b>${fmtInt(rawAmount)}</b></span>`);
+  }
+  const restricted = nestedNumericTotal(value(mana,"phase_restricted"))
+    + nestedNumericTotal(value(mana,"conditional"));
+  const special = nestedNumericTotal(value(mana,"snow"))
+    + nestedNumericTotal(value(mana,"phase_restricted_snow"))
+    + nestedNumericTotal(value(mana,"conditional_snow"));
+  if (restricted > 0) pips.push(`<span class="mana-pip mana-restricted">R<b>${fmtInt(restricted)}</b></span>`);
+  if (special > 0) pips.push(`<span class="mana-pip mana-snow">S<b>${fmtInt(special)}</b></span>`);
+  return `<div class="arena-mana" aria-label="${seat.toUpperCase()} mana pool">${pips.join("") || '<span class="mana-empty">Pool empty</span>'}</div>`;
+}
+
+function renderReplayZonePile(snapshot, seat, zone, catalog) {
+  const captured = zoneSnapshot(snapshot,seat,zone);
+  const topId = captured.cards.length ? captured.cards.at(-1) : null;
+  const identity = topId === null ? null : cardIdentity(topId,catalog);
+  const topName = value(identity || {},"name") || (topId === null ? "" : `Card #${topId}`);
+  const label = zone.replaceAll("_"," ");
+  return `<div class="arena-zone-pile zone-${escapeHTML(zone)}" title="${escapeHTML(topName || `${captured.count} cards`)}"><span class="arena-zone-art">${zone === "library" ? "◆" : zone === "graveyard" ? "†" : "◇"}</span><strong>${fmtInt(captured.count)}</strong><small>${escapeHTML(label)}</small>${topName ? `<em>${escapeHTML(compact(topName,18))}</em>` : ""}</div>`;
+}
+
+function renderReplayBattlefield(snapshot, seat, {catalog,focus}) {
+  const battlefield = zoneSnapshot(snapshot,seat,"battlefield");
+  const tapped = new Set(array(value(snapshot,`${seat}.tapped_permanents`)).map(String));
+  const annotations = replayPermanentAnnotations(snapshot,seat);
+  const combat = replayCombatState(snapshot);
+  const lands = [], nonlands = [];
+  for (const cardId of battlefield.cards.slice(0,28)) {
+    const identity = cardIdentity(cardId,catalog);
+    (replayCardKind(identity) === "land" ? lands : nonlands).push(cardId);
+  }
+  const renderRow = (cards,kind) => `<div class="arena-permanent-row row-${kind}">${cards.length ? cards.map((cardId) => renderReplayCard(cardId,{
+    catalog,counters:annotations.counters,damage:annotations.damage,
+    tapped:tapped.has(String(cardId)),focus:focus.has(String(cardId)),
+    attacking:combat.attackers.has(String(cardId)),blocking:combat.blockers.has(String(cardId)),
+    combatLabel:combat.targets.has(String(cardId))
+      ? `attacking ${cardLabel(combat.targets.get(String(cardId)).targetId,catalog)}`
+      : "attacking player",
+  })).join("") : `<span class="arena-empty-zone">${kind === "lands" ? "No lands" : "No nonland permanents"}</span>`}</div>`;
+  const omitted = Math.max(0,battlefield.count - Math.min(28,battlefield.cards.length));
+  return `<div class="arena-battlefield" aria-label="${seat.toUpperCase()} battlefield, ${fmtInt(battlefield.count)} permanents">${renderRow(nonlands,"nonlands")}${renderRow(lands,"lands")}${omitted ? `<span class="arena-zone-overflow">+${fmtInt(omitted)} permanents not pictured</span>` : ""}</div>`;
+}
+
+function replaySeatTitle(game, seat) {
+  const agent = gameSeat(game).toLowerCase() === seat;
+  return `${agent ? "Agent" : "Opponent"} · ${seat.toUpperCase()}`;
+}
+
+function renderReplayPlayerPlate(snapshot, seat, game, isPriority, isActive) {
+  const player = value(snapshot || {},seat) || {};
+  const resources = [
+    number(value(player,"poison_counters")) ? `☠ ${fmtInt(value(player,"poison_counters"))}` : null,
+    number(value(player,"energy_counters")) ? `⚡ ${fmtInt(value(player,"energy_counters"))}` : null,
+    number(value(player,"experience_counters")) ? `XP ${fmtInt(value(player,"experience_counters"))}` : null,
+  ].filter(Boolean);
+  return `<div class="arena-player-plate ${isPriority ? "has-priority" : ""} ${isActive ? "is-active" : ""}"><span class="arena-avatar">${seat.slice(-1)}</span><div class="arena-player-name"><strong>${escapeHTML(replaySeatTitle(game,seat))}</strong><small>${escapeHTML(compact(replayDeckForSeat(game,seat),30))}</small>${renderReplayMana(snapshot,seat)}</div><span class="arena-life" title="Life total">${escapeHTML(value(player,"life") ?? "—")}</span>${resources.length ? `<div class="arena-resources">${resources.map((item) => `<span>${escapeHTML(item)}</span>`).join("")}</div>` : ""}${isPriority ? '<span class="priority-orbit" title="Priority">Priority</span>' : ""}${isActive ? '<span class="active-turn-mark" title="Active player">Active</span>' : ""}</div>`;
+}
+
+function renderReplayPlayerSide(snapshot, seat, position, game, catalog, focus) {
+  const opponent = position === "top";
+  const priority = String(value(snapshot,"priority_player") || "").toLowerCase() === seat;
+  const active = String(value(snapshot,"active_player") || "").toLowerCase() === seat;
+  const hideHand = opponent && !state.replayRevealHands;
+  const hand = renderReplayHand(snapshot,seat,{hidden:hideHand,catalog,focus});
+  const battlefield = renderReplayBattlefield(snapshot,seat,{catalog,focus});
+  const plate = renderReplayPlayerPlate(snapshot,seat,game,priority,active);
+  const zones = `<div class="arena-zone-rail">${renderReplayZonePile(snapshot,seat,"library",catalog)}${renderReplayZonePile(snapshot,seat,"graveyard",catalog)}${renderReplayZonePile(snapshot,seat,"exile",catalog)}</div>`;
+  const field = `<div class="arena-field-line">${plate}${battlefield}${zones}</div>`;
+  return `<section class="arena-player-side side-${position} ${priority ? "has-priority" : ""}" data-seat="${seat}">${opponent ? `${hand}${field}` : `${field}${hand}`}</section>`;
+}
+
+function replayPhaseBucket(phaseName) {
+  const phase = String(phaseName || "").toUpperCase();
+  if (/UNTAP|UPKEEP|DRAW|BEGINNING|MULLIGAN|OPENING|SETUP/.test(phase)) return "begin";
+  if (/MAIN_PRE|PRECOMBAT_MAIN/.test(phase)) return "main1";
+  if (/COMBAT|ATTACK|BLOCK|FIRST_STRIKE/.test(phase)) return "combat";
+  if (/MAIN_POST|POSTCOMBAT_MAIN/.test(phase)) return "main2";
+  if (/END|CLEANUP/.test(phase)) return "end";
+  return "special";
+}
+
+function renderReplayPhaseRail(snapshot) {
+  const phaseName = value(snapshot,"phase_name","phase") ?? "Unknown phase";
+  const active = replayPhaseBucket(phaseName);
+  const phases = [["begin","Begin"],["main1","Main"],["combat","Combat"],["main2","Main"],["end","End"]];
+  return `<div class="arena-phase"><span class="turn-badge">Turn <b>${escapeHTML(value(snapshot,"turn") ?? "—")}</b></span><div class="phase-nodes">${phases.map(([key,label]) => `<span class="${key === active ? "active" : ""}">${escapeHTML(label)}</span>`).join("")}</div><strong>${escapeHTML(String(phaseName).replaceAll("_"," "))}</strong></div>`;
+}
+
+function renderReplayStack(snapshot, catalog, focus) {
+  const stack = array(value(snapshot,"stack"));
+  if (!stack.length) return '<div class="arena-stack is-empty"><span>Stack</span><small>Empty</small></div>';
+  const visible = stack.slice(-4).reverse();
+  return `<div class="arena-stack"><span>Stack · ${fmtInt(stack.length)}</span>${visible.map((item,index) => {
+    const sourceId = value(item || {},"source_id","card_id");
+    const identity = cardIdentity(sourceId,catalog);
+    const name = value(identity || {},"name") || (sourceId === undefined ? value(item,"kind") || "Stack item" : `Card #${sourceId}`);
+    const targetId = value(item,"target_id","context.target_id","context.target_card_id");
+    const targetPlayer = value(item,"target_player","context.target_player");
+    const mode = value(item,"mode","context.mode");
+    const details = [
+      value(item,"kind","type") || "effect",
+      String(value(item,"controller","seat") || "?").toUpperCase(),
+      targetId !== undefined ? `→ ${cardLabel(targetId,catalog)}` : targetPlayer ? `→ ${targetPlayer}` : null,
+      mode !== undefined ? `mode ${mode}` : null,
+    ].filter(Boolean).join(" · ");
+    return `<div class="arena-stack-item ${sourceId !== undefined && focus.has(String(sourceId)) ? "is-focus" : ""}" style="--stack-index:${index}"><strong>${escapeHTML(compact(name,26))}</strong><small>${escapeHTML(details)}</small></div>`;
+  }).join("")}${stack.length > visible.length ? `<em>+${fmtInt(stack.length - visible.length)} more</em>` : ""}</div>`;
+}
+
+function replaySnapshotWarnings(snapshot, frame) {
+  const warnings = [];
+  if (frame && frame.degraded) {
+    warnings.push(frame.stateSource === "next-pre"
+      ? "Post-state missing; showing the next exact pre-action capture."
+      : frame.stateSource === "carry-forward"
+        ? "State capture missing; board is held at the last exact snapshot."
+        : "Replay begins at the first state that was retained.");
+  }
+  if (value(snapshot,"__diagnostic_omitted__")) warnings.push("This state snapshot was omitted by the capture budget.");
+  const omitted = number(value(snapshot,"stack_omitted"));
+  if (omitted) warnings.push(`${fmtInt(omitted)} stack items were omitted.`);
+  const omittedAttackers = number(value(snapshot,"combat.attackers_omitted"));
+  const omittedBlocks = number(value(snapshot,"combat.block_assignments_omitted"));
+  if (omittedAttackers) warnings.push(`${fmtInt(omittedAttackers)} attackers were omitted.`);
+  if (omittedBlocks) warnings.push(`${fmtInt(omittedBlocks)} block assignments were omitted.`);
+  for (const seat of ["p1","p2"]) {
+    for (const zone of ["hand","battlefield","graveyard","exile","outside_game","sideboard"]) {
+      const amount = number(value(snapshot,`${seat}.zones.${zone}.omitted`));
+      if (amount) warnings.push(`${seat.toUpperCase()} ${zone.replaceAll("_"," ")}: ${fmtInt(amount)} card IDs omitted.`);
+    }
+  }
+  return warnings;
+}
+
+function renderReplayBoard(snapshot, frame, game, catalog) {
+  if (!isReplayState(snapshot)) return '<div class="replay-board-unavailable"><strong>Board state unavailable</strong><span>This action did not retain a readable state snapshot.</span></div>';
+  const bottom = state.replayPerspective;
+  const top = bottom === "p1" ? "p2" : "p1";
+  const focus = replayFocusCardIds(frame);
+  const warnings = replaySnapshotWarnings(snapshot,frame);
+  const action = frame && frame.action;
+  const actionLabel = value(action || {},"label","action_label","reason");
+  const actor = value(action || {},"actor") || "game";
+  return `<div class="arena-board-surface ${frame ? `frame-${escapeHTML(frame.kind)}` : ""}">
+    <div class="arena-vignette"></div>
+    ${warnings.length ? `<div class="arena-capture-warning" title="${escapeHTML(warnings.join(" "))}">Capture notice · ${escapeHTML(warnings[0])}</div>` : ""}
+    ${renderReplayPlayerSide(snapshot,top,"top",game,catalog,focus)}
+    <div class="arena-midline">${renderReplayPhaseRail(snapshot)}<div class="arena-action-toast ${action ? "" : "is-quiet"}"><span>${escapeHTML(String(actor).toUpperCase())}</span><strong>${escapeHTML(actionLabel || (frame && frame.kind === "terminal" ? "Game complete" : "Ready to replay"))}</strong></div>${renderReplayStack(snapshot,catalog,focus)}</div>
+    ${renderReplayPlayerSide(snapshot,bottom,"bottom",game,catalog,focus)}
+  </div>`;
+}
+
+function replayChangeSummary(frame) {
+  if (!frame || !isReplayState(frame.before) || !isReplayState(frame.snapshot)) return [];
+  const before = frame.before, after = frame.snapshot, changes = [];
+  const changed = (label, left, right) => {
+    if (left !== undefined && right !== undefined && String(left) !== String(right)) changes.push(`${label} ${left} → ${right}`);
+  };
+  changed("turn",value(before,"turn"),value(after,"turn"));
+  changed("phase",value(before,"phase_name","phase"),value(after,"phase_name","phase"));
+  changed("active player",value(before,"active_player"),value(after,"active_player"));
+  changed("priority",value(before,"priority_player"),value(after,"priority_player"));
+  for (const seat of ["p1","p2"]) {
+    changed(`${seat.toUpperCase()} life`,value(before,`${seat}.life`),value(after,`${seat}.life`));
+    changed(`${seat.toUpperCase()} poison`,value(before,`${seat}.poison_counters`),value(after,`${seat}.poison_counters`));
+    for (const zone of ["hand","battlefield","graveyard","exile","library"]) {
+      const left = zoneSnapshot(before,seat,zone).count;
+      const right = zoneSnapshot(after,seat,zone).count;
+      if (left !== right) changes.push(`${seat.toUpperCase()} ${zone} ${left} → ${right}`);
+    }
+  }
+  const beforeStack = array(value(before,"stack")).length;
+  const afterStack = array(value(after,"stack")).length;
+  if (beforeStack !== afterStack) changes.push(`stack ${beforeStack} → ${afterStack}`);
+  return changes;
+}
+
+function renderReplayCurrentEvent(frame, frameIndex) {
+  const snapshot = frame && frame.snapshot || {};
+  if (!frame) return '<div class="replay-current-empty">No replay frame selected.</div>';
+  if (frame.kind === "opening") {
+    return `<p class="eyebrow">Opening capture</p><h3>Ready to replay</h3><div class="replay-event-meta"><span>Turn ${escapeHTML(value(snapshot,"turn") ?? "—")}</span><span>${escapeHTML(String(value(snapshot,"phase_name","phase") ?? "unknown").replaceAll("_"," "))}</span><span>${escapeHTML(String(value(snapshot,"priority_player") || "no priority").toUpperCase())}</span></div><p>The battlefield is showing the first exact state retained by this game trace.</p>${frame.degraded ? '<div class="replay-fidelity-note">Earlier actions or the opening pre-state were not retained.</div>' : ""}`;
+  }
+  if (frame.kind === "terminal") {
+    const terminal = value(state.currentTerminalDebug,"terminal") || state.currentTerminalDebug || {};
+    return `<p class="eyebrow">Terminal state</p><h3>${escapeHTML(String(value(terminal,"game_result") || gameResult(state.replayGame)).toUpperCase())}</h3><div class="replay-event-meta"><span>Turn ${escapeHTML(value(snapshot,"turn") ?? "—")}</span><span>${escapeHTML(value(terminal,"terminal_reason") || value(state.replayGame,"terminal_reason","raw.terminal_reason") || "game complete")}</span></div><p>The final diagnostic state differed from the last atomic action and is shown as its own exact frame.</p>`;
+  }
+  const action = frame.action || {};
+  const label = value(action,"label","action_label","reason") || `Action ${value(action,"action","action_idx") ?? "—"}`;
+  const actor = value(action,"actor","seat") || "unknown actor";
+  const actorSeat = value(action,"actor_seat") || "";
+  const changes = replayChangeSummary(frame);
+  const identities = actionIdentityLabels(action,state.replayCatalog);
+  const transition = value(action,"learned_transition") || {};
+  return `<p class="eyebrow">Action ${fmtInt(frame.eventIndex + 1)} · state ${fmtInt(frameIndex)}</p><h3>${escapeHTML(label)}</h3><div class="replay-event-meta"><span>${escapeHTML(actor)}${actorSeat ? ` · ${escapeHTML(String(actorSeat).toUpperCase())}` : ""}</span><span>Turn ${escapeHTML(value(snapshot,"turn") ?? "—")}</span><span>${escapeHTML(String(value(snapshot,"phase_name","phase") ?? "unknown").replaceAll("_"," "))}</span></div>${identities.length ? `<div class="replay-event-identities">${identities.slice(0,6).map((item) => `<span>${escapeHTML(item)}</span>`).join("")}</div>` : ""}<div class="replay-change-list">${changes.length ? changes.slice(0,10).map((item) => `<span>${escapeHTML(item)}</span>`).join("") : '<span>No public-state delta captured</span>'}</div>${value(transition,"reward") !== undefined ? `<div class="replay-reward">Learned transition reward <strong>${fmtReward(value(transition,"reward"))}</strong></div>` : ""}${frame.degraded ? `<div class="replay-fidelity-note">Frame source: ${escapeHTML(frame.stateSource)}. No missing state was reconstructed.</div>` : ""}`;
+}
+
+function renderReplayEventFeed(frames, currentIndex) {
+  const radiusBefore = 5, radiusAfter = 7;
+  const start = Math.max(0,currentIndex - radiusBefore);
+  const end = Math.min(frames.length,currentIndex + radiusAfter + 1);
+  const visible = frames.slice(start,end);
+  const html = visible.map((frame,offset) => {
+    const index = start + offset;
+    const action = frame.action || {};
+    const label = frame.kind === "opening" ? "Opening state"
+      : frame.kind === "terminal" ? "Final state"
+        : value(action,"label","action_label","reason") || `Action ${value(action,"action") ?? "—"}`;
+    const actor = frame.kind === "action" ? value(action,"actor","seat") || "unknown" : frame.kind;
+    const sequence = frame.kind === "action" ? value(action,"sequence") ?? frame.eventIndex : "•";
+    return `<button type="button" data-replay-frame="${index}" class="${index === currentIndex ? "selected" : ""}"><span>${escapeHTML(sequence)}</span><div><strong>${escapeHTML(compact(label,42))}</strong><small>${escapeHTML(actor)} · turn ${escapeHTML(value(frame.snapshot,"turn") ?? "—")} · ${escapeHTML(String(value(frame.snapshot,"phase_name","phase") ?? "unknown").replaceAll("_"," "))}</small></div></button>`;
+  }).join("");
+  return {html,start,end};
+}
+
+function prepareArenaReplay(game, actions, catalog, terminal) {
+  const key = gameKey(game);
+  const changedGame = state.replayGameKey !== key;
+  if (changedGame) {
+    stopArenaReplayPlayback();
+    if (!$('arena-replay').classList.contains("hidden")) closeArenaReplay();
+    state.replayFrameIndex = 0;
+    state.replayRevealHands = false;
+    state.replayAgentSeat = gameSeat(game).toLowerCase();
+    state.replayPerspective = state.replayAgentSeat;
+  }
+  state.replayGameKey = key;
+  state.replayGame = game;
+  state.replayCatalog = catalog;
+  state.replayFrames = buildArenaReplayFrames(actions,terminal);
+  state.replayFrameIndex = Math.min(state.replayFrameIndex,Math.max(0,state.replayFrames.length - 1));
+  return state.replayFrames;
+}
+
+function renderArenaReplayLauncher(actions, frames, debug) {
+  const traceCount = array(actions).length;
+  if (!traceCount || !frames.length) {
+    if (!traceCount) return "";
+    return `<section class="arena-replay-launcher is-unavailable"><div class="arena-launch-icon">▶</div><div><strong>Visual replay unavailable</strong><span>The action trace exists, but it has no readable board snapshots. The diagnostic timeline below remains authoritative.</span></div></section>`;
+  }
+  const capture = value(debug || {},"capture.trace") || {};
+  const dropped = number(value(capture,"dropped_events"));
+  const omissions = number(value(capture,"sanitization_omissions")) + number(value(capture,"serialization_errors"));
+  const issueText = dropped || omissions
+    ? `${fmtInt(dropped)} dropped · ${fmtInt(omissions)} omitted or errored`
+    : "complete verified capture";
+  const exactFrames = frames.filter((frame) => !frame.degraded).length;
+  return `<section class="arena-replay-launcher ${dropped || omissions ? "has-warning" : ""}"><div class="arena-launch-icon">▶</div><div><strong>Watch this match on the battlefield</strong><span>${fmtInt(exactFrames)} exact captures · ${fmtInt(frames.length)} playback states · ${fmtInt(traceCount)} learned + opponent actions · ${escapeHTML(issueText)}</span></div><button class="button primary" type="button" data-open-arena-replay>Watch replay</button></section>`;
+}
+
+function updateArenaReplayControls() {
+  const maximum = Math.max(0,state.replayFrames.length - 1);
+  const index = Math.min(maximum,Math.max(0,state.replayFrameIndex));
+  const play = $("replay-play");
+  play.textContent = state.replayPlaying ? "❚❚" : "▶";
+  play.setAttribute("aria-label",state.replayPlaying ? "Pause replay" : "Play replay");
+  play.setAttribute("aria-pressed",String(state.replayPlaying));
+  $("replay-start").disabled = index <= 0;
+  $("replay-prev").disabled = index <= 0;
+  $("replay-next").disabled = index >= maximum;
+  $("replay-end").disabled = index >= maximum;
+  const scrubber = $("replay-scrubber");
+  scrubber.max = String(maximum);
+  scrubber.value = String(index);
+  $("replay-frame-label").textContent = `State ${fmtInt(index)} / ${fmtInt(maximum)}`;
+  $("replay-reveal-hands").setAttribute("aria-pressed",String(state.replayRevealHands));
+  $("replay-reveal-hands").textContent = state.replayRevealHands ? "Hide top hand" : "Reveal top hand";
+  $("replay-perspective").textContent = state.replayPerspective === state.replayAgentSeat ? "Bottom: Agent" : "Bottom: Opponent";
+}
+
+function renderArenaReplay() {
+  if (!state.replayFrames.length || !state.replayGame) return;
+  state.replayFrameIndex = Math.min(Math.max(0,state.replayFrameIndex),state.replayFrames.length - 1);
+  const frame = state.replayFrames[state.replayFrameIndex];
+  $("replay-board").innerHTML = renderReplayBoard(frame.snapshot,frame,state.replayGame,state.replayCatalog);
+  $("replay-current-event").innerHTML = renderReplayCurrentEvent(frame,state.replayFrameIndex);
+  const feed = renderReplayEventFeed(state.replayFrames,state.replayFrameIndex);
+  $("replay-event-feed").innerHTML = feed.html;
+  $("replay-feed-range").textContent = `${fmtInt(feed.start + 1)}–${fmtInt(feed.end)} of ${fmtInt(state.replayFrames.length)}`;
+  $("replay-theater-subtitle").textContent = `${replayDeckForSeat(state.replayGame,"p1")} vs ${replayDeckForSeat(state.replayGame,"p2")} · checkpoint ${fmtInt(gameTimestep(state.replayGame))} · case ${gameCase(state.replayGame)}`;
+  updateArenaReplayControls();
+}
+
+function replayFrameDelay(frame) {
+  const actionType = String(value(frame && frame.action,"action_type","label") || "").toUpperCase();
+  const changes = replayChangeSummary(frame);
+  let delay = replayIsRoutinePass(frame) ? 140 : 900;
+  if (changes.some((item) => /life|battlefield|graveyard|exile|stack/.test(item))) delay = 1250;
+  else if (changes.some((item) => /turn|phase/.test(item))) delay = 700;
+  if (/ATTACK|BLOCK|DAMAGE|CAST|PLAY_SPELL/.test(actionType)) delay = Math.max(delay,1100);
+  return Math.max(70,Math.round(delay / Math.max(.25,state.replaySpeed)));
+}
+
+function replayIsRoutinePass(frame) {
+  const actionType = String(value(frame && frame.action,"action_type","label") || "").toUpperCase();
+  if (!/PASS_PRIORITY|NO_OP/.test(actionType)) return false;
+  return replayChangeSummary(frame).every((item) => /^priority\b/i.test(item));
+}
+
+function nextArenaAutoplayFrameIndex() {
+  let index = state.replayFrameIndex + 1;
+  const maximum = state.replayFrames.length - 1;
+  while (index < maximum && replayIsRoutinePass(state.replayFrames[index])) index += 1;
+  return Math.min(index,maximum);
+}
+
+function stopArenaReplayPlayback() {
+  if (state.replayTimer !== null) clearTimeout(state.replayTimer);
+  state.replayTimer = null;
+  state.replayPlaying = false;
+  if ($("replay-play")) updateArenaReplayControls();
+}
+
+function scheduleArenaReplayTick() {
+  if (!state.replayPlaying) return;
+  if (state.replayFrameIndex >= state.replayFrames.length - 1) {
+    stopArenaReplayPlayback();
+    return;
+  }
+  const nextIndex = nextArenaAutoplayFrameIndex();
+  const nextFrame = state.replayFrames[nextIndex];
+  state.replayTimer = setTimeout(() => {
+    state.replayTimer = null;
+    if (!state.replayPlaying) return;
+    state.replayFrameIndex = nextIndex;
+    renderArenaReplay();
+    scheduleArenaReplayTick();
+  },replayFrameDelay(nextFrame));
+}
+
+function startArenaReplayPlayback() {
+  if (!state.replayFrames.length) return;
+  if (state.replayFrameIndex >= state.replayFrames.length - 1) state.replayFrameIndex = 0;
+  if (state.replayTimer !== null) clearTimeout(state.replayTimer);
+  state.replayTimer = null;
+  state.replayPlaying = true;
+  renderArenaReplay();
+  scheduleArenaReplayTick();
+}
+
+function seekArenaReplay(index, keepPlaying = false) {
+  const wasPlaying = state.replayPlaying && keepPlaying;
+  if (!wasPlaying) stopArenaReplayPlayback();
+  state.replayFrameIndex = Math.min(Math.max(0,number(index)),Math.max(0,state.replayFrames.length - 1));
+  renderArenaReplay();
+  if (wasPlaying) {
+    if (state.replayTimer !== null) clearTimeout(state.replayTimer);
+    state.replayTimer = null;
+    scheduleArenaReplayTick();
+  }
+}
+
+function openArenaReplay() {
+  if (!state.replayFrames.length) return;
+  stopArenaReplayPlayback();
+  state.replayReturnFocus = document.activeElement;
+  state.replayFrameIndex = 0;
+  state.replayPerspective = state.replayAgentSeat;
+  state.replayRevealHands = false;
+  const theater = $("arena-replay");
+  theater.classList.remove("hidden");
+  theater.setAttribute("aria-hidden","false");
+  document.body.classList.add("replay-open");
+  renderArenaReplay();
+  $("replay-play").focus();
+}
+
+function closeArenaReplay() {
+  stopArenaReplayPlayback();
+  const theater = $("arena-replay");
+  if (!theater) return;
+  theater.classList.add("hidden");
+  theater.setAttribute("aria-hidden","true");
+  document.body.classList.remove("replay-open");
+  const returnFocus = state.replayReturnFocus;
+  state.replayReturnFocus = null;
+  if (returnFocus && typeof returnFocus.focus === "function" && document.contains(returnFocus)) returnFocus.focus();
+}
+
 function renderCaptureHealth(debug, summary) {
   const capture = value(debug || {},"capture") || {};
   const status = value(summary || {},"capture_status") || (Object.keys(capture).length ? "complete" : "not recorded");
@@ -788,6 +1392,7 @@ async function selectEvaluationGame(key, rerenderRows = true) {
   const pairIndex = value(game,"pair_index") ?? Math.floor(Math.max(0,gameCase(game))/2);
   const mate = state.evaluationGames.find((candidate) => candidate !== game && gameTimestep(candidate) === gameTimestep(game) && (value(candidate,"pair_index") ?? Math.floor(Math.max(0,gameCase(candidate))/2)) === pairIndex);
   const debug = value(game,"debug","evaluation_debug","raw.debug","raw.evaluation_debug");
+  const terminal = value(debug || {},"terminal");
   const replay = gameReplay(game), trace = gameTrace(game);
   const hasTraceReplay = (trace !== null && trace !== undefined)
     || (replay !== null && replay !== undefined);
@@ -798,6 +1403,7 @@ async function selectEvaluationGame(key, rerenderRows = true) {
   state.currentActions = actions;
   state.currentReplayActions = replayActions;
   state.currentCardCatalog = catalog;
+  const arenaFrames = prepareArenaReplay(game,actions,catalog,terminal);
   const tags = [gameSeat(game), value(game,"opponent_profile","case.opponent_profile","raw.case.opponent_profile"), `seed ${value(game,"seed","case.seed","raw.case.seed")}`, value(game,"timeout","raw.timeout") ? "timeout" : "decisive"].filter(Boolean);
   const artifactErrors = array(game._artifactErrors);
   let traceNotice = game._debugLoadError
@@ -838,9 +1444,8 @@ async function selectEvaluationGame(key, rerenderRows = true) {
   if (hasTraceReplay) traceHtml += `<details class="raw-drawer" data-lazy-raw="trace-replay"><summary>Complete trace/replay payload</summary><pre class="lazy-raw">Open to materialize both trace and replay JSON.</pre></details>`;
   state.currentFullDebug = debug;
   state.currentTraceReplay = {trace,replay};
-  state.currentTerminalDebug = value(debug || {},"terminal") || null;
+  state.currentTerminalDebug = terminal || null;
   const evaluatorHtml = renderEvaluatorActivity(game, debug, actions);
-  const terminal = value(debug || {},"terminal");
   const artifactInfo = [game._debugArtifact,game._replayArtifact].filter(Boolean);
 
   detail.innerHTML = `<div class="summary-title"><div><p class="eyebrow">Checkpoint ${fmtInt(gameTimestep(game))} · case ${gameCase(game)}</p><h3>${escapeHTML(gameResult(game).toUpperCase())} · ${escapeHTML(value(game,"terminal_reason","raw.terminal_reason") || "unknown")}</h3></div><span class="result ${escapeHTML(gameResult(game))}">${escapeHTML(gameResult(game))}</span></div>
@@ -848,6 +1453,7 @@ async function selectEvaluationGame(key, rerenderRows = true) {
     <div class="summary-kpis"><span>Reward<strong>${fmtReward(value(game,"reward","raw.reward"))}</strong></span><span>Length<strong>${fmtInt(value(game,"length","raw.length"))}</strong></span><span>Pair mate<strong>${mate ? `${escapeHTML(gameResult(mate))} · ${gameSeat(mate)}` : "missing"}</strong></span><span>Full trace<strong>${fmtInt(actions.length)} recorded actions</strong></span><span>Policy replay<strong>${fmtInt(replayActions.length)} decisions</strong></span><span>Runtime identities<strong>${fmtInt(Object.keys(catalog).length)} named cards</strong></span></div>
     ${artifactInfo.length ? `<details class="raw-drawer"><summary>Artifact verification</summary><pre>${escapeHTML(pretty(artifactInfo))}</pre></details>` : ""}
     ${debug ? renderCaptureHealth(debug,debugSummary) : ""}
+    ${renderArenaReplayLauncher(actions,arenaFrames,debug)}
     <h4>Evaluation case</h4><pre class="raw">${escapeHTML(pretty({requested:caseData,resolved}))}</pre>
     <h4>${actions.length ? `Full action timeline · ${actions.length} events` : "Full action timeline"}</h4>${traceHtml}
     <h4>Learned-policy replay · ${replayActions.length} decisions</h4>${replayHtml}
@@ -1317,6 +1923,7 @@ function renderHarvests() {
 async function selectRun(id) {
   const generation = ++state.runRequestGeneration;
   if (!id) return;
+  if (!$('arena-replay').classList.contains("hidden")) closeArenaReplay();
   clearError();
   try {
     const [detail, gamesPayload] = await Promise.all([
@@ -1382,6 +1989,29 @@ function bindEvents() {
   $("deck-search").addEventListener("input", renderDeckTable); $("card-search").addEventListener("input", renderCardTable);
   $("game-prev").addEventListener("click", () => { if (state.statsPage > 0) { state.statsPage--; loadStatsGames(); } });
   $("game-next").addEventListener("click", () => { state.statsPage++; loadStatsGames(); });
+  $("replay-close").addEventListener("click",closeArenaReplay);
+  $("replay-start").addEventListener("click",() => seekArenaReplay(0));
+  $("replay-prev").addEventListener("click",() => seekArenaReplay(state.replayFrameIndex - 1));
+  $("replay-play").addEventListener("click",() => state.replayPlaying ? stopArenaReplayPlayback() : startArenaReplayPlayback());
+  $("replay-next").addEventListener("click",() => seekArenaReplay(state.replayFrameIndex + 1));
+  $("replay-end").addEventListener("click",() => seekArenaReplay(state.replayFrames.length - 1));
+  $("replay-perspective").addEventListener("click",() => {
+    state.replayPerspective = state.replayPerspective === "p1" ? "p2" : "p1";
+    renderArenaReplay();
+  });
+  $("replay-reveal-hands").addEventListener("click",() => {
+    state.replayRevealHands = !state.replayRevealHands;
+    renderArenaReplay();
+  });
+  $("replay-scrubber").addEventListener("input",(event) => seekArenaReplay(event.target.value));
+  $("replay-speed").addEventListener("change",(event) => {
+    state.replaySpeed = Math.max(.25,number(event.target.value,1));
+    if (state.replayPlaying) {
+      if (state.replayTimer !== null) clearTimeout(state.replayTimer);
+      state.replayTimer = null;
+      scheduleArenaReplayTick();
+    }
+  });
   document.addEventListener("change", async (event) => {
     if (event.target && event.target.id === "trace-actor-filter") {
       state.actionActorFilter = event.target.value || "all";
@@ -1390,6 +2020,16 @@ function bindEvents() {
     }
   });
   document.addEventListener("click", async (event) => {
+    const openReplay = event.target.closest("button[data-open-arena-replay]");
+    if (openReplay) {
+      openArenaReplay();
+      return;
+    }
+    const replayFrameButton = event.target.closest("button[data-replay-frame]");
+    if (replayFrameButton) {
+      seekArenaReplay(replayFrameButton.dataset.replayFrame);
+      return;
+    }
     const actionPageButton = event.target.closest("button[data-action-page]");
     if (actionPageButton && !actionPageButton.disabled) {
       state.actionPage = Math.max(0,number(actionPageButton.dataset.actionPage));
@@ -1450,6 +2090,48 @@ function bindEvents() {
     const target = $(button.dataset.copy); if (!target) return;
     try { await navigator.clipboard.writeText(target.textContent); button.textContent = "Copied"; setTimeout(() => button.textContent = "Copy JSON",1200); }
     catch (_) { button.textContent = "Copy failed"; }
+  });
+  document.addEventListener("keydown",(event) => {
+    if ($('arena-replay').classList.contains("hidden")) return;
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeArenaReplay();
+      return;
+    }
+    if (event.key === "Tab") {
+      const focusable = [...$('arena-replay').querySelectorAll(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled])')]
+        .filter((element) => element.offsetParent !== null);
+      if (focusable.length) {
+        const first = focusable[0], last = focusable.at(-1);
+        if (event.shiftKey && document.activeElement === first) {
+          event.preventDefault();
+          last.focus();
+        } else if (!event.shiftKey && document.activeElement === last) {
+          event.preventDefault();
+          first.focus();
+        }
+      }
+      return;
+    }
+    const tag = String(event.target && event.target.tagName || "").toLowerCase();
+    if (["input","select","textarea"].includes(tag)) return;
+    if (event.key === " " || event.code === "Space") {
+      event.preventDefault();
+      state.replayPlaying ? stopArenaReplayPlayback() : startArenaReplayPlayback();
+    } else if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      seekArenaReplay(state.replayFrameIndex - 1);
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      seekArenaReplay(state.replayFrameIndex + 1);
+    } else if (event.key === "Home") {
+      event.preventDefault();
+      seekArenaReplay(0);
+    } else if (event.key === "End") {
+      event.preventDefault();
+      seekArenaReplay(state.replayFrames.length - 1);
+    }
   });
   const observer = new IntersectionObserver((entries) => entries.forEach((entry) => {
     if (!entry.isIntersecting) return;

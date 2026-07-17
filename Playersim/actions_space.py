@@ -1249,6 +1249,17 @@ class ActionSpaceMixin:
                     label = "FINISH_COLLECT_EVIDENCE" if selected else "DECLINE_COLLECT_EVIDENCE"
                     set_valid_action(11, label)
 
+            elif choice_type == "blight":
+                for option_index, card_id in enumerate(context.get("options", [])[:10]):
+                    card = gs._safe_get_card(card_id)
+                    card_name = getattr(card, "name", card_id)
+                    set_valid_action(
+                        353 + option_index,
+                        f"BLIGHT {card_name}",
+                        context={"option_index": option_index},
+                    )
+                set_valid_action(11, "DECLINE_BLIGHT")
+
             # Optional card selection inside a linked temporary-exile effect.
             elif choice_type == "linked_exile":
                 for option_index, card_id in enumerate(context.get("options", [])[:10]):
@@ -2388,6 +2399,27 @@ class ActionSpaceMixin:
             subtypes = [str(s).lower() for s in getattr(card, 'subtypes', [])]
             if 'aura' not in subtypes:
                 return True
+        # CR 601.2b: a modal spell only needs enough legally choosable modes;
+        # a mode's target requirements bind only if that mode is chosen
+        # (Bushwhack's untargeted land search kept it castable on an empty
+        # board). The chooser enforces the same predicate per selection.
+        if (not aura_target_text and gs.ability_handler
+                and hasattr(gs.ability_handler, '_parse_modal_text')):
+            modal_modes, min_modes, _ = \
+                gs.ability_handler._parse_modal_text(card.oracle_text)
+            if modal_modes:
+                mode_probe = {
+                    "type": "choose_mode",
+                    "available_modes": list(modal_modes),
+                    "selected_modes": [],
+                    "controller": caster,
+                    "player": caster,
+                    "card_id": card_id,
+                }
+                selectable = sum(
+                    1 for mode_index in range(len(modal_modes))
+                    if gs.modal_mode_is_selectable(mode_probe, mode_index))
+                return selectable >= max(1, int(min_modes or 1))
         if hasattr(gs, 'targeting_system') and gs.targeting_system:
             try:
                 if aura_target_text:
@@ -2479,6 +2511,36 @@ class ActionSpaceMixin:
         options = []
         if not mana_only:
             opponent = gs.p2 if player is gs.p1 else gs.p1
+            # Warp's eight fixed Plot-compatible slots cover hand indices 0-7.
+            # Preserve the alternative cast for later hand positions through
+            # the shared paginated action catalog, including indices 8-9 that
+            # still have ordinary fixed spell slots of their own.
+            if gs.can_player_cast_spells(player):
+                for hand_idx, card_id in enumerate(
+                        player.get("hand", [])[8:], 8):
+                    card = gs._safe_get_card(card_id)
+                    warp_cost = getattr(card, "warp_cost", None) if card else None
+                    if (not card or not getattr(card, "is_warp", False)
+                            or not warp_cost):
+                        continue
+                    is_instant = (
+                        "instant" in getattr(card, "card_types", [])
+                        or self._has_flash(card_id))
+                    if not is_instant and not can_sorcery:
+                        continue
+                    if not self._can_afford_cost_string(player, warp_cost):
+                        continue
+                    options.append({
+                        "label": f"Warp {getattr(card, 'name', card_id)}",
+                        "handler": "warp_cast",
+                        "action_context": {
+                            "hand_idx": hand_idx,
+                            "card_id": card_id,
+                            "controller_id": (
+                                "p1" if player is gs.p1 else "p2"),
+                            "warp_cast": True,
+                        },
+                    })
             for hand_idx, card_id in enumerate(player.get("hand", [])[10:], 10):
                 card = gs._safe_get_card(card_id)
                 if not card:

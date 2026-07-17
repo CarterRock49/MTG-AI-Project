@@ -37,14 +37,27 @@ class GameStateZonesMixin:
         owner = self._find_card_owner_fallback(card_id) or controller
         owner_key = "p1" if owner is self.p1 else ("p2" if owner is self.p2 else None)
         card_types = list(getattr(card, "card_types", []) or []) if card else []
+        power = getattr(card, "power", 0) if card else 0
+        toughness = getattr(card, "toughness", 0) if card else 0
+        layer_system = getattr(self, "layer_system", None)
+        if card and layer_system:
+            try:
+                power = layer_system.get_characteristic(card_id, "power")
+                toughness = layer_system.get_characteristic(
+                    card_id, "toughness")
+            except Exception:
+                # Last-known information must remain available even while a
+                # malformed layer is being diagnosed; raw characteristics are
+                # the conservative fallback.
+                pass
         return {
             "card_id": card_id,
             "controller_key": "p1" if controller is self.p1 else "p2",
             "owner_key": owner_key,
             "card_types": card_types,
             "subtypes": list(getattr(card, "subtypes", []) or []) if card else [],
-            "power": getattr(card, "power", 0) if card else 0,
-            "toughness": getattr(card, "toughness", 0) if card else 0,
+            "power": power,
+            "toughness": toughness,
             "was_creature": "creature" in card_types,
             "was_token": bool(getattr(card, "is_token", False)) if card else False,
             "lost_all_abilities": bool(
@@ -653,6 +666,27 @@ class GameStateZonesMixin:
         if actual_from_zone == "battlefield" and from_player:
             last_known = self._snapshot_battlefield_object(card_id, from_player)
             event_context["last_known"] = last_known
+            # A source-referential effect on an already-triggered object uses
+            # that source's last known battlefield characteristics if the
+            # source leaves before resolution (Ouroboroid's current power).
+            # Keep this separate from ``last_known``, which may already refer
+            # to the event object that caused a watcher to trigger.
+            for stack_index, item in enumerate(list(self.stack)):
+                if not (isinstance(item, tuple) and len(item) >= 4
+                        and item[1] == card_id
+                        and isinstance(item[3], dict)):
+                    continue
+                stack_context = dict(item[3])
+                stack_context["source_last_known"] = copy.deepcopy(last_known)
+                self.stack[stack_index] = item[:3] + (stack_context,)
+            ability_handler = getattr(self, "ability_handler", None)
+            for entry in list(getattr(
+                    ability_handler, "active_triggers", []) or []):
+                if not (isinstance(entry, tuple) and len(entry) >= 3
+                        and getattr(entry[0], "card_id", None) == card_id
+                        and isinstance(entry[2], dict)):
+                    continue
+                entry[2]["source_last_known"] = copy.deepcopy(last_known)
 
         # --- Perform Actual Move ---
         # ... (Keep existing removal logic) ...
