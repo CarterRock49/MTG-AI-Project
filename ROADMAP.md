@@ -60,16 +60,16 @@ perspective are recomputed for each decision.
 ### Non-negotiable lineage rules
 
 - **Start every new policy from the Round 7.89 Observation v3 boundary, using
-  the current Round 7.93 reward/curriculum contract.** Observation v3 corrects learned
+  the current Round 7.94 reward/curriculum contract.** Observation v3 corrects learned
   mana, land-development, resource-advantage, and strategic-viability
   semantics. Adaptive card/deck history is recorded but excluded from live
   evaluator advice by default so worker-local histories cannot make the same
   public state nonstationary. Recorded archetypes are canonical and play-turn
   analytics are player-relative; targetable observations match the active
   target instruction. Do not resume an Observation v2 checkpoint into this
-  lineage. Fresh Round 7.93 training uses
-  `discounted-state-potential-v6` and `combat-v6`; do not resume an older
-  curriculum checkpoint.
+  lineage. Fresh Round 7.94 training uses
+  `tempo-graded-potential-v1` and `combat-v6`; do not resume an older
+  curriculum or reward checkpoint.
 - Resume now verifies the companion manifest's reward contract and Observation
   version/hash. Curriculum continuation is intentionally rejected until its
   per-worker scheduler counters can be checkpointed; launch a fresh
@@ -838,6 +838,24 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
   invented. The delivery gate is green at 471 discovered unit tests and 408
   scenarios, plus all eight default invariant-fuzz seeds and the controlled
   phase-boundary check.
+- **7.94:** overhauled the reward system after the stopped
+  `round-7.93-cardfix-v1` run confirmed the pattern across 7.88-7.93: with
+  flat +-10 terminals the policy converged on timeout-dominant play (82%
+  goldfish / 76% race timeouts with zero decisive losses — it never lost,
+  it just never finished). `tempo-graded-potential-v1` replaces the
+  discounted-state-potential family: decisive wins earn a bounded speed
+  premium (+10 up to +14 by unused engine-turn budget, stationary across
+  stage turn limits), turn-limit stalls grade continuously on opponent
+  damage (-10 untouched up to -7 near lethal, result labels ignored so
+  lifegain cannot cushion the penalty, always below a real draw), draws pay
+  -3 instead of the near-neutral -0.25, every step costs 0.005 reward so
+  stalling bleeds and conceding hopeless games recycles samples, and the
+  potential drops the hand-hoarding term while making the convex damage
+  ramp dominant (life 0.10, board 0.15, damage 1.0 with slope 0.35x-1.65x).
+  Shaping remains strictly potential-based and terminal-zeroed. The
+  `round-7.94` canary pins the new contract over the unchanged combat-v6
+  inputs and is validated against the live training config; the v6-era
+  canaries and resume paths fail closed across the contract boundary.
 
 ### Institutional lessons retained from the silent-bug catalog
 

@@ -4204,27 +4204,61 @@ def s_stats_draw_result_is_canonical():
 @scenario("training reward", "position shaping is potential-based and terminal rewards are centralized")
 def s_training_reward_contract():
     gs = fresh(); env = get_env()
-    # Contract v6 grades the turn-limit penalty: a life lead at the limit is
-    # still strictly worse than any decisive win or draw, but no longer worth
-    # exactly as much as losing.
-    assert env._terminal_outcome_reward("turn_limit", "win") == -8.0
-    assert env._terminal_outcome_reward("turn_limit", "win_turn_limit") == -8.0
-    assert env._terminal_outcome_reward("turn_limit", "loss") == -10.0
-    assert env._terminal_outcome_reward("turn_limit", "draw") == -10.0
-    assert env._terminal_outcome_reward("turn_limit", "win") \
-        < env._terminal_outcome_reward("life_total", "draw"), \
-        "a turn-limit life lead must stay worse than a decisive draw"
-    assert env._terminal_outcome_reward("episode_step_limit", "win") == -10.0
-    assert env._terminal_outcome_reward("life_total", "win") == 10.0
+    # Contract tempo-graded-potential-v1: rounds 7.88-7.93 all converged on
+    # timeout-dominant play under flat +-10 terminals, so decisive wins now
+    # carry a bounded speed premium, turn-limit stalls grade continuously on
+    # opponent damage, real draws are clearly negative, and every step pays
+    # a small time cost.
+    assert env.REWARD_CONTRACT_VERSION == "tempo-graded-potential-v1"
+    me = gs.p1 if gs.agent_is_p1 else gs.p2
+    opp = gs.p2 if gs.agent_is_p1 else gs.p1
+
+    # A faster decisive win pays strictly more; the premium is bounded and
+    # measured against the stationary engine turn ceiling, not the stage
+    # limit, so its meaning never changes across curriculum stages.
+    gs.turn = 5
+    early_win = env._terminal_outcome_reward("life_total", "win")
+    gs.turn = 25
+    late_win = env._terminal_outcome_reward("life_total", "win")
+    assert early_win > late_win >= 10.0, (early_win, late_win)
+    assert early_win <= 10.0 + env.WIN_SPEED_BONUS
     assert env._terminal_outcome_reward("life_total", "loss") == -10.0
+    assert env._terminal_outcome_reward("draw_effect", "draw") == -3.0
+
+    # Turn-limit stalls grade on opponent damage only: result labels no
+    # longer matter at the limit and lifegain cannot cushion the penalty.
+    opp['life'] = 20
+    untouched_timeout = env._terminal_outcome_reward("turn_limit", "win")
+    opp['life'] = 2
+    pressured_timeout = env._terminal_outcome_reward("turn_limit", "win")
+    assert untouched_timeout == -10.0
+    assert -10.0 < pressured_timeout <= -7.0
+    assert env._terminal_outcome_reward("turn_limit", "loss") \
+        == pressured_timeout, \
+        "the turn-limit grade must depend on damage, not the result label"
+    assert pressured_timeout < env._terminal_outcome_reward(
+        "draw_effect", "draw"), \
+        "a turn-limit stall must stay worse than a decisive draw"
+    assert env._terminal_outcome_reward("episode_step_limit", "win") == -10.0
+    opp['life'] = 20
+
     assert env.DEFAULT_ACTION_REWARD_SCALE == 0.0 \
         and env.action_reward_scale == 0.0
-    assert env.REWARD_CONTRACT_VERSION == "discounted-state-potential-v6"
+    assert env.DEFAULT_TIME_COST_PER_STEP == 0.005 \
+        and env.time_cost_per_step == 0.005
+
     baseline = env._calculate_state_potential()
     assert env._calculate_state_potential() == baseline, \
         "unchanged state produced a changing board potential"
     assert env._calculate_board_state_reward() == baseline, \
         "legacy board-potential alias diverged from the reward contract"
+    # Hoarding cards is no longer strategic potential.
+    me['hand'].append(me['hand'][0])
+    try:
+        assert env._calculate_state_potential() == baseline, \
+            "hand size still moves the state potential"
+    finally:
+        me['hand'].pop()
     gs.p2['life'] -= 1
     improved = env._calculate_state_potential()
     assert improved > baseline, \
@@ -4325,7 +4359,14 @@ def s_opponent_terminal_result_uses_learned_agent_perspective():
             _, reward, terminated, truncated, info = env.step(11)
 
         expected_result = "win" if learned_wins else "loss"
-        expected_terminal = 10.0 if learned_wins else -10.0
+        # The learned seat's terminal value under the live contract: wins
+        # carry the speed premium for the turn the game actually ended on.
+        expected_terminal = env._terminal_outcome_reward(
+            "life_total", expected_result)
+        if learned_wins:
+            assert expected_terminal >= 10.0
+        else:
+            assert expected_terminal == -10.0
         assert terminated and not truncated, info
         assert info.get("game_result") == expected_result, \
             f"opponent result leaked its acting perspective: {info}"
@@ -12358,7 +12399,7 @@ def scenario_environment_enforces_episode_step_limit():
         assert np.isclose(reward, sum(components.values())), \
             f"step-limit reward did not match its components: {components}"
         assert info.get("reward_contract") == \
-            "discounted-state-potential-v6"
+            "tempo-graded-potential-v1"
         assert os.path.isfile(info.get("failure_replay_path", "")), \
             "the step-limit failure did not retain its action replay"
         assert isinstance(env.reset_seed, int)

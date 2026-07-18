@@ -426,6 +426,65 @@ def check_mask_aware_evaluation():
                 selected_device="cuda",
             )
 
+            # Round 7.94 pins the tempo-graded reward overhaul.  Validate it
+            # against the LIVE build_training_config output so the canary can
+            # only pass while the code actually implements its contract.
+            round_7_94 = m.validate_canary_cli(SimpleNamespace(
+                **m.ROUND_7_94_CANARY["cli"],
+                canary_config="round-7.94", resume=None,
+                optimize_hp=False))
+            live_training_config = m.build_training_config(SimpleNamespace(
+                learning_rate=round_7_94["cli"]["learning_rate"],
+                n_steps=round_7_94["cli"]["n_steps"],
+                batch_size=round_7_94["cli"]["batch_size"]))
+            assert live_training_config["reward_contract_version"] == \
+                "tempo-graded-potential-v1"
+            assert live_training_config["time_cost_per_step"] == 0.005
+            m.validate_canary_runtime(
+                round_7_94,
+                lineage={
+                    "card_registry": {"sha256": round_7_94["lineage"][
+                        "card_registry_sha256"]},
+                    "feature_schema": {"sha256": round_7_94["lineage"][
+                        "feature_schema_sha256"]},
+                    "corpus": {"sha256": round_7_94["lineage"][
+                        "corpus_sha256"]},
+                },
+                training_config=live_training_config,
+                curriculum=m.resolve_curriculum("combat-v6", canary_decks),
+                schedule_sha256=round_7_94["lineage"][
+                    "evaluation_schedule_sha256"],
+                num_envs=8,
+                selected_device="cuda",
+            )
+            # The superseded reward-v6 canaries must now fail closed against
+            # the live training config rather than silently launching a run
+            # under a contract the code no longer implements.
+            try:
+                m.validate_canary_runtime(
+                    round_7_93,
+                    lineage={
+                        "card_registry": {"sha256": round_7_93["lineage"][
+                            "card_registry_sha256"]},
+                        "feature_schema": {"sha256": round_7_93["lineage"][
+                            "feature_schema_sha256"]},
+                        "corpus": {"sha256": round_7_93["lineage"][
+                            "corpus_sha256"]},
+                    },
+                    training_config=live_training_config,
+                    curriculum=m.resolve_curriculum(
+                        "combat-v6", canary_decks),
+                    schedule_sha256=round_7_93["lineage"][
+                        "evaluation_schedule_sha256"],
+                    num_envs=8,
+                    selected_device="cuda",
+                )
+            except RuntimeError as error:
+                assert "reward_contract_version" in str(error)
+            else:
+                raise AssertionError(
+                    "a reward-v6 canary accepted the overhauled contract")
+
             # When the pair count is not divisible by the deck count, both
             # learned-deck and opponent exposure are still optimally balanced.
             ten_decks = [
@@ -1136,7 +1195,8 @@ def check_runtime_configuration():
         "activation_fn": torch.nn.Tanh,
         "action_reward_scale": 0.0,
         "state_potential_scale": 0.40,
-        "reward_contract_version": "discounted-state-potential-v6",
+        "time_cost_per_step": 0.005,
+        "reward_contract_version": "tempo-graded-potential-v1",
     }
 
     try:
@@ -1213,6 +1273,7 @@ def check_runtime_configuration():
     assert environment_calls[0][2]["reward_discount"] == 0.999
     assert environment_calls[0][2]["action_reward_scale"] == 0.0
     assert environment_calls[0][2]["state_potential_scale"] == 0.40
+    assert environment_calls[0][2]["time_cost_per_step"] == 0.005
     assert environment_calls[0][2]["curriculum"] is None
     assert environment_calls[0][2]["opponent_profile"] == "scripted"
 

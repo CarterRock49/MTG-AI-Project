@@ -52,10 +52,20 @@ class AlphaZeroMTGEnv(gym.Env):
     Updated for improved reward shaping, richer observations, modularity, and detailed logging.
     """
     ACTION_SPACE_SIZE = 480 # Moved constant here
-    REWARD_CONTRACT_VERSION = "discounted-state-potential-v6"
+    REWARD_CONTRACT_VERSION = "tempo-graded-potential-v1"
     DEFAULT_REWARD_DISCOUNT = 0.999
     DEFAULT_ACTION_REWARD_SCALE = 0.0
     DEFAULT_STATE_POTENTIAL_SCALE = 0.40
+    DEFAULT_TIME_COST_PER_STEP = 0.005
+    # Bounded decisive-win speed premium: +10 at the engine turn ceiling up
+    # to +10+WIN_SPEED_BONUS for an immediate kill.  Kept well under the
+    # win/loss band so speed can order wins but never outrank winning.
+    WIN_SPEED_BONUS = 4.0
+    # Turn-limit stalls grade continuously on opponent damage: -10 with an
+    # untouched opponent up to -10+TIMEOUT_DAMAGE_CREDIT near lethal.  The
+    # ceiling stays below DRAW_REWARD so stalling never beats a real draw.
+    TIMEOUT_DAMAGE_CREDIT = 3.0
+    DRAW_REWARD = -3.0
     OBSERVATION_SCHEMA_VERSION = OBSERVATION_SCHEMA_VERSION
     OBSERVATION_SCHEMA_SHA256 = OBSERVATION_SCHEMA_SHA256
     EVALUATION_TRACE_MAX_EVENTS = 8_192
@@ -83,6 +93,7 @@ class AlphaZeroMTGEnv(gym.Env):
                  reward_discount=DEFAULT_REWARD_DISCOUNT,
                  action_reward_scale=DEFAULT_ACTION_REWARD_SCALE,
                  state_potential_scale=DEFAULT_STATE_POTENTIAL_SCALE,
+                 time_cost_per_step=DEFAULT_TIME_COST_PER_STEP,
                  curriculum=None, opponent_profile="scripted",
                  matchup_seed=None,
                  adaptive_decision_history_enabled=False,
@@ -117,6 +128,7 @@ class AlphaZeroMTGEnv(gym.Env):
         self.reward_discount = float(reward_discount)
         self.action_reward_scale = float(action_reward_scale)
         self.state_potential_scale = float(state_potential_scale)
+        self.time_cost_per_step = float(time_cost_per_step)
         if not 0.0 <= self.reward_discount <= 1.0:
             raise ValueError("reward_discount must be between 0 and 1")
         if (not math.isfinite(self.action_reward_scale)
@@ -126,6 +138,10 @@ class AlphaZeroMTGEnv(gym.Env):
                 or self.state_potential_scale < 0.0):
             raise ValueError(
                 "state_potential_scale must be finite and nonnegative")
+        if (not math.isfinite(self.time_cost_per_step)
+                or self.time_cost_per_step < 0.0):
+            raise ValueError(
+                "time_cost_per_step must be finite and nonnegative")
         # The rules hand limit is seven, but the public action map exposes hand
         # slots 0-7 for casting and 0-9 for mandatory discards.  Keep the rules
         # limit on GameState while observing every directly actionable hand slot.
@@ -2506,7 +2522,13 @@ class AlphaZeroMTGEnv(gym.Env):
                 current_state_potential,
                 terminal=bool(done or truncated),
             )
-            step_reward = action_reward + state_change_reward
+            # Every decision costs a sliver of reward: given equal outcomes,
+            # shorter games are strictly better, and turn-limit stalls (the
+            # longest episodes) accrue the most.  Small enough that no
+            # accumulated total can reorder win/draw/timeout/loss terminals.
+            time_cost_reward = -self.time_cost_per_step
+            step_reward = action_reward + state_change_reward \
+                + time_cost_reward
             env_info["state_change_reward"] = state_change_reward
             env_info["state_potential"] = current_state_potential
             # Compatibility names for analysis scripts written against the old
@@ -2527,6 +2549,7 @@ class AlphaZeroMTGEnv(gym.Env):
             env_info["reward_components"] = {
                 "action": float(action_reward),
                 "state_change": float(state_change_reward),
+                "time": float(time_cost_reward),
                 "terminal": float(terminal_reward),
             }
             env_info["reward_diagnostics"] = {
@@ -4859,30 +4882,61 @@ class AlphaZeroMTGEnv(gym.Env):
             return "draw"
         return fallback
 
-    @staticmethod
-    def _terminal_outcome_reward(terminal_reason, result):
-        """Map a terminal category/result to reward contract v6.
+    def _remaining_turn_fraction(self):
+        """Fraction of the ENGINE turn budget left when the game ended.
 
-        Life leads at the turn limit are still diagnostic labels, not wins,
-        and remain strictly worse than every decisive outcome except a loss.
-        Grading the penalty (-8 ahead versus -10 behind) restores a gradient
-        toward pressure without making stalling attractive: v5's flat -10
-        taught that being ahead at the limit was worth exactly as much as
-        losing.  Engine safety terminations stay fail-closed.
+        Measured against the stationary env ceiling, not the stage-limited
+        ``gs.max_turns``, so the win speed premium means the same thing in
+        every curriculum stage.
+        """
+        ceiling = max(1, int(self.max_turns))
+        turn = int(getattr(self.game_state, "turn", ceiling) or ceiling)
+        return float(np.clip((ceiling - turn) / ceiling, 0.0, 1.0))
+
+    def _opponent_damage_progress(self):
+        """How far the opponent moved toward lethal, 0.0 (untouched) to 1.0."""
+        gs = self.game_state
+        opp = gs.p2 if gs.agent_is_p1 else gs.p1
+        if not opp:
+            return 0.0
+        return float(np.clip(
+            (20.0 - float(opp.get("life", 20))) / 20.0, 0.0, 1.0))
+
+    def _terminal_outcome_reward(self, terminal_reason, result):
+        """Map a terminal category/result to contract tempo-graded-potential-v1.
+
+        Rounds 7.88-7.93 all converged on timeout-dominant play (76-88% of
+        episodes) under flat +-10 terminals: wins paid the same at turn 25 as
+        at turn 8, and the binary turn-limit grade (-8 ahead / -10 behind)
+        left no gradient across "how close to lethal you got".  This contract
+        makes tempo part of the outcome itself:
+
+        - decisive wins earn a bounded speed premium against the engine turn
+          ceiling (faster kill, higher reward; never below +10);
+        - turn-limit stalls grade continuously on opponent damage, capped
+          strictly below a real draw, and ignore the result label so lifegain
+          cannot cushion the penalty;
+        - real draws pay a clearly negative -3 instead of the former near
+          neutral -0.25, which had made "not losing" a refuge;
+        - losses and engine safety terminations stay fail-closed at -10.
         """
         if terminal_reason == "turn_limit":
-            return -8.0 if str(result).startswith("win") else -10.0
+            return -10.0 + (
+                self.TIMEOUT_DAMAGE_CREDIT * self._opponent_damage_progress())
         if terminal_reason == "episode_step_limit":
             return -10.0
         if str(result).startswith(("error", "invalid")):
             return -10.0
-        return {
-            "win": 10.0, "loss": -10.0, "draw": -0.25,
-        }.get(result, -0.25)
+        if result == "win":
+            return 10.0 + (
+                self.WIN_SPEED_BONUS * self._remaining_turn_fraction())
+        if result == "loss":
+            return -10.0
+        return self.DRAW_REWARD
 
     def _failure_transition_reward(
             self, info, previous_state_potential, raw_action_reward=0.0):
-        """Apply reward contract v5 to fail-closed early-return branches."""
+        """Apply the live reward contract to fail-closed early-return branches."""
         action_reward = self.action_reward_scale * float(raw_action_reward)
         try:
             current_state_potential = self._calculate_state_potential()
@@ -4895,6 +4949,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 potential_error)
             current_state_potential = float(previous_state_potential)
             state_change_reward = 0.0
+        time_cost_reward = -self.time_cost_per_step
         terminal_reason = (
             info.get("terminal_reason") or self._terminal_reason(info))
         result = info.get("game_result", "error")
@@ -4908,6 +4963,7 @@ class AlphaZeroMTGEnv(gym.Env):
         info["reward_components"] = {
             "action": float(action_reward),
             "state_change": float(state_change_reward),
+            "time": float(time_cost_reward),
             "terminal": float(terminal_reward),
         }
         info["reward_diagnostics"] = {
@@ -4916,7 +4972,8 @@ class AlphaZeroMTGEnv(gym.Env):
             "state_potential_previous": float(previous_state_potential),
         }
         info["reward_contract"] = self.REWARD_CONTRACT_VERSION
-        return float(action_reward + state_change_reward + terminal_reward)
+        return float(action_reward + state_change_reward
+                     + time_cost_reward + terminal_reward)
 
     def _terminal_reason(self, info=None):
             """Return a stable terminal category for logs and reward policy."""
@@ -5013,19 +5070,23 @@ class AlphaZeroMTGEnv(gym.Env):
     def _calculate_state_potential(self):
         """Return the bounded strategic potential for the agent's position.
 
-        Contract v3 rebalance (July 14): runs v3-v6 all converged on
-        stalling to the turn limit — ~88% of episodes, with the critic
-        eventually predicting that outcome at 0.93 explained variance.
-        Offense now outweighs defense (a point of opponent life is worth
-        2-3x a point of own life) and the damage term is convex, so the
-        marginal value of damage RISES as the opponent approaches lethal
-        instead of paying out linearly and stalling short of the kill.
+        Contract tempo-graded-potential-v1 (July 17): four straight runs
+        (7.88-7.93) stalled into timeout-dominant play while the potential
+        still paid for defensive accumulation.  The overhauled potential is
+        an offense instrument:
 
-        Contract v6 rebalance (July 16): rounds 7.88-7.90 still raced too
-        slowly — decisive wins averaged turn 25 while losses averaged turn
-        17.  The damage-progress weight doubles (0.40 -> 0.80) so pushing
-        the opponent toward lethal pays enough to matter against the +-10
-        terminal rewards while the total potential stays clipped at +-2.
+        - the hand-size term is gone — card hoarding is not progress toward
+          ending a game and taught exactly the wrong lesson to a staller;
+        - the symmetric life-difference weight drops to 0.10 so lifegain
+          defense no longer rivals dealing damage;
+        - the convex damage ramp is the dominant term (weight 1.0, slope
+          rising from 0.35x at full life to 1.65x near lethal), so the last
+          points of damage are worth the most and the kill is never left on
+          the table.
+
+        The potential stays clipped at +-2 and is consumed only through the
+        discounted potential-difference shaping, which telescopes and cannot
+        change the optimal policy.
         """
         gs = self.game_state
         me = gs.p1 if gs.agent_is_p1 else gs.p2
@@ -5050,19 +5111,17 @@ class AlphaZeroMTGEnv(gym.Env):
                     value += 0.6
             return value
 
-        life_component = 0.30 * (
+        life_component = 0.10 * (
             (me.get('life', 0) - opp.get('life', 0)) / 20.0)
-        board_component = 0.20 * np.tanh(
+        board_component = 0.15 * np.tanh(
             (battlefield_value(me) - battlefield_value(opp)) / 6.0)
-        card_component = 0.10 * np.tanh(
-            (len(me.get('hand', [])) - len(opp.get('hand', []))) / 4.0)
         damage_taken = np.clip(
             (20.0 - float(opp.get('life', 20))) / 20.0, 0.0, 1.0)
-        # Convex: slope grows from 0.5x at full life to 1.5x near lethal.
-        damage_progress = 0.80 * (
-            0.5 * damage_taken + 0.5 * damage_taken ** 2)
+        # Convex: slope grows from 0.35x at full life to 1.65x near lethal.
+        damage_progress = 1.0 * (
+            0.35 * damage_taken + 0.65 * damage_taken ** 2)
         return float(np.clip(
-            life_component + board_component + card_component + damage_progress,
+            life_component + board_component + damage_progress,
             -2.0, 2.0))
 
     def _state_potential_reward(self, previous, current, terminal=False):

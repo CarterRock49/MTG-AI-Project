@@ -435,6 +435,16 @@ count, rather than deck names or the engine's alternating global turn.
 > different training/evaluation seed, schedule, and worker count from Rounds
 > 7.89/7.90, so its absolute scores are diagnostic rather than a controlled
 > cross-round comparison.
+> Round 7.94 replaces the discounted-state-potential family with
+> `tempo-graded-potential-v1` after rounds 7.88-7.93 all converged on
+> timeout-dominant play: decisive wins earn a bounded speed premium
+> (`+10` up to `+14` by unused engine-turn budget), turn-limit stalls grade
+> continuously on opponent damage (`-10` up to `-7`, result labels ignored),
+> real draws pay `-3`, every step costs `0.005` reward, and the potential
+> drops the hand-size term while making the convex damage ramp dominant
+> (life-diff `0.10`, board `0.15`, damage weight `1.0`). Shaping remains
+> strictly potential-based; resume and canary validation fail closed across
+> the contract boundary.
 > Historically, Round 7.89 introduced `combat-v3`. Race mastery
 > requires a novice win-rate floor, bridge requires separate novice and
 > scripted floors, and passive opponents are absent from bridge. Explicit

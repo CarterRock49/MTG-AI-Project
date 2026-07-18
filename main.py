@@ -1032,9 +1032,26 @@ ROUND_7_93_CANARY = {
             "8a47648d41234ecac04285e8e08ed35981c95e28f088da4fbc5c285535823c3b"),
     },
 }
+# Round 7.94 overhauls the reward contract.  Rounds 7.88-7.93 all converged
+# on timeout-dominant play (76-88% of episodes) under the
+# discounted-state-potential family's flat +-10 terminals, so
+# tempo-graded-potential-v1 adds a bounded win speed premium, a continuous
+# damage-graded turn-limit penalty, a clearly negative draw, a per-step time
+# cost, and an offense-only potential without the hand-hoarding term.  The
+# curriculum and every other input carry over from round 7.93; the older
+# canaries keep their frozen v6 contract and now fail closed by design.
+ROUND_7_94_CANARY = {
+    **ROUND_7_93_CANARY,
+    "id": "round-7.94",
+    "training_config": {
+        **ROUND_7_93_CANARY["training_config"],
+        "reward_contract_version": "tempo-graded-potential-v1",
+        "time_cost_per_step": 0.005,
+    },
+}
 CANARY_CONFIGS = {
     config["id"]: config
-    for config in (ROUND_7_92_CANARY, ROUND_7_93_CANARY)
+    for config in (ROUND_7_92_CANARY, ROUND_7_93_CANARY, ROUND_7_94_CANARY)
 }
 
 
@@ -1965,6 +1982,8 @@ def build_training_config(args, optuna_params=None):
             AlphaZeroMTGEnv.DEFAULT_ACTION_REWARD_SCALE,
         'state_potential_scale':
             AlphaZeroMTGEnv.DEFAULT_STATE_POTENTIAL_SCALE,
+        'time_cost_per_step':
+            AlphaZeroMTGEnv.DEFAULT_TIME_COST_PER_STEP,
         'reward_contract_version':
             AlphaZeroMTGEnv.REWARD_CONTRACT_VERSION,
     }
@@ -2006,6 +2025,8 @@ def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
                             AlphaZeroMTGEnv.DEFAULT_ACTION_REWARD_SCALE,
                         state_potential_scale=
                             AlphaZeroMTGEnv.DEFAULT_STATE_POTENTIAL_SCALE,
+                        time_cost_per_step=
+                            AlphaZeroMTGEnv.DEFAULT_TIME_COST_PER_STEP,
                         curriculum=None, opponent_profile="scripted",
                         matchup_seed=None,
                         stats_persistence_interval_games=10):
@@ -2026,6 +2047,7 @@ def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
             reward_discount=reward_discount,
             action_reward_scale=action_reward_scale,
             state_potential_scale=state_potential_scale,
+            time_cost_per_step=time_cost_per_step,
             curriculum=curriculum,
             opponent_profile=opponent_profile,
             matchup_seed=matchup_seed,
@@ -4855,6 +4877,8 @@ def main():
                         'action_reward_scale'],
                     state_potential_scale=training_config[
                         'state_potential_scale'],
+                    time_cost_per_step=training_config[
+                        'time_cost_per_step'],
                     curriculum=resolved_curriculum,
                     opponent_profile="scripted",
                     matchup_seed=derive_matchup_seed(args.seed, idx),
@@ -4889,6 +4913,8 @@ def main():
                         'action_reward_scale'],
                     state_potential_scale=training_config[
                         'state_potential_scale'],
+                    time_cost_per_step=training_config[
+                        'time_cost_per_step'],
                     curriculum=None,
                     opponent_profile="scripted",
                     matchup_seed=eval_seed + idx,
