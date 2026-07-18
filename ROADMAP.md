@@ -871,7 +871,20 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
   round: tempo-graded-potential-v1 has exactly one clean 1M-step run of
   evidence and the eval timeout tail (10-15%, scored as losses by the
   qualification gate) is its follow-up target if the finer ladder also
-  plateaus.
+  plateaus. Two fixes from the round-7.94 stats audit ride along before
+  launch. First, the hand "playable" observation flag computed
+  affordability from floating mana only while the action mask used the
+  land-aware check, so effectively every spell observed as unplayable;
+  the environment now delegates to the action handler's affordability
+  check and scenario 601.2f guards mask/observation agreement (the
+  audit's affordability probe cleared the engine itself: masks, negative
+  cases, conditional Verge activation, and tap payments were all
+  correct). Second, record_game never received game_state, so every
+  deck/card ahead/behind bucket sat at the tracker's parity default (0
+  of 960 card files after 7.94); the environment now snapshots life
+  totals per turn and classifies the winner's mid-game position (ahead,
+  parity, or behind at the middle turn, 5-life margin), making
+  snowball-versus-comeback analytics real.
 
 ### Institutional lessons retained from the silent-bug catalog
 

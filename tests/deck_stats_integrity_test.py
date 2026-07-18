@@ -770,6 +770,38 @@ class DeckStatsIntegrityTest(unittest.TestCase):
             draws, {"winner": {3: [4]}, "loser": {2: [3]}})
         self.assertEqual(mulligans, {"winner": 0, "loser": 1})
 
+    def test_midgame_position_classifies_winner_from_turn_snapshots(self):
+        # Round 7.95: record_game never received game_state, so every game
+        # landed in the tracker's "parity" default (0 of 960 card files had
+        # an ahead/behind bucket after round-7.94). The env now classifies
+        # the winner's position at the middle turn of the game.
+        from Playersim.environment import AlphaZeroMTGEnv
+
+        env = AlphaZeroMTGEnv.__new__(AlphaZeroMTGEnv)
+
+        # Snowball: P1 built a big lead by turn 6 of 12 and won.
+        env._life_totals_by_turn = {
+            2: (20, 20), 4: (20, 16), 6: (19, 8), 10: (18, 3)}
+        self.assertEqual(env._derive_midgame_position(True, 12), "ahead")
+        # The same game from the loser-as-winner perspective is a comeback.
+        self.assertEqual(env._derive_midgame_position(False, 12), "behind")
+
+        # Close mid-game life means parity regardless of the final result.
+        env._life_totals_by_turn = {3: (17, 15), 6: (12, 14), 9: (4, 18)}
+        self.assertEqual(env._derive_midgame_position(True, 12), "parity")
+
+        # A margin exactly at the threshold counts as a real lead.
+        margin = AlphaZeroMTGEnv.MIDGAME_POSITION_LIFE_MARGIN
+        env._life_totals_by_turn = {5: (20, 20 - margin)}
+        self.assertEqual(env._derive_midgame_position(True, 10), "ahead")
+
+        # No snapshot at or before the midpoint falls back to the earliest
+        # recorded turn; no history at all stays parity.
+        env._life_totals_by_turn = {9: (20, 5)}
+        self.assertEqual(env._derive_midgame_position(True, 10), "ahead")
+        env._life_totals_by_turn = {}
+        self.assertEqual(env._derive_midgame_position(True, 10), "parity")
+
 
 if __name__ == "__main__":
     unittest.main()

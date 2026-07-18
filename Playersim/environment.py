@@ -66,6 +66,10 @@ class AlphaZeroMTGEnv(gym.Env):
     # ceiling stays below DRAW_REWARD so stalling never beats a real draw.
     TIMEOUT_DAMAGE_CREDIT = 3.0
     DRAW_REWARD = -3.0
+    # A mid-game life lead of at least this margin classifies the eventual
+    # winner's position as "ahead" (snowball win) or "behind" (comeback win)
+    # in the deck/card statistics; smaller leads record as "parity".
+    MIDGAME_POSITION_LIFE_MARGIN = 5
     OBSERVATION_SCHEMA_VERSION = OBSERVATION_SCHEMA_VERSION
     OBSERVATION_SCHEMA_SHA256 = OBSERVATION_SCHEMA_SHA256
     EVALUATION_TRACE_MAX_EVENTS = 8_192
@@ -782,6 +786,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.evaluation_action_trace = []
                 self._reset_evaluation_capture_telemetry()
                 self._game_result_recorded = False
+                self._life_totals_by_turn = {}
                 self._stats_result_record_attempted = False
                 self._card_memory_result_record_attempted = False
                 self._stats_result_record_accepted = None
@@ -1037,6 +1042,29 @@ class AlphaZeroMTGEnv(gym.Env):
             logging.critical(f"FALLBACK RESET FAILED: {fallback_e}", exc_info=True)
             raise fallback_e
         
+    def _derive_midgame_position(self, winner_is_p1, final_turn):
+        """Classify the winner's mid-game position from per-turn life totals.
+
+        Uses the last life totals observed on or before the middle turn of
+        the game, so the bucket answers "did the winner snowball or come
+        from behind" rather than the trivial "the winner ended ahead".
+        Returns one of the DeckStatsTracker GamePosition values.
+        """
+        history = getattr(self, '_life_totals_by_turn', None) or {}
+        if not history:
+            return "parity"
+        mid_turn = max(1, int(final_turn) // 2)
+        eligible = [turn for turn in history if turn <= mid_turn]
+        snapshot_turn = max(eligible) if eligible else min(history)
+        p1_life, p2_life = history[snapshot_turn]
+        winner_lead = (p1_life - p2_life) if winner_is_p1 \
+            else (p2_life - p1_life)
+        if winner_lead >= self.MIDGAME_POSITION_LIFE_MARGIN:
+            return "ahead"
+        if winner_lead <= -self.MIDGAME_POSITION_LIFE_MARGIN:
+            return "behind"
+        return "parity"
+
     def ensure_game_result_recorded(self, forced_result=None):
         """Make sure game result is recorded if it hasn't been already (Added None checks)."""
         if getattr(self, '_game_result_recorded', False):
@@ -1194,6 +1222,12 @@ class AlphaZeroMTGEnv(gym.Env):
                         "first_player": "winner"
                         if (is_draw or is_p1_winner) else "loser"
                     },
+                    # Without this the tracker's parity default left every
+                    # ahead/behind bucket empty (0 of 960 card files after
+                    # round-7.94). The winner slot is P1 in a draw, matching
+                    # the winner/loser mapping above.
+                    game_state=self._derive_midgame_position(
+                        True if is_draw else is_p1_winner, gs.turn),
                     is_draw=is_draw,
                     winner_archetype=winner_archetype,
                     loser_archetype=loser_archetype,
@@ -2500,6 +2534,14 @@ class AlphaZeroMTGEnv(gym.Env):
             # --- 5. Check Final Game End Conditions ---
             # Everything below this boundary is learned-agent telemetry.
             gs.agent_is_p1 = initial_agent_is_p1
+            # Keep the last life totals seen on each turn so the terminal
+            # stats record can classify the winner's mid-game position
+            # (ahead/parity/behind) instead of the tracker's parity default.
+            try:
+                self._life_totals_by_turn[int(gs.turn)] = (
+                    int(gs.p1.get("life", 0)), int(gs.p2.get("life", 0)))
+            except (TypeError, ValueError, AttributeError):
+                pass
             if not done:
                  game_ended_by_check = self._check_game_end_conditions(env_info)
                  done = done or game_ended_by_check
@@ -6943,7 +6985,18 @@ class AlphaZeroMTGEnv(gym.Env):
         return playable
     
     def _can_afford_card(self, player, card_or_data, is_back_face=False, context=None):
-        """Check affordability using ManaSystem, handling dict or Card object."""
+        """Check affordability using ManaSystem, handling dict or Card object.
+
+        Delegates to the action handler's affordability check — the same one
+        the action mask uses — so the hand "playable" observation cannot
+        disagree with the mask. The previous pool-only check here reported
+        every spell as unaffordable unless mana was already floating.
+        """
+        handler = getattr(self, 'action_handler', None)
+        if handler is not None and hasattr(handler, '_can_afford_card'):
+            return handler._can_afford_card(
+                player, card_or_data, is_back_face=is_back_face,
+                context=context)
         gs = self.game_state
         if context is None: context = {}
         # *** FIXED: Check mana_system exists on gs first ***
@@ -6965,7 +7018,8 @@ class AlphaZeroMTGEnv(gym.Env):
             parsed_cost = gs.mana_system.parse_mana_cost(cost_str)
             # Apply cost modifiers based on context (Kicker, Additional, Alternative)
             final_cost = gs.mana_system.apply_cost_modifiers(player, parsed_cost, card_id, context)
-            return gs.mana_system.can_pay_mana_cost(player, final_cost, context)
+            return gs.mana_system.can_pay_mana_cost_with_lands(
+                player, final_cost, context)
         except Exception as e:
             card_name = getattr(card_or_data, 'name', 'Unknown') if isinstance(card_or_data, Card) else card_or_data.get('name', 'Unknown')
             logging.warning(f"Error checking mana cost for '{card_name}': {e}")

@@ -17834,6 +17834,39 @@ def s_ba_sing_se_earthbend_uses_activation_target_flow():
     assert gs._safe_get_card(target_land).counters.get("+1/+1", 0) == 2
 
 
+@scenario("601.2f / observation", "hand playability observation agrees with the cast mask")
+def s_hand_playable_observation_matches_mask():
+    # Round 7.95: the observation's affordability check only counted floating
+    # mana, so the hand "playable" flag was 0 for every spell the mask
+    # exposed. Both sides must answer from the same land-aware contract.
+    gs = fresh()
+    env = get_env()
+    p1 = gs.p1
+    for cid in list(p1["hand"]):
+        assert gs.move_card(cid, p1, "hand", p1, "library")
+    spell = inject_real_card(gs, p1, "Leatherhead, Swamp Stalker", "hand")
+    for _ in range(3):
+        inject_real_card(gs, p1, "Forest", "battlefield")
+    gs.phase = gs.PHASE_MAIN_PRECOMBAT
+    gs.priority_player = gs.p1
+    slot = p1["hand"].index(spell)
+
+    mask = env.action_mask()
+    playable = env._get_hand_playable(list(p1["hand"]), p1, is_my_turn=True)
+    assert not mask[20 + slot], \
+        "mask exposed a {2}{G}{G} cast with only three untapped Forests"
+    assert playable[slot] == 0.0, \
+        "playability observation contradicted the mask for an unaffordable spell"
+
+    inject_real_card(gs, p1, "Forest", "battlefield")
+    mask = env.action_mask()
+    playable = env._get_hand_playable(list(p1["hand"]), p1, is_my_turn=True)
+    assert mask[20 + slot], \
+        "mask hid a legal {2}{G}{G} cast with four untapped Forests"
+    assert playable[slot] == 1.0, \
+        "playability observation contradicted the mask for an affordable spell"
+
+
 # ---------------------------------------------------------------------------
 # Runner
 # ---------------------------------------------------------------------------
