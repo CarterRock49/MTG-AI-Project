@@ -485,6 +485,57 @@ def check_mask_aware_evaluation():
                 raise AssertionError(
                     "a reward-v6 canary accepted the overhauled contract")
 
+            # Round 7.95 pins the unchanged tempo contract over combat-v7's
+            # halved scripted ratchet step and doubles the horizon to 2M.
+            round_7_95 = m.validate_canary_cli(SimpleNamespace(
+                **m.ROUND_7_95_CANARY["cli"],
+                canary_config="round-7.95", resume=None,
+                optimize_hp=False))
+            assert round_7_95["cli"]["timesteps"] == 2_000_000
+            assert round_7_95["cli"]["curriculum"] == "combat-v7"
+            m.validate_canary_runtime(
+                round_7_95,
+                lineage={
+                    "card_registry": {"sha256": round_7_95["lineage"][
+                        "card_registry_sha256"]},
+                    "feature_schema": {"sha256": round_7_95["lineage"][
+                        "feature_schema_sha256"]},
+                    "corpus": {"sha256": round_7_95["lineage"][
+                        "corpus_sha256"]},
+                },
+                training_config=live_training_config,
+                curriculum=m.resolve_curriculum("combat-v7", canary_decks),
+                schedule_sha256=round_7_95["lineage"][
+                    "evaluation_schedule_sha256"],
+                num_envs=8,
+                selected_device="cuda",
+            )
+            # The 7.95 canary must reject the coarse v6 ladder it supersedes.
+            try:
+                m.validate_canary_runtime(
+                    round_7_95,
+                    lineage={
+                        "card_registry": {"sha256": round_7_95["lineage"][
+                            "card_registry_sha256"]},
+                        "feature_schema": {"sha256": round_7_95["lineage"][
+                            "feature_schema_sha256"]},
+                        "corpus": {"sha256": round_7_95["lineage"][
+                            "corpus_sha256"]},
+                    },
+                    training_config=live_training_config,
+                    curriculum=m.resolve_curriculum(
+                        "combat-v6", canary_decks),
+                    schedule_sha256=round_7_95["lineage"][
+                        "evaluation_schedule_sha256"],
+                    num_envs=8,
+                    selected_device="cuda",
+                )
+            except RuntimeError as error:
+                assert "curriculum" in str(error)
+            else:
+                raise AssertionError(
+                    "round-7.95 accepted the superseded combat-v6 ladder")
+
             # When the pair count is not divisible by the deck count, both
             # learned-deck and opponent exposure are still optimally balanced.
             ten_decks = [

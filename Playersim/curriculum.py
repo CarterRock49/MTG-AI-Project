@@ -346,6 +346,25 @@ for stage in COMBAT_CURRICULUM_V6["stages"]:
 del stage
 
 
+# Round 7.95: the v6 canary (run round-7.94-tempo-v1, 1M steps) validated the
+# two-way interval ratchet — no collapse, best-final eval of any run — but
+# spent its whole back half ping-ponging the scripted epsilon 0.40<->0.20:
+# ~38% decisive wins at 0.40 (tightens) versus ~12% at 0.20 (relaxes), so the
+# 0.20 step spans the entire measured skill cliff.  V7 halves the scripted
+# step to 0.10, giving the ladder rungs at 0.30 and 0.10 that the interval
+# gate can actually resolve through.  The novice ramp keeps its 0.25 step:
+# race has never oscillated.  Finer rungs double the ladder length and each
+# rung needs a fresh 48-episode window, so v7 is paired with a 2M-step
+# horizon (round-7.95) rather than 7.94's 1M.
+COMBAT_CURRICULUM_V7 = deepcopy(COMBAT_CURRICULUM_V6)
+COMBAT_CURRICULUM_V7.update({"id": "combat-v7", "version": 7})
+for stage in COMBAT_CURRICULUM_V7["stages"]:
+    handicap = stage.get("handicap")
+    if handicap and handicap["profiles"] == ["scripted"]:
+        handicap["step"] = 0.10
+del stage, handicap
+
+
 def _stable_seed(*parts) -> int:
     payload = ":".join(str(part) for part in parts).encode("utf-8")
     return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
@@ -367,6 +386,7 @@ def resolve_curriculum(name, decks):
         "combat-v4": COMBAT_CURRICULUM_V4,
         "combat-v5": COMBAT_CURRICULUM_V5,
         "combat-v6": COMBAT_CURRICULUM_V6,
+        "combat-v7": COMBAT_CURRICULUM_V7,
     }
     if name not in presets:
         raise ValueError(f"Unknown curriculum: {name}")

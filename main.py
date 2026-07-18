@@ -1049,9 +1049,30 @@ ROUND_7_94_CANARY = {
         "time_cost_per_step": 0.005,
     },
 }
+# Round 7.95 keeps the 7.94 reward contract and swaps in combat-v7, which
+# halves the scripted handicap step to 0.10: round-7.94-tempo-v1 measured
+# ~38% decisive wins at epsilon 0.40 against ~12% at 0.20, so the whole
+# skill cliff sat inside one 0.20 rung and the ratchet ping-ponged for the
+# entire back half of the run.  Finer rungs need more windows to climb, so
+# the horizon doubles to 2M timesteps.
+ROUND_7_95_CANARY = {
+    **ROUND_7_94_CANARY,
+    "id": "round-7.95",
+    "cli": {
+        **ROUND_7_94_CANARY["cli"],
+        "curriculum": "combat-v7",
+        "timesteps": 2_000_000,
+    },
+    "runtime": {
+        **ROUND_7_94_CANARY["runtime"],
+        "curriculum_sha256": (
+            "91de663c2e15b7f61252e4dfafb431383834fa20f8408e0f52a064b0c28bb252"),
+    },
+}
 CANARY_CONFIGS = {
     config["id"]: config
-    for config in (ROUND_7_92_CANARY, ROUND_7_93_CANARY, ROUND_7_94_CANARY)
+    for config in (ROUND_7_92_CANARY, ROUND_7_93_CANARY, ROUND_7_94_CANARY,
+                   ROUND_7_95_CANARY)
 }
 
 
@@ -4577,9 +4598,9 @@ def main():
                              "(default: formats/<format> when --format is given)")
     parser.add_argument(
         "--curriculum",
-        choices=("combat-v6", "combat-v5", "combat-v4", "combat-v3",
-                 "combat-v2", "combat-v1", "none"),
-        default="combat-v6",
+        choices=("combat-v7", "combat-v6", "combat-v5", "combat-v4",
+                 "combat-v3", "combat-v2", "combat-v1", "none"),
+        default="combat-v7",
         help="Deterministic training opponent curriculum (evaluation stays fixed)")
     parser.add_argument(
         "--canary-config", choices=tuple(CANARY_CONFIGS), default=None,

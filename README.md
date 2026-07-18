@@ -445,6 +445,13 @@ count, rather than deck names or the engine's alternating global turn.
 > (life-diff `0.10`, board `0.15`, damage weight `1.0`). Shaping remains
 > strictly potential-based; resume and canary validation fail closed across
 > the contract boundary.
+> Round 7.95 introduces `combat-v7`, which halves the scripted handicap
+> ratchet step to 0.10: round-7.94-tempo-v1 ping-ponged the scripted
+> epsilon between 0.40 (~38% decisive wins, tightens) and 0.20 (~12%,
+> relaxes), so the 0.20 step spanned the entire measured skill cliff. The
+> novice ramp keeps its 0.25 step, and the `round-7.95` canary doubles the
+> training horizon to 2M timesteps so each finer rung can earn its
+> 48-episode window.
 > Historically, Round 7.89 introduced `combat-v3`. Race mastery
 > requires a novice win-rate floor, bridge requires separate novice and
 > scripted floors, and passive opponents are absent from bridge. Explicit

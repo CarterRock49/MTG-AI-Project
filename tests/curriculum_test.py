@@ -249,6 +249,40 @@ class CurriculumSchedulerTest(unittest.TestCase):
                 stage_v5.get("advance_when"), stage_v6.get("advance_when"))
             self.assertEqual(stage_v5.get("max_turns"), stage_v6.get("max_turns"))
 
+    def test_v7_halves_scripted_ratchet_step(self):
+        spec = resolve_curriculum("combat-v7", DECKS)
+        self.assertEqual(spec["id"], "combat-v7")
+        self.assertEqual(spec["version"], 7)
+
+        # Round-7.94 ping-ponged the scripted epsilon 0.40<->0.20 (~38%
+        # decisive wins at 0.40, ~12% at 0.20): the 0.20 step spanned the
+        # whole measured cliff.  V7 inserts climbable rungs at 0.30 and
+        # 0.10; the novice ramp never oscillated and keeps its step.
+        goldfish, race, bridge, full_pool = spec["stages"]
+        self.assertIsNone(goldfish.get("handicap"))
+        self.assertEqual(race["handicap"]["profiles"], ["novice"])
+        self.assertEqual(race["handicap"]["step"], 0.25)
+        for stage in (bridge, full_pool):
+            self.assertEqual(stage["handicap"]["profiles"], ["scripted"])
+            self.assertEqual(stage["handicap"]["step"], 0.10)
+            self.assertEqual(stage["handicap"]["window_episodes"], 48)
+
+        # Everything except the scripted step carries over from v6, which
+        # stays untouched for reproducibility (rounds 7.93/7.94 pin its
+        # resolved sha).
+        v6 = resolve_curriculum("combat-v6", DECKS)
+        for stage_v6, stage_v7 in zip(v6["stages"], spec["stages"]):
+            handicap_v6 = dict(stage_v6.get("handicap") or {})
+            handicap_v7 = dict(stage_v7.get("handicap") or {})
+            if handicap_v6.get("profiles") == ["scripted"]:
+                self.assertEqual(handicap_v6.pop("step"), 0.20)
+                self.assertEqual(handicap_v7.pop("step"), 0.10)
+            self.assertEqual(handicap_v6, handicap_v7)
+            self.assertEqual(
+                stage_v6.get("advance_when"), stage_v7.get("advance_when"))
+            self.assertEqual(
+                stage_v6.get("max_turns"), stage_v7.get("max_turns"))
+
     def test_v4_handicap_and_turn_limit_validation_fails_closed(self):
         def broken(mutate):
             spec = deepcopy(COMBAT_CURRICULUM_V4)

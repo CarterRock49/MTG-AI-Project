@@ -60,15 +60,15 @@ perspective are recomputed for each decision.
 ### Non-negotiable lineage rules
 
 - **Start every new policy from the Round 7.89 Observation v3 boundary, using
-  the current Round 7.94 reward/curriculum contract.** Observation v3 corrects learned
+  the current Round 7.95 reward/curriculum contract.** Observation v3 corrects learned
   mana, land-development, resource-advantage, and strategic-viability
   semantics. Adaptive card/deck history is recorded but excluded from live
   evaluator advice by default so worker-local histories cannot make the same
   public state nonstationary. Recorded archetypes are canonical and play-turn
   analytics are player-relative; targetable observations match the active
   target instruction. Do not resume an Observation v2 checkpoint into this
-  lineage. Fresh Round 7.94 training uses
-  `tempo-graded-potential-v1` and `combat-v6`; do not resume an older
+  lineage. Fresh Round 7.95 training uses
+  `tempo-graded-potential-v1` and `combat-v7`; do not resume an older
   curriculum or reward checkpoint.
 - Resume now verifies the companion manifest's reward contract and Observation
   version/hash. Curriculum continuation is intentionally rejected until its
@@ -856,6 +856,22 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
   `round-7.94` canary pins the new contract over the unchanged combat-v6
   inputs and is validated against the live training config; the v6-era
   canaries and resume paths fail closed across the contract boundary.
+- **7.95:** halved the scripted handicap ratchet step after run
+  `round-7.94-tempo-v1` (1M steps, completed clean) validated the two-way
+  interval ratchet but exposed its granularity: eval qualification rose
+  0.047 -> 0.250 (best final of any run, still far under the 0.550 publish
+  gate) while the back half of the run ping-ponged the scripted epsilon
+  0.40 <-> 0.20 three times — ~38% decisive wins at 0.40 tightens, ~12% at
+  0.20 relaxes, so the whole skill cliff sat inside one 0.20 rung.
+  `combat-v7` sets the bridge and full_pool scripted steps to 0.10 (rungs
+  at 0.30 and 0.10); the novice ramp keeps 0.25 — race never oscillated.
+  Because each finer rung needs a fresh 48-episode window, the `round-7.95`
+  canary doubles the horizon to 2M timesteps; every other input carries
+  over from round 7.94 unchanged. Rewards are deliberately untouched this
+  round: tempo-graded-potential-v1 has exactly one clean 1M-step run of
+  evidence and the eval timeout tail (10-15%, scored as losses by the
+  qualification gate) is its follow-up target if the finer ladder also
+  plateaus.
 
 ### Institutional lessons retained from the silent-bug catalog
 
