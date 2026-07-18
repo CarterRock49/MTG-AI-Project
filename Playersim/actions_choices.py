@@ -73,6 +73,27 @@ class ChoiceHandlersMixin:
                 and target_id not in excluded_targets)
         }, key=lambda target_id: (isinstance(target_id, str), target_id))
 
+        # "From a single graveyard" lets the first target choose either
+        # graveyard, then confines every remaining target to that same
+        # player's graveyard.  Apply the restriction here because this helper
+        # is shared by both mask generation and SELECT_TARGET execution.
+        if (selected_targets and re.search(
+                r"\bfrom\s+a\s+single\s+graveyard\b",
+                str(context.get("effect_text", "")), re.IGNORECASE)):
+            chosen_owner, chosen_zone = gs.find_card_location(
+                selected_targets[0])
+            if chosen_owner is None or chosen_zone != "graveyard":
+                candidates = []
+            else:
+                same_graveyard = []
+                for target_id in candidates:
+                    target_owner, target_zone = gs.find_card_location(
+                        target_id)
+                    if (target_owner is chosen_owner
+                            and target_zone == "graveyard"):
+                        same_graveyard.append(target_id)
+                candidates = same_graveyard
+
         # Selecting the last available slot auto-finalizes in
         # _handle_select_target.  Do not expose a candidate that would turn a
         # mask-valid action into a failed cast at that boundary.
@@ -585,6 +606,12 @@ class ChoiceHandlersMixin:
             return -0.15, False
         
         ability = activated_abilities[ability_idx]
+        if not gs.ability_handler.activated_ability_functions_from_zone(
+                card_id, ability, player):
+            logging.warning(
+                "ACTIVATE_ABILITY attempted to use %s from the wrong zone.",
+                getattr(ability, 'keyword', type(ability).__name__))
+            return -0.15, False
         # activation_index may exist but hold None (keyword-built abilities);
         # a None index corrupts stack contexts and evaluator calls downstream.
         internal_idx = getattr(ability, 'activation_index', None)
@@ -920,16 +947,6 @@ class ChoiceHandlersMixin:
                     source_is_tap_ability=source_is_tap_ability)
             return 0.1, True
         
-        # ``ActivatedAbility.pay_cost`` is the single owner of Exhaust
-        # bookkeeping. The handler still dispatches the activation event,
-        # but must not mark the same ability a second time.
-        if is_exhaust:
-            # Trigger exhaust event
-            if gs.ability_handler:
-                exhaust_context = {"activator": player, "source_card_id": card_id, "ability_index": internal_idx}
-                gs.ability_handler.check_abilities(card_id, "EXHAUST_ABILITY_ACTIVATED", exhaust_context)
-                gs.ability_handler.process_triggered_abilities()
-        
         stack_context = {
             "ability_index": internal_idx,
             "effect_text": effect_text,
@@ -949,6 +966,19 @@ class ChoiceHandlersMixin:
             gs.notify_targets_committed(
                 card_id, player, activation_targets or {},
                 stack_context=stack_context)
+
+        # ``ActivatedAbility.pay_cost`` is the single owner of Exhaust
+        # bookkeeping. Put the activated ability on the stack before moving
+        # abilities triggered by its activation there; those triggers must be
+        # above it and therefore resolve first (CR 603.3).
+        if is_exhaust and gs.ability_handler:
+            exhaust_context = {
+                "activator": player, "source_card_id": card_id,
+                "ability_index": internal_idx,
+            }
+            gs.ability_handler.check_abilities(
+                card_id, "EXHAUST_ABILITY_ACTIVATED", exhaust_context)
+            gs.ability_handler.process_triggered_abilities()
         logging.debug(f"Added ability {internal_idx} for {card.name} to stack")
         
         # Evaluate strategic value of activation
@@ -1136,9 +1166,14 @@ class ChoiceHandlersMixin:
             # entire Oracle text can apply another mode's restriction and
             # discard a legal target (Prismari Charm lost its player target to
             # the nonland-permanent bounce mode).
-            cast_context["targeting_text"] = ctx.get("effect_text", "")
             if targets_by_slot:
+                # ``effect_text`` tracks the *current* slot and therefore
+                # contains only the final instruction here.  Let cast_spell
+                # reconstruct the aggregate targeting text from its original
+                # modal/Oracle context so it validates every committed slot.
                 cast_context["targets_by_slot"] = targets_by_slot
+            else:
+                cast_context["targeting_text"] = ctx.get("effect_text", "")
             card_id = ctx.get("source_id")
             controller = ctx.get("controller")
             if begin_distribution_announcement("cast", cast_context):

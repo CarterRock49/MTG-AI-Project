@@ -769,6 +769,168 @@ class GameStateStackMixin:
                 controller, total_cost, card_id, cast_context)
         return total_cost
 
+    @staticmethod
+    def _tiered_mode_effect(card, mode_index):
+        """Return the exact structured effect for one Tiered row."""
+        modes = list(getattr(card, 'tiered_modes', []) or []) if card else []
+        if (not isinstance(mode_index, int)
+                or not 0 <= mode_index < len(modes)):
+            return ''
+        return str(modes[mode_index].get('effect', '') or '').strip()
+
+    @classmethod
+    def _tiered_mode_resolving_text(cls, card, mode_index):
+        """Join a Tiered row to any shared instruction without reparsing rows."""
+        mode_text = cls._tiered_mode_effect(card, mode_index)
+        shared_text = str(
+            getattr(card, 'tiered_shared_effect', '') or '').strip()
+        if not shared_text:
+            return mode_text
+        # Vincent's Limit Break stores the chosen P/T as the row effect while
+        # its target and duration live in the shared instruction.
+        if (re.fullmatch(r"\d+\s*/\s*\d+", mode_text)
+                and re.search(r"chosen base power and toughness", shared_text,
+                              re.IGNORECASE)):
+            return re.sub(
+                r"chosen base power and toughness",
+                f"base power and toughness {mode_text}",
+                shared_text, flags=re.IGNORECASE)
+        return f"{shared_text} {mode_text}".strip()
+
+    def _tiered_cost_for_mode(self, card_id, controller, mode_index,
+                              context=None, apply_modifiers=True):
+        """Return base plus exactly one Tiered additional mana cost."""
+        card = self._safe_get_card(card_id)
+        modes = list(getattr(card, 'tiered_modes', []) or []) if card else []
+        if (not getattr(card, 'is_tiered', False)
+                or not isinstance(mode_index, int)
+                or not 0 <= mode_index < len(modes)):
+            return None
+
+        cast_context = dict(context or {})
+        cast_context.update({
+            'card': card,
+            'is_tiered': True,
+            'selected_tier_mode': mode_index,
+            'tiered_mode_cost': modes[mode_index].get('cost', ''),
+            'tiered_mode_effect': self._tiered_mode_effect(card, mode_index),
+        })
+        alt_cost_type = cast_context.get('use_alt_cost')
+        if alt_cost_type == 'plot':
+            base_cost = self.mana_system.parse_mana_cost('')
+        elif alt_cost_type:
+            base_cost = self.mana_system.calculate_alternative_cost(
+                card_id, controller, alt_cost_type, cast_context)
+            if base_cost is None:
+                return None
+        else:
+            base_cost = self.mana_system.parse_mana_cost(
+                getattr(card, 'mana_cost', '') or '')
+        mode_cost = self.mana_system.parse_mana_cost(
+            modes[mode_index].get('cost', '') or '')
+        total_cost = self._combine_cost_dicts(base_cost, mode_cost)
+        if apply_modifiers:
+            total_cost = self.mana_system.apply_cost_modifiers(
+                controller, total_cost, card_id, cast_context)
+        return total_cost
+
+    @staticmethod
+    def _printed_kicker_cost(card, oracle_text=None):
+        """Return one printed mana Kicker cost, preserving every symbol."""
+        text = (oracle_text if oracle_text is not None
+                else getattr(card, 'oracle_text', '') if card else '') or ''
+        match = re.search(
+            r"(?:^|\n)\s*kicker\s+((?:\{[^}]+\})+|\d+)",
+            text, re.IGNORECASE)
+        if not match:
+            return None
+        cost = match.group(1)
+        return f"{{{cost}}}" if cost.isdigit() else cost
+
+    def _kicker_oracle_for_cast(self, card, context=None):
+        """Return the Oracle face whose Kicker ability is being announced."""
+        context = context or {}
+        if context.get('prepared_copy'):
+            return str(context.get('prepared_face', {}).get(
+                'oracle_text', '') or '')
+        if (context.get('cast_as_adventure')
+                and hasattr(card, 'get_adventure_data')):
+            return str((card.get_adventure_data() or {}).get('effect', '') or '')
+        if (context.get('cast_as_back_face')
+                and hasattr(card, 'get_face_text')):
+            return str(card.get_face_text(1) or '')
+        return str(getattr(card, 'oracle_text', '') or '')
+
+    def _kicker_total_cost(self, card_id, controller, context=None,
+                           apply_modifiers=True):
+        """Price a Kicker announcement as one cumulative casting cost."""
+        card = self._safe_get_card(card_id)
+        if not card:
+            return None
+        cast_context = dict(context or {})
+        cast_context['card'] = card
+        kicker_cost = (cast_context.get('kicker_cost_to_pay')
+                       or self._printed_kicker_cost(
+                           card, self._kicker_oracle_for_cast(
+                               card, cast_context)))
+        if not kicker_cost:
+            return None
+        cast_context['kicked'] = True
+        cast_context['kicker_cost_to_pay'] = kicker_cost
+
+        if cast_context.get('prepared_copy'):
+            base_text = str(cast_context.get('prepared_face', {}).get(
+                'mana_cost', '') or '')
+            base_cost = self.mana_system.parse_mana_cost(base_text)
+        elif cast_context.get('cast_for_impending'):
+            base_text = getattr(card, 'impending_cost', None)
+            if not base_text:
+                return None
+            base_cost = self.mana_system.parse_mana_cost(base_text)
+        else:
+            alt_cost_type = cast_context.get('use_alt_cost')
+            if alt_cost_type == 'plot':
+                base_cost = self.mana_system.parse_mana_cost('')
+            elif alt_cost_type:
+                base_cost = self.mana_system.calculate_alternative_cost(
+                    card_id, controller, alt_cost_type, cast_context)
+                if base_cost is None:
+                    return None
+            else:
+                base_text = getattr(card, 'mana_cost', '') or ''
+                if (cast_context.get('cast_as_adventure')
+                        and hasattr(card, 'get_adventure_data')):
+                    base_text = str((card.get_adventure_data() or {}).get(
+                        'cost', '') or '')
+                if (cast_context.get('cast_as_back_face')
+                        and hasattr(card, 'get_face_cost')):
+                    back_cost = card.get_face_cost(1)
+                    if back_cost is not None:
+                        base_text = back_cost
+                base_cost = self.mana_system.parse_mana_cost(base_text)
+
+        total_cost = self._combine_cost_dicts(
+            base_cost, self.mana_system.parse_mana_cost(kicker_cost))
+        if apply_modifiers:
+            total_cost = self.mana_system.apply_cost_modifiers(
+                controller, total_cost, card_id, cast_context)
+        return total_cost
+
+    def kicker_choice_is_payable(self, card_id, controller, context=None):
+        """Whether the announced spell and its Kicker can both be paid."""
+        pay_context = dict(context or {})
+        card = self._safe_get_card(card_id)
+        if not card:
+            return False
+        pay_context['card'] = card
+        pay_context['kicked'] = True
+        total_cost = self._kicker_total_cost(
+            card_id, controller, context=pay_context,
+            apply_modifiers=True)
+        return bool(total_cost is not None and
+                    self.mana_system.can_pay_mana_cost_with_lands(
+                        controller, total_cost, pay_context))
+
     def _spree_target_slots(self, card, selected_modes):
         """Build one independent casting target slot per chosen Spree mode."""
         slots = []
@@ -924,8 +1086,7 @@ class GameStateStackMixin:
             return instructions[0].get('effect_text', effect_text)
         return effect_text
 
-    @staticmethod
-    def _gift_targeting_texts(effect_text):
+    def _gift_targeting_texts(self, effect_text):
         """Return the ordinary and promised target instructions for Gift."""
         text = str(effect_text or "")
         if not re.search(r"\bgift a tapped fish\b", text, re.IGNORECASE):
@@ -937,12 +1098,29 @@ class GameStateStackMixin:
             r"if the gift was promised,\s*instead\s*(return target nonland "
             r"permanent an opponent controls to its owner(?:'|\u2019)s hand)\s*\.",
             text, re.IGNORECASE)
-        if not ordinary or not promised:
-            return ()
-        return (
-            ordinary.group(1).strip().capitalize() + ".",
-            promised.group(1).strip().capitalize() + ".",
-        )
+        if ordinary and promised:
+            return (
+                ordinary.group(1).strip().capitalize() + ".",
+                promised.group(1).strip().capitalize() + ".",
+            )
+
+        # Some Gift spells change what the spell does without changing its
+        # target restriction.  Parting Gust is the representative case: both
+        # announcements exile the same target nontoken creature, while the
+        # ungifted branch alone creates a delayed return.  Return the same
+        # targeting instruction for each announcement; resolution still uses
+        # the complete Oracle text and the ``gift_promised`` cast context.
+        targeting_text = self._ordinary_single_targeting_text(text)
+        same_target_conditional = bool(
+            re.search(r"\bexile target nontoken creature\b", text,
+                      re.IGNORECASE)
+            and re.search(
+                r"if the gift wasn(?:'|\u2019)t promised\s*,\s*return that card",
+                text, re.IGNORECASE))
+        if (same_target_conditional and targeting_text != text
+                and re.search(r"\btarget\b", targeting_text, re.IGNORECASE)):
+            return (targeting_text, targeting_text)
+        return ()
 
     def _categorize_targets_for_slot(self, slot, target_ids):
         """Categorize targets using the announced slot, not shared card IDs."""
@@ -998,6 +1176,55 @@ class GameStateStackMixin:
         }
         return len(valid_ids) >= minimum
 
+    def tiered_mode_is_selectable(self, card_id, controller, mode_index,
+                                  context=None):
+        """Whether one Tiered row has a payable total and legal targets."""
+        card = self._safe_get_card(card_id)
+        modes = list(getattr(card, 'tiered_modes', []) or []) if card else []
+        if (not getattr(card, 'is_tiered', False)
+                or not isinstance(mode_index, int)
+                or not 0 <= mode_index < len(modes)):
+            return False
+
+        pay_context = dict(context or {})
+        pay_context.update({
+            'card': card,
+            'is_tiered': True,
+            'selected_tier_mode': mode_index,
+            'tiered_mode_cost': modes[mode_index].get('cost', ''),
+            'tiered_mode_effect': self._tiered_mode_effect(card, mode_index),
+        })
+        total_cost = self._tiered_cost_for_mode(
+            card_id, controller, mode_index, context=pay_context)
+        if (total_cost is None
+                or not self.mana_system.can_pay_mana_cost_with_lands(
+                    controller, total_cost, pay_context)):
+            return False
+
+        targeting_text = self._tiered_mode_resolving_text(card, mode_index)
+        if 'target' not in targeting_text.lower():
+            return True
+        target_slots = self._ordinary_target_slots(targeting_text)
+        if target_slots:
+            for slot in target_slots:
+                valid_map = self.targeting_system.get_valid_targets(
+                    card_id, controller,
+                    slot.get('required_type', 'target'),
+                    effect_text=slot.get('effect_text', ''))
+                valid_ids = {
+                    target_id for ids in valid_map.values()
+                    for target_id in ids}
+                if len(valid_ids) < int(slot.get('min_targets', 0)):
+                    return False
+            return True
+        target_type = self._get_target_type_from_text(targeting_text)
+        minimum, _ = self._target_bounds_from_text(targeting_text)
+        valid_map = self.targeting_system.get_valid_targets(
+            card_id, controller, target_type, effect_text=targeting_text)
+        valid_ids = {
+            target_id for ids in valid_map.values() for target_id in ids}
+        return len(valid_ids) >= minimum
+
     def modal_mode_is_selectable(self, choice, mode_index):
         """Return whether a pending mode can complete a legal cast.
 
@@ -1023,6 +1250,13 @@ class GameStateStackMixin:
         if choice.get('is_spree'):
             return self.spree_mode_is_selectable(
                 card_id, controller, selected, mode_index,
+                context=choice.get('original_cast_context', {}))
+
+        if choice.get('is_tiered'):
+            if selected:
+                return False
+            return self.tiered_mode_is_selectable(
+                card_id, controller, mode_index,
                 context=choice.get('original_cast_context', {}))
 
         candidate_modes = selected + [mode_index]
@@ -1449,6 +1683,22 @@ class GameStateStackMixin:
         if choice.get('is_spree'):
             cast_context["selected_spree_modes"] = selected_modes
             cast_context["is_spree"] = True
+        elif choice.get('is_tiered'):
+            if len(selected_modes) != 1:
+                return False
+            card = self._safe_get_card(card_id)
+            modes = list(getattr(card, 'tiered_modes', []) or []) \
+                if card else []
+            mode_index = selected_modes[0]
+            if not 0 <= mode_index < len(modes):
+                return False
+            cast_context.update({
+                "is_tiered": True,
+                "selected_tier_mode": mode_index,
+                "tiered_mode_cost": modes[mode_index].get('cost', ''),
+                "tiered_mode_effect": self._tiered_mode_effect(
+                    card, mode_index),
+            })
         else:
             cast_context["selected_modes"] = selected_modes
         self.choice_context = None
@@ -1814,6 +2064,30 @@ class GameStateStackMixin:
         cast_context["bargain_sacrifice_id"] = selected_id
         return self._resume_after_casting_choice(choice, cast_context)
 
+    def complete_kicker_choice(self, pay=False):
+        """Announce Kicker, then resume the same casting transaction."""
+        choice = getattr(self, "choice_context", None)
+        if not (self.phase == self.PHASE_CHOOSE and choice
+                and choice.get("type") == "pay_kicker"
+                and isinstance(pay, bool)):
+            return False
+        card_id = choice.get("card_id")
+        controller = choice.get("controller") or choice.get("player")
+        cast_context = dict(choice.get("original_cast_context", {}))
+        kicker_cost = choice.get("kicker_cost")
+        if pay:
+            affordability_context = dict(cast_context)
+            affordability_context["kicker_cost_to_pay"] = kicker_cost
+            if not self.kicker_choice_is_payable(
+                    card_id, controller, affordability_context):
+                return False
+            cast_context["kicker_cost_to_pay"] = kicker_cost
+        else:
+            cast_context.pop("kicker_cost_to_pay", None)
+        cast_context["kicker_choice_complete"] = True
+        cast_context["kicked"] = pay
+        return self._resume_after_casting_choice(choice, cast_context)
+
     def complete_gift_choice(self, promised=False):
         """Announce whether a Gift is promised and resume the pending cast."""
         choice = getattr(self, "choice_context", None)
@@ -1842,7 +2116,15 @@ class GameStateStackMixin:
         cast_context = dict(choice.get("original_cast_context", {}))
         cast_context["gift_choice_complete"] = True
         cast_context["gift_promised"] = promised
-        cast_context["effect_text"] = chosen_text
+        # Into the Flood Maw uses different resolving instructions for its
+        # two announcements. Parting Gust changes only a conditional rider,
+        # so keep its full Oracle text for resolution and narrow only the
+        # targeting surface used during announcement.
+        if branches[0] != branches[1]:
+            cast_context["effect_text"] = chosen_text
+        else:
+            cast_context["effect_text"] = cast_context.get(
+                "effect_text", getattr(card, "oracle_text", ""))
         cast_context["targeting_text"] = chosen_text
         return self._resume_after_casting_choice(choice, cast_context)
 
@@ -2470,12 +2752,22 @@ class GameStateStackMixin:
         is_spree_spell = bool(
             getattr(card, 'is_spree', False)
             and getattr(card, 'spree_modes', None))
-        is_modal_spell = is_spree_spell
+        is_tiered_spell = bool(
+            getattr(card, 'is_tiered', False)
+            and getattr(card, 'tiered_modes', None))
+        is_modal_spell = is_spree_spell or is_tiered_spell
         if is_spree_spell:
              modal_modes = [
                  str(mode.get('effect', '') or '')
                  for mode in card.spree_modes]
              min_modes, max_modes = 1, len(modal_modes)
+        elif is_tiered_spell:
+             # Tiered is a choose-exactly-one announcement whose selected
+             # row contributes both an additional cost and its exact effect.
+             modal_modes = [
+                 self._tiered_mode_effect(card, mode_index)
+                 for mode_index in range(len(card.tiered_modes))]
+             min_modes, max_modes = 1, 1
         else:
              # CR 601.2b announces modes of the spell being cast, not modes
              # embedded in an ability of a permanent spell.  Parsing the full
@@ -2512,8 +2804,9 @@ class GameStateStackMixin:
 
         # Modes are chosen before targets and costs are determined (CR 601.2b).
         modes_are_announced = (
-            'selected_spree_modes' in context if is_spree_spell
-            else 'selected_modes' in context)
+            'selected_spree_modes' in context if is_spree_spell else
+            'selected_tier_mode' in context if is_tiered_spell else
+            'selected_modes' in context)
         if is_modal_spell and not modes_are_announced:
              if (is_spree_spell and not any(
                      self.spree_mode_is_selectable(
@@ -2522,6 +2815,13 @@ class GameStateStackMixin:
                  logging.warning(
                      f"Cannot cast {card.name}: no legal affordable Spree mode.")
                  return False
+             if (is_tiered_spell and not any(
+                     self.tiered_mode_is_selectable(
+                         card_id, player, mode_index, context=context)
+                     for mode_index in range(len(modal_modes)))):
+                 logging.warning(
+                     f"Cannot cast {card.name}: no legal affordable Tiered mode.")
+                 return False
              choice_context = {
                  'type': 'choose_mode', 'player': player, 'controller': player,
                  'card_id': card_id,
@@ -2529,14 +2829,38 @@ class GameStateStackMixin:
                  'min_required': min_modes, 'max_required': max_modes,
                  'available_modes': modal_modes, 'selected_modes': [],
                  'is_spree': is_spree_spell,
-                 'mode_costs': ([mode.get('cost', '') for mode in card.spree_modes]
-                                if is_spree_spell else []),
+                 'is_tiered': is_tiered_spell,
+                 'mode_costs': (
+                     [mode.get('cost', '') for mode in card.spree_modes]
+                     if is_spree_spell else
+                     [mode.get('cost', '') for mode in card.tiered_modes]
+                     if is_tiered_spell else []),
+                 'mode_labels': (
+                     [mode.get('label', '') for mode in card.tiered_modes]
+                     if is_tiered_spell else []),
                  'original_cast_context': self._copy_stack_context(context),
                  'resolved': False,
              }
              self._begin_casting_choice(choice_context)
              logging.info(f"Waiting for mode choice before casting {card.name}.")
              return True
+
+        # Kicker is announced before targets are chosen and before any cost
+        # is paid (CR 601.2b).  Keep the spell in a public casting choice and
+        # resume the same transaction after the policy accepts or declines.
+        kicker_oracle = self._kicker_oracle_for_cast(card, context)
+        kicker_cost = self._printed_kicker_cost(card, kicker_oracle)
+        if kicker_cost and not context.get('kicker_choice_complete', False):
+            self._begin_casting_choice({
+                'type': 'pay_kicker', 'player': player,
+                'controller': player, 'card_id': card_id,
+                'source_id': card_id, 'kicker_cost': kicker_cost,
+                'optional': True,
+                'original_cast_context': self._copy_stack_context(context),
+            })
+            logging.info(
+                "Waiting for Kicker choice before casting %s.", card.name)
+            return True
 
         # --- 3. Determine Base Cost String ---
         cast_for_impending = context.get('cast_for_impending', False) # Check flag set by handler
@@ -2608,14 +2932,6 @@ class GameStateStackMixin:
                     # *** FIXED: Use internal helper ***
                     final_cost_dict = self._combine_cost_dicts(final_cost_dict, offspring_cost_dict)
                     context['paid_offspring'] = True # Add final flag for ETB trigger check
-            # Kicker
-            if context.get('kicked'):
-                kicker_cost_str = context.get('kicker_cost_to_pay')
-                if kicker_cost_str:
-                    kicker_cost_dict = self.mana_system.parse_mana_cost(kicker_cost_str)
-                    # *** FIXED: Use internal helper ***
-                    final_cost_dict = self._combine_cost_dicts(final_cost_dict, kicker_cost_dict)
-                    context['actual_kicker_paid'] = kicker_cost_str
             # Escalate
             escalate_count = context.get('escalate_count', 0)
             if escalate_count > 0:
@@ -2626,6 +2942,22 @@ class GameStateStackMixin:
                     for _ in range(escalate_count):
                         # *** FIXED: Use internal helper repeatedly ***
                         final_cost_dict = self._combine_cost_dicts(final_cost_dict, escalate_cost_each_dict)
+
+        # Kicker remains an additional cost even when the printed mana cost
+        # is replaced by an alternative cost. Combine it once with that base
+        # before the single tax/reduction pass below.
+        if context.get('kicked'):
+            kicker_cost_str = context.get('kicker_cost_to_pay')
+            if not kicker_cost_str:
+                logging.warning(
+                    "Cannot cast %s as kicked without a Kicker cost.",
+                    card.name)
+                return False
+            kicker_cost_dict = self.mana_system.parse_mana_cost(
+                kicker_cost_str)
+            final_cost_dict = self._combine_cost_dicts(
+                final_cost_dict, kicker_cost_dict)
+            context['actual_kicker_paid'] = kicker_cost_str
 
         # Spree mode costs are mandatory additional costs for the modes chosen
         # at announcement.  They remain payable even when an effect waives or
@@ -2652,6 +2984,39 @@ class GameStateStackMixin:
                     final_cost_dict, mode_cost)
                 context['spree_mode_costs'].append(mode_cost_text)
 
+        # Tiered requires exactly one labelled additional cost.  Bind the
+        # structured row to the stack context and add its cost once, before
+        # the single modifier pass shared with every other casting path.
+        if is_tiered_spell:
+            mode_index = context.get('selected_tier_mode')
+            if (not isinstance(mode_index, int)
+                    or not 0 <= mode_index < len(card.tiered_modes)):
+                logging.warning(
+                    f"Cannot cast {card.name}: Tiered requires exactly one "
+                    "valid mode.")
+                return False
+            mode = card.tiered_modes[mode_index]
+            printed_mode_cost = str(mode.get('cost', '') or '')
+            printed_mode_effect = self._tiered_mode_effect(card, mode_index)
+            if (context.get('tiered_mode_cost', printed_mode_cost)
+                    != printed_mode_cost
+                    or context.get(
+                        'tiered_mode_effect', printed_mode_effect)
+                    != printed_mode_effect):
+                logging.warning(
+                    "Cannot cast %s: Tiered announcement no longer matches "
+                    "its structured row.", card.name)
+                return False
+            final_cost_dict = self._combine_cost_dicts(
+                final_cost_dict,
+                self.mana_system.parse_mana_cost(printed_mode_cost))
+            context.update({
+                'is_tiered': True,
+                'selected_tier_mode': mode_index,
+                'tiered_mode_cost': printed_mode_cost,
+                'tiered_mode_effect': printed_mode_effect,
+            })
+
         # Gift is announced while casting. The promised branch has different
         # target restrictions, so choose it before target selection begins.
         gift_branches = self._gift_targeting_texts(
@@ -2673,13 +3038,16 @@ class GameStateStackMixin:
         num_targets = 0
         up_to_N = False
         explicit_effect_text = context.get('effect_text')
+        explicit_targeting_text = context.get('targeting_text')
         spell_types = set(getattr(card, 'card_types', []) or [])
         aura_target_text = aura_cast_targeting_text(card)
         # Printed targets in a permanent's triggered/activated abilities are
         # not targets of the permanent spell itself.  Alternate casts such as
         # Mutate provide their actual spell text explicitly; instants and
         # sorceries use their printed resolving instructions.
-        if explicit_effect_text is not None:
+        if explicit_targeting_text is not None:
+            targeting_text = explicit_targeting_text
+        elif explicit_effect_text is not None:
             targeting_text = explicit_effect_text
         elif aura_target_text:
             targeting_text = aura_target_text
@@ -2694,14 +3062,25 @@ class GameStateStackMixin:
         spree_target_slots = []
         instruction_target_slots = []
         if is_modal_spell:
-            selected_modes = context.get(
-                'selected_spree_modes' if is_spree_spell else 'selected_modes',
-                [])
-            targeting_text = " ".join(
-                modal_modes[index]
-                for index in selected_modes
-                if 0 <= index < len(modal_modes)
-            )
+            if is_tiered_spell:
+                tiered_mode_index = context.get('selected_tier_mode')
+                selected_modes = ([tiered_mode_index]
+                                  if isinstance(tiered_mode_index, int)
+                                  else [])
+                targeting_text = self._tiered_mode_resolving_text(
+                    card, tiered_mode_index)
+                # Resolution-time legality must inspect only the announced
+                # row, never every target phrase in the full Tiered block.
+                context['targeting_text'] = targeting_text
+            else:
+                selected_modes = context.get(
+                    'selected_spree_modes' if is_spree_spell
+                    else 'selected_modes', [])
+                targeting_text = " ".join(
+                    modal_modes[index]
+                    for index in selected_modes
+                    if 0 <= index < len(modal_modes)
+                )
         if is_spree_spell:
             spree_target_slots = self._spree_target_slots(
                 card, selected_modes)
@@ -4331,6 +4710,11 @@ class GameStateStackMixin:
             return self._resolve_spree_modes(
                 spell_id, controller, context)
 
+        if ('selected_tier_mode' in context
+                or context.get('is_tiered', False)):
+            return self._resolve_tiered_mode(
+                spell_id, controller, context)
+
         # --- MODAL SPELL RESOLUTION ---
         selected_modes_indices = context.get("selected_modes") # Get list of chosen indices
         if selected_modes_indices is not None: # Check specifically for None, empty list is valid (for "up to" maybe)
@@ -4466,6 +4850,56 @@ class GameStateStackMixin:
         success, pending = self._run_effect_sequence(
             effects, spell_id, controller, {}, context=context,
             finalizer=finalizer, initial_success=parsed_all_modes)
+        return True if pending else success
+
+    def _resolve_tiered_mode(self, spell_id, controller, context):
+        """Resolve the one exact structured Tiered row announced on cast."""
+        spell = self._safe_get_card(spell_id)
+        modes = list(getattr(spell, 'tiered_modes', []) or []) \
+            if spell else []
+        mode_index = context.get('selected_tier_mode')
+        if (not getattr(spell, 'is_tiered', False)
+                or not isinstance(mode_index, int)
+                or not 0 <= mode_index < len(modes)):
+            logging.error(
+                "Cannot resolve Tiered spell %s: invalid mode announcement.",
+                getattr(spell, 'name', spell_id))
+            return False
+
+        mode = modes[mode_index]
+        mode_cost = str(mode.get('cost', '') or '')
+        mode_effect = self._tiered_mode_effect(spell, mode_index)
+        if (context.get('tiered_mode_cost') != mode_cost
+                or context.get('tiered_mode_effect') != mode_effect):
+            logging.error(
+                "Cannot resolve Tiered spell %s: stack mode data does not "
+                "match its structured row.", getattr(spell, 'name', spell_id))
+            return False
+
+        resolving_text = self._tiered_mode_resolving_text(
+            spell, mode_index)
+        mode_targets = self._effect_targets_from_context(context)
+        if context.get('instruction_target_slots'):
+            effects, parsed_all = self._ordinary_instruction_effects(
+                spell, resolving_text, context)
+        else:
+            effects = EffectFactory.create_effects(
+                resolving_text, mode_targets,
+                source_name=getattr(spell, 'name', None))
+            parsed_all = bool(effects)
+            for effect in effects:
+                effect._bound_targets = copy_module.deepcopy(mode_targets)
+                effect._tiered_mode_index = mode_index
+
+        finalizer = {
+            'kind': 'modal_spell', 'source_id': spell_id,
+            'controller_id': self._effect_controller_id(controller),
+            'context': self._copy_stack_context(context),
+        }
+        success, pending = self._run_effect_sequence(
+            effects, spell_id, controller, mode_targets,
+            context=context, finalizer=finalizer,
+            initial_success=parsed_all)
         return True if pending else success
 
     def _ordinary_instruction_effects(self, spell, resolving_text, context):

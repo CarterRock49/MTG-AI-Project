@@ -574,6 +574,19 @@ class CastingHandlersMixin:
         if context is None: context = {}
         context.update(kwargs.get('context', {})) # Merge from kwargs
 
+        # Normal casts expose Kicker as a live public announcement choice.
+        # Complete that choice through GameState so phase/timing restoration,
+        # combined-cost affordability, and cast resumption stay atomic.
+        live_choice = getattr(self.game_state, 'choice_context', None)
+        if (live_choice and live_choice.get('type') == 'pay_kicker'
+                and isinstance(param, bool)):
+            player = self._get_policy_player(context)
+            if live_choice.get('player') is not player:
+                logging.warning("Kicker choice called for the wrong player.")
+                return -0.2, False
+            success = self.game_state.complete_kicker_choice(param)
+            return (0.01 if success else -0.05), success
+
         pending_context = getattr(self.game_state, 'pending_spell_context', None)
         if not pending_context or 'card_id' not in pending_context:
             logging.warning("PAY_KICKER called but no spell context is pending.")
@@ -616,10 +629,13 @@ class CastingHandlersMixin:
         """
         if card and hasattr(card, 'oracle_text'):
             text = card.oracle_text.lower()
-            # Prioritize a braces cost directly after the word 'kicker'.
-            direct_match = re.search(r"\bkicker\s*(\{.*?\})", text)
+            # Preserve every adjacent mana symbol (for example {1}{U}).
+            direct_match = re.search(
+                r"(?:^|\n)\s*kicker\s+((?:\{[^}]+\})+|[0-9]+)",
+                text, re.IGNORECASE)
             if direct_match:
-                return direct_match.group(1)
+                cost_str = direct_match.group(1)
+                return f"{{{cost_str}}}" if cost_str.isdigit() else cost_str
             # Fallback: 'kicker' followed by a braces OR a bare number
             # ('kicker 3'). Capture the cost so .group(1) is always valid.
             later_match = re.search(r"kicker\s+(\{[^\}]+\}|[0-9]+)", text)

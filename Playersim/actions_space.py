@@ -1438,7 +1438,14 @@ class ActionSpaceMixin:
 
             # Kicker / Additional Cost / Escalate Choices (Using correct indices now)
             elif choice_type == "pay_kicker":
-                set_valid_action(405, "PAY_KICKER") # Param=True
+                cast_context = dict(
+                    context.get("original_cast_context", {}) or {})
+                cast_context["kicker_cost_to_pay"] = context.get(
+                    "kicker_cost")
+                if gs.kicker_choice_is_payable(
+                        context.get("card_id"), choice_player,
+                        cast_context):
+                    set_valid_action(405, "PAY_KICKER") # Param=True
                 set_valid_action(406, "DONT_PAY_KICKER") # Param=False
             elif choice_type == "pay_additional":
                 set_valid_action(407, "PAY_ADDITIONAL_COST") # Param=True
@@ -2282,6 +2289,14 @@ class ActionSpaceMixin:
                 for mode_index in range(len(
                     getattr(card_or_data, 'spree_modes', []) or [])))
 
+        if (isinstance(card_or_data, Card)
+                and getattr(card_or_data, 'is_tiered', False)):
+            return any(
+                gs.tiered_mode_is_selectable(
+                    card_id, player, mode_index, context=context)
+                for mode_index in range(len(
+                    getattr(card_or_data, 'tiered_modes', []) or [])))
+
         if not cost_str and not context.get('use_alt_cost'): return True # Free spell (unless alt cost used)
 
         oracle_text = getattr(card_or_data, 'oracle_text', '') \
@@ -2370,6 +2385,8 @@ class ActionSpaceMixin:
                 except Exception:
                     pass
             return False
+        if getattr(card, 'is_tiered', False):
+            return bool(getattr(card, 'tiered_modes', None))
         return True
 
     def _targets_available(self, card, caster, opponent):
@@ -2379,6 +2396,11 @@ class ActionSpaceMixin:
         # _can_afford_card probes every single mode through the same cumulative
         # cost/target predicate used by the live chooser.
         if getattr(card, 'is_spree', False):
+            return True
+        if getattr(card, 'is_tiered', False):
+            # Affordability already probes each row through the shared
+            # cumulative-cost and target predicate. Only the chosen row owns
+            # targets, never the full Tiered rules block.
             return True
         card_id = getattr(card, 'card_id', None)
         if card_id is None or not hasattr(card, 'oracle_text'):
@@ -3578,7 +3600,9 @@ class ActionSpaceMixin:
             
             # Kicker options - Use correct indices 405 and 406
             if card and hasattr(card, 'oracle_text') and "kicker" in card.oracle_text.lower():
-                kicker_match = re.search(r"kicker (\{[^\}]+\}|[0-9]+)", card.oracle_text.lower())
+                kicker_match = re.search(
+                    r"(?:^|\n)\s*kicker\s+((?:\{[^}]+\})+|[0-9]+)",
+                    card.oracle_text, re.IGNORECASE)
                 if kicker_match:
                     cost_str = kicker_match.group(1)
                     if cost_str.isdigit(): 

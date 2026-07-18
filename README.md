@@ -117,7 +117,8 @@ Playersim/                  The engine + tooling package
   environment.py                Masked Gym environment
   actions*.py, ability_*.py     Action space, casting, choices, combat, mechanics
   deck_corpus.py, deck_ingest.py, deck_legality.py   Corpus hydration, import, legality
-  support_preflight.py, card_support.py              Full-pool coverage ledger + manifest
+  support_preflight.py, card_support.py              Static coverage ledger + manifest
+  card_probe.py                                      Fail-closed dynamic full-pool probes
   deck_stats_tracker.py, card_memory.py              Statistics aggregation
   strategic_planner*.py, enhanced_*.py, strategy_memory.py   Heuristic evaluation/planning
 
@@ -163,8 +164,8 @@ python tests/train_smoke_test.py
 python tests/invariant_fuzz_test.py --profile default
 ```
 
-For the current Round 7.92 working tree, those gates are green at 428 unit
-tests, 404 scenarios, 9/9 runtime smoke, 13/13 training smoke, and 8/8 default
+For the current Round 7.92 working tree, those gates are green at 487 unit
+tests, 409 scenarios, 9/9 runtime smoke, 13/13 training smoke, and 8/8 default
 fuzz seeds plus the phase-boundary check. The previously recorded long-fuzz
 result remains historical until that scheduled/manual gate is rerun.
 
@@ -299,6 +300,37 @@ python -m Playersim.support_preflight \
 
 The representative metagame currently has no `unparsed`/`crash` cards. Current
 full-pool coverage counts are in the ROADMAP status snapshot.
+
+### Dynamic card-pool probe
+
+The static ledger is not rules proof. Run every frozen-pool card through the
+public action pipeline with deterministic fixtures, real mask-valid payment,
+resolution, paired priority-negative checks, warning/fidelity gates, and
+per-card atomic evidence:
+
+```bash
+python -m Playersim.card_probe \
+  --snapshot "Format Card Lists/standard.jsonl" \
+  --registry formats/standard/card_registry.json \
+  --ledger formats/standard/support_ledger.json --format standard \
+  --output probe_runs/standard-full
+```
+
+Use `--resume` after an interrupted run; artifacts are reused only when their
+oracle row, limits, inputs, probe source, and complete `Playersim/**/*.py`
+source hash still match. `failed` means an execution, warning, fidelity,
+manifest, invariant, or known static-preflight failure. `coverage_gap` means a
+discovered surface or branch was not independently exercised. Even
+`execution_passed` is bounded mechanical evidence only: every card remains
+`semantic_status=unverified` until permanent scenarios assert its exact rules
+outcomes across all abilities, modes, and choices.
+
+The latest repaired Standard baseline is
+`probe_runs/standard-full-2026-07-18-v2/card_probe_report.json`: all 4,702 card
+artifacts and their report/run hashes validate, with 1,774 `failed`, 2,910
+`coverage_gap`, and 18 `execution_passed`. Previously trusted ledger classes
+now contain zero runtime failures, but they remain semantically unverified until
+their outstanding branches have exact-state scenario coverage.
 
 ---
 

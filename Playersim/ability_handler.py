@@ -759,6 +759,20 @@ class AbilityHandler:
                     # Spree marker (check if base card itself is Spree)
                     if hasattr(card, 'is_spree') and card.is_spree:
                         processed_special_text_markers = getattr(card, '_spree_related_text_marker', '')
+                    # Tiered rows are labelled spell modes with additional
+                    # costs, not independent activated abilities.  Mark the
+                    # complete declaration block as casting-owned so names
+                    # such as ``Thunder — {0} — ...`` never reach the generic
+                    # cost/effect parser.
+                    if getattr(card, 'is_tiered', False):
+                        tiered_marker = getattr(
+                            card, '_tiered_related_text_marker', '')
+                        if tiered_marker:
+                            processed_special_text_markers = "\n".join(
+                                marker for marker in (
+                                    processed_special_text_markers,
+                                    tiered_marker)
+                                if marker)
 
                 # --- Parse Keywords from Explicit Data ---
                 handled_keywords = set() # Keep track of keywords already handled by _create_keyword_ability
@@ -973,6 +987,29 @@ class AbilityHandler:
                     abilities_list.append(tick)
                     logging.debug(f"Synthesized Impending end-step tick for {card.name}")
 
+                # An ability whose instruction returns "this card from your
+                # graveyard" functions in that graveyard unless its trigger
+                # condition is itself the zone-change event. Without this CR
+                # 113.6 exception, Afterburner Expert watched exhaust from the
+                # battlefield and could never trigger while actually buried.
+                for ability in abilities_list:
+                    if (not isinstance(ability, TriggeredAbility)
+                            or getattr(ability, 'zone', None)):
+                        continue
+                    effect_text = str(getattr(ability, 'effect', '')).lower()
+                    trigger_text = str(
+                        getattr(ability, 'trigger_condition', '')).lower()
+                    returns_self_from_graveyard = bool(re.search(
+                        r"return\s+this\s+card\s+from\s+your\s+graveyard\s+to\s+the\s+battlefield",
+                        effect_text))
+                    source_moves_in_trigger = bool(re.search(
+                        r"\b(?:dies|is discarded|is put into (?:a|your) graveyard|"
+                        r"put into (?:a|your) graveyard from)\b",
+                        trigger_text))
+                    if (returns_self_from_graveyard
+                            and not source_moves_in_trigger):
+                        ability.zone = 'graveyard'
+
                 # --- Apply Static Abilities and Finalize ---
                 logging.debug(f"Parsed {len(abilities_list)} total functional abilities for {card.name} ({card_id})")
 
@@ -1115,6 +1152,9 @@ class AbilityHandler:
             r"^\s*the first non-lemur creature spell with flying you cast during each of your turns costs \{1\} less to cast\s*$",
             r"^\s*this creature enters tapped if it(?:'|\u2019)s not your turn\s*$",
             r"^\s*warp\s+(?:\{[^}]+\})+\s*$",
+            # CombatActionHandler evaluates this Delirium restriction from
+            # live Oracle text for both attack and block legality.
+            r"^\s*delirium\b.*can(?:'|\u2019)t attack or block unless there are four or more card types among cards in your graveyard\s*$",
             r"^\s*you may play an additional land on each of your turns\s*$",
             r"^\s*you may play lands from your graveyard\s*$",
             r"^\s*your opponents can(?:'|\u2019)t cast spells during your turn\s*$",
@@ -1257,7 +1297,13 @@ class AbilityHandler:
 
         # --- 4. Try Static Ability (If not Activated/Triggered and fits criteria) ---
         # ... (Rest of the method remains the same) ...
-        is_permanent_type = card and hasattr(card, 'card_types') and any(ct in Card.ALL_CARD_TYPES[:8] for ct in card.card_types)
+        permanent_types = {
+            'creature', 'artifact', 'enchantment', 'land', 'planeswalker',
+            'battle', 'class', 'room',
+        }
+        is_permanent_type = (
+            card and hasattr(card, 'card_types')
+            and any(ct in permanent_types for ct in card.card_types))
         action_verb_pattern = r'\b(destroy|exile|counter|draw|discard|create|search|tap|untap|target|deal|sacrifice|return.*?to|put.*?on|put.*?into|attach|manifest|look at)\b'
         has_action_verb = bool(re.search(action_verb_pattern, text_lower))
 
@@ -1400,10 +1446,13 @@ class AbilityHandler:
             setattr(ability, "source_card", card)
             abilities_list.append(ability)
             return True
-        if keyword_lower == "warp":
-            # Card parses the cost and the casting pipeline owns Warp's hand
-            # cast, delayed exile, and exile permission. It is a declaration,
-            # not an independent battlefield ability or layer effect.
+        if keyword_lower in {"warp", "ninjutsu"}:
+            # These declarations are owned by dedicated public-action paths.
+            # Warp handles its alternate cast and delayed exile in the casting
+            # pipeline; Ninjutsu handles timing, return-as-cost, payment, and
+            # tapped-and-attacking placement in the combat pipeline. Creating
+            # a second generic ActivatedAbility would expose either mechanic
+            # from the wrong zone.
             return True
 
         current_value = None
@@ -1690,7 +1739,7 @@ class AbilityHandler:
             # Append handled in final check
 
 
-        # --- Rule Modifying Keywords -> StaticAbility OR Special Handling ---
+        # --- Rule Modifying Keywords -> Metadata Marker ---
         rule_keywords = {
             "affinity": "artifact", "convoke": True, "delve": True, "improvise": True,
             "bestow": "cost", "buyback": "cost", "entwine": "cost", "escape": "cost_and_gy", "kicker": "cost",
@@ -1699,8 +1748,14 @@ class AbilityHandler:
             "phasing": True, "banding": True, "awaken": "cost_and_counters",
         }
         if keyword_lower in rule_keywords:
-            ability_effect_text = f"Rule Keyword: {full_text}" # Clearer description for static marker
-            ability = StaticAbility(card_id, ability_effect_text, ability_effect_text)
+            # The casting/rules pipelines implement these mechanics directly
+            # from card data and Oracle text. Keep the parsed keyword metadata
+            # available to consumers, but do not misrepresent it as a
+            # continuous StaticAbility: doing so sends declarations such as
+            # Kicker and Spree into the layer system as unsupported effects.
+            ability_effect_text = f"Rule Keyword: {full_text}"
+            ability = Ability(card_id, ability_effect_text)
+            setattr(ability, 'metadata_only', True)
             setattr(ability, 'keyword', keyword_lower)
             kw_cost = None
             kw_value = None
@@ -2193,11 +2248,29 @@ class AbilityHandler:
             return "Target land you control"
         return effect_text
 
+    def activated_ability_functions_from_zone(
+            self, card_id, ability, controller):
+        """Whether this activated ability functions from the source's zone."""
+        expected_zone = str(
+            getattr(ability, 'zone', 'battlefield') or 'battlefield').lower()
+        holder, actual_zone = self.game_state.find_card_location(card_id)
+        if holder is not controller:
+            return False
+        if expected_zone == 'face_down':
+            card = self.game_state._safe_get_card(card_id)
+            return bool(
+                actual_zone == 'battlefield'
+                and getattr(card, 'is_face_down', False))
+        return actual_zone == expected_zone
+
     def can_activate_ability(self, card_id, ability_index, controller):
         """Check if a specific activated ability can be activated"""
         activated_abilities = self.get_activated_abilities(card_id)
         if 0 <= ability_index < len(activated_abilities):
             ability = activated_abilities[ability_index]
+            if not self.activated_ability_functions_from_zone(
+                    card_id, ability, controller):
+                return False
             if not ability.can_pay_cost(self.game_state, controller):
                 return False
 
@@ -2237,6 +2310,9 @@ class AbilityHandler:
         activated_abilities = self.get_activated_abilities(card_id)
         if 0 <= ability_index < len(activated_abilities):
             ability = activated_abilities[ability_index]
+            if not self.activated_ability_functions_from_zone(
+                    card_id, ability, controller):
+                return False
             if not ability.can_pay_cost(self.game_state, controller):
                 return False
             if ability.pay_cost(

@@ -3878,6 +3878,48 @@ class DistributeCountersEffect(AbilityEffect):
         return True
 
 
+class ReturnSourceFromGraveyardEffect(AbilityEffect):
+    """Return the resolving ability's own source without targeting it.
+
+    Cards such as Afterburner Expert function from the graveyard and refer to
+    "this card". That phrase binds the exact object that triggered; it is not
+    a target and must not follow a later incarnation if the card changes zones
+    before the trigger resolves.
+    """
+
+    def __init__(self, enters_tapped=False, condition=None):
+        self.enters_tapped = enters_tapped
+        super().__init__(
+            "Return this card from your graveyard to the battlefield",
+            condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        source = game_state._safe_get_card(source_id)
+        if source is None:
+            return True
+        expected_generation = self.resolution_context.get(
+            "source_zone_generation")
+        current_generation = int(getattr(
+            source, "_zone_change_generation", 0) or 0)
+        if (expected_generation is not None
+                and current_generation != int(expected_generation)):
+            logging.debug(
+                "Source-bound graveyard return for %s lost its object after "
+                "a zone change.", source_id)
+            return True
+        owner, zone = game_state.find_card_location(source_id)
+        if owner is None or zone != "graveyard":
+            return True
+        if not game_state.move_card(
+                source_id, owner, "graveyard", controller, "battlefield",
+                cause="source_bound_reanimate"):
+            return False
+        if self.enters_tapped:
+            controller.setdefault("tapped_permanents", set()).add(source_id)
+        return True
+
+
 class ReanimateEffect(AbilityEffect):
     """Return a creature (or other permanent) card from a graveyard to the
     battlefield -- reanimation (CR 701.x). "Return ... to the battlefield" was
@@ -4241,6 +4283,33 @@ class DamageEffect(AbilityEffect):
             else: controller['life'] += total_actual_damage
 
         return success_overall or resolved_any_target
+
+
+class KickedDamageEffect(DamageEffect):
+    """Deal exactly one of two amounts based on the cast's Kicker record."""
+
+    def __init__(self, base_amount, kicked_amount,
+                 target_type="any target", condition=None):
+        super().__init__(base_amount, target_type, condition)
+        self.unkicked_amount = base_amount
+        self.kicked_amount = kicked_amount
+        self.effect_text = (
+            f"Deal {base_amount} damage to {self.target_type}, or "
+            f"{kicked_amount} instead if kicked")
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        context = getattr(self, "resolution_context", {}) or {}
+        selected_amount = (self.kicked_amount
+                           if (context.get("kicked")
+                               or context.get("actual_kicker_paid"))
+                           else self.unkicked_amount)
+        original_amount = self.base_amount
+        self.base_amount = selected_amount
+        try:
+            return super()._apply_effect(
+                game_state, source_id, controller, targets)
+        finally:
+            self.base_amount = original_amount
 
 
 class KeywordChoiceGrantEffect(AbilityEffect):

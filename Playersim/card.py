@@ -163,6 +163,14 @@ class Card:
         self.counters = {}
 
         # Initialize card type-specific attributes and parse corresponding data
+        # Tiered attributes.  Tiered is a choose-one additional-cost spell
+        # mechanic; its labelled rows are not activated abilities.
+        self.is_tiered = False
+        self.tiered_modes = []
+        self.tiered_shared_effect = ""
+        self._tiered_related_text_marker = ""
+        self._parse_tiered_modes()
+
         # Spree attributes
         self.is_spree = False
         self.spree_modes = []
@@ -455,6 +463,90 @@ class Card:
                         return False
         
         return True
+
+    def _parse_tiered_modes(self):
+        """Parse ``Tiered`` labelled additional-cost rows once per card.
+
+        Final Fantasy Tiered spells use the stable printed form::
+
+            Tiered (Choose one additional cost.)
+            • Label — {COST} — Effect.
+
+        The structured rows are consumed later by casting, affordability, and
+        resolution.  ``_tiered_related_text_marker`` also tells the ordinary
+        ability registrar that neither the declaration nor its rows are
+        independent battlefield abilities.
+        """
+        self.is_tiered = False
+        self.tiered_modes = []
+        self.tiered_shared_effect = ""
+        self._tiered_related_text_marker = ""
+
+        oracle_text = str(getattr(self, 'oracle_text', '') or '')
+        if not oracle_text:
+            return
+
+        # Match AbilityHandler's reminder cleanup exactly so its processed
+        # marker can compare against this block without newline loss.
+        cleaned_text = re.sub(
+            r'[ \t]*\([^()]*?\)[ \t]*', ' ', oracle_text).strip()
+        tiered_match = re.search(
+            r'^\s*tiered\b', cleaned_text,
+            re.IGNORECASE | re.MULTILINE)
+        if not tiered_match:
+            return
+
+        self.is_tiered = True
+        self._tiered_related_text_marker = cleaned_text[
+            tiered_match.start():].strip()
+
+        try:
+            first_row = re.search(
+                r'^\s*\u2022\s*', self._tiered_related_text_marker,
+                re.MULTILINE)
+            if not first_row:
+                logging.warning(
+                    f"Tiered keyword found for {self.name}, but no labelled "
+                    "cost rows were found.")
+                return
+
+            declaration_and_shared = self._tiered_related_text_marker[
+                :first_row.start()]
+            shared_lines = declaration_and_shared.splitlines()[1:]
+            self.tiered_shared_effect = "\n".join(
+                line.strip() for line in shared_lines if line.strip()
+            ).strip()
+
+            row_pattern = re.compile(
+                r'^\s*\u2022\s*(.*?)\s*[-\u2013\u2014]\s*'
+                r'((?:\{[^}\r\n]+\})+)\s*[-\u2013\u2014]\s*'
+                r'(.+?)\s*$', re.MULTILINE)
+            for label_text, cost_text, effect_text in row_pattern.findall(
+                    self._tiered_related_text_marker[first_row.start():]):
+                label = label_text.strip()
+                cost = cost_text.strip()
+                effect = effect_text.strip().rstrip('.').strip()
+                if not label or not cost or not effect:
+                    continue
+                self.tiered_modes.append({
+                    'label': label,
+                    'cost': cost,
+                    'effect': effect,
+                })
+
+            if not self.tiered_modes:
+                logging.warning(
+                    f"Tiered keyword found for {self.name}, but its labelled "
+                    "cost rows could not be parsed.")
+        except Exception as exc:
+            # Preserve the Tiered marker on failure so malformed rows cannot
+            # fall through and become executable ActivatedAbility objects.
+            self.tiered_modes = []
+            self.tiered_shared_effect = ""
+            logging.error(
+                f"Tiered mode parsing error for {self.name}: {exc}",
+                exc_info=True)
+
     #
     # Spree card handling methods
     #

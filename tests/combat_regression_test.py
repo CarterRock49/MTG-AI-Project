@@ -53,10 +53,48 @@ class CombatRegressionTest(unittest.TestCase):
         game_state.combat_damage_dealt = False
         return game_state, get_env().action_handler, active, defender
 
+    def _assert_ninjutsu_activation_on_stack(
+            self, game_state, active, attacker, ninja):
+        self.assertIn(attacker, active["hand"])
+        self.assertIn(ninja, active["hand"])
+        self.assertNotIn(ninja, active["battlefield"])
+        self.assertEqual(
+            active["mana_pool"],
+            {"W": 0, "U": 0, "B": 0, "R": 0, "G": 0, "C": 0})
+        self.assertEqual(game_state.current_attackers, [])
+        self.assertTrue(game_state.stack, "Ninjutsu skipped the stack")
+        item_type, source_id, stack_controller, context = \
+            game_state.stack[-1]
+        self.assertEqual(item_type, "ABILITY")
+        self.assertEqual(source_id, ninja)
+        self.assertIs(stack_controller, active)
+        self.assertTrue(context.get("ninjutsu"))
+
+    def _resolve_ninjutsu_through_public_priority(
+            self, game_state, handler, active, defender, ninja):
+        for pass_number, acting_player in enumerate((active, defender)):
+            self.assertIs(game_state.priority_player, acting_player)
+            game_state.agent_is_p1 = acting_player is game_state.p1
+            mask = handler.generate_valid_actions()
+            self.assertTrue(mask[11])
+            handler.current_valid_actions = mask
+            _, done, truncated, info = handler.apply_action(11)
+            self.assertFalse(done)
+            self.assertFalse(truncated)
+            self.assertFalse(info.get("execution_failed", False), info)
+            if pass_number == 0:
+                self.assertIn(ninja, active["hand"])
+                self.assertNotIn(ninja, active["battlefield"])
+                self.assertTrue(game_state.stack)
+        self.assertFalse(any(
+            item[0] == "ABILITY" and item[1] == ninja
+            and item[3].get("ninjutsu")
+            for item in game_state.stack))
+
     def test_post_blockers_ninjutsu_is_masked_and_executes_for_active_seat(self):
         for index, turn in enumerate((1, 2)):
             with self.subTest(turn=turn):
-                game_state, handler, active, _ = self._combat_state(
+                game_state, handler, active, defender = self._combat_state(
                     208001 + index, turn=turn)
                 attacker = inject_into_zone(
                     game_state, active,
@@ -87,14 +125,20 @@ class CombatRegressionTest(unittest.TestCase):
                 mask = handler.generate_valid_actions()
                 self.assertTrue(mask[437])
                 handler.current_valid_actions = mask
-                _, _, _, info = handler.apply_action(437)
+                _, done, truncated, info = handler.apply_action(437)
+                self.assertFalse(done)
+                self.assertFalse(truncated)
                 self.assertFalse(info.get("execution_failed", False), info)
-                self.assertIn(attacker, active["hand"])
+                self._assert_ninjutsu_activation_on_stack(
+                    game_state, active, attacker, ninja)
+                self._resolve_ninjutsu_through_public_priority(
+                    game_state, handler, active, defender, ninja)
                 self.assertIn(ninja, active["battlefield"])
+                self.assertIn(ninja, active["tapped_permanents"])
                 self.assertEqual(game_state.current_attackers, [ninja])
 
     def test_ninjutsu_dispatches_enters_battlefield_once(self):
-        game_state, handler, active, _ = self._combat_state(208018)
+        game_state, handler, active, defender = self._combat_state(208018)
         attacker = inject_into_zone(
             game_state, active, creature("ETB Return"), "battlefield")
         ninja = inject_into_zone(
@@ -117,16 +161,20 @@ class CombatRegressionTest(unittest.TestCase):
             "ninja_identifier": active["hand"].index(ninja),
             "attacker_identifier": active["battlefield"].index(attacker),
         }))
+        self._assert_ninjutsu_activation_on_stack(
+            game_state, active, attacker, ninja)
+        self._resolve_ninjutsu_through_public_priority(
+            game_state, handler, active, defender, ninja)
+        self.assertIn(ninja, active["battlefield"])
+        self.assertEqual(game_state.current_attackers, [ninja])
 
         etb_triggers = [
-            (ability, context)
-            for ability, _, context in
-            game_state.ability_handler.active_triggers
-            if (ability.card_id == ninja
+            context for item_type, source_id, _, context in game_state.stack
+            if (item_type == "TRIGGER" and source_id == ninja
                 and context.get("event_type") == "ENTERS_BATTLEFIELD")
         ]
         self.assertEqual(len(etb_triggers), 1, etb_triggers)
-        self.assertTrue(etb_triggers[0][1].get("used_ninjutsu"))
+        self.assertTrue(etb_triggers[0].get("used_ninjutsu"))
 
     def test_ninjutsu_cannot_return_an_attacker_that_remains_blocked(self):
         game_state, handler, active, defender = self._combat_state(208003)
@@ -175,8 +223,15 @@ class CombatRegressionTest(unittest.TestCase):
         }
         mask = handler.generate_valid_actions()
         handler.current_valid_actions = mask
-        _, _, _, info = handler.apply_action(437)
+        _, done, truncated, info = handler.apply_action(437)
+        self.assertFalse(done)
+        self.assertFalse(truncated)
         self.assertFalse(info.get("execution_failed", False), info)
+        self._assert_ninjutsu_activation_on_stack(
+            game_state, active, attacker, ninja)
+        self._resolve_ninjutsu_through_public_priority(
+            game_state, handler, active, defender, ninja)
+        self.assertIn(ninja, active["battlefield"])
         self.assertEqual(game_state.phase, game_state.PHASE_FIRST_STRIKE_DAMAGE)
         self.assertEqual(
             game_state.first_strike_damage_participants, {ninja})

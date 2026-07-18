@@ -3007,8 +3007,25 @@ def s_ninjutsu_public_action_dispatch():
     _, done, truncated, info = handler.apply_action(437)
     assert not done and not truncated and not info.get("execution_failed"), \
         f"mask-valid Ninjutsu was rejected by dispatch: {info}"
-    assert attacker in controller["hand"] and ninja in controller["battlefield"], \
-        "Ninjutsu did not exchange the unblocked attacker for the Ninja"
+    assert attacker in controller["hand"] and ninja in controller["hand"], \
+        "Ninjutsu did not pay its return cost while keeping its source in hand"
+    assert ninja not in controller["battlefield"], \
+        "Ninjutsu resolved immediately instead of using the stack"
+    assert gs.stack and gs.stack[-1][0] == "ABILITY" \
+        and gs.stack[-1][1] == ninja and gs.stack[-1][3].get("ninjutsu"), \
+        "Ninjutsu did not create its public stack ability"
+    for acting_player in (controller, gs.p2):
+        assert gs.priority_player is acting_player, \
+            "Ninjutsu priority did not advance through both players"
+        gs.agent_is_p1 = acting_player is gs.p1
+        pass_mask = handler.generate_valid_actions()
+        assert pass_mask[11], "a public priority pass was unavailable"
+        handler.current_valid_actions = pass_mask
+        _, done, truncated, info = handler.apply_action(11)
+        assert not done and not truncated and not info.get("execution_failed"), \
+            f"Ninjutsu stack resolution failed: {info}"
+    assert ninja in controller["battlefield"], \
+        "Ninjutsu did not put the Ninja onto the battlefield on resolution"
     assert ninja in gs.current_attackers, "the Ninja did not enter attacking"
 
 
@@ -15000,8 +15017,18 @@ def scenario_parting_gust_delayed_blink_return():
     controller["mana_pool"] = {
         "W": 10, "U": 10, "B": 10, "R": 10, "G": 10, "C": 10}
     assert gs.cast_spell(gust_id, controller), "Parting Gust cast failed"
-    assert gs.phase == gs.PHASE_TARGETING and gs.targeting_context
+    assert gs.phase == gs.PHASE_CHOOSE \
+        and (gs.choice_context or {}).get("type") == "gift", \
+        "Parting Gust did not request its Gift announcement"
     handler = get_env().action_handler
+    gift_actions = handler.generate_valid_actions()
+    assert gift_actions[11], "Parting Gust did not expose declining Gift"
+    handler.current_valid_actions = gift_actions
+    _, done, truncated, gift_info = handler.apply_action(11)
+    assert not done and not truncated \
+        and not gift_info.get("execution_failed", False), \
+        f"declining Parting Gust's Gift failed: {gift_info}"
+    assert gs.phase == gs.PHASE_TARGETING and gs.targeting_context
     candidates = handler._get_target_selection_candidates(
         controller, gs.targeting_context)
     assert target_id in candidates, "Parting Gust omitted a legal nontoken creature"

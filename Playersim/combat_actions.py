@@ -1,7 +1,87 @@
 import logging
 import re
 
+from .ability_types import Ability
 from .enhanced_combat import ExtendedCombatResolver  # If referenced directly
+
+
+class NinjutsuStackAbility(Ability):
+    """The stack object created after Ninjutsu's activation costs are paid."""
+
+    def __init__(self, card_id, returned_attacker_id,
+                 attack_target_kind=None, attack_target_id=None,
+                 source_zone_generation=None):
+        super().__init__(
+            card_id,
+            "Put this card onto the battlefield from your hand tapped and "
+            "attacking.")
+        self.effect = self.effect_text
+        self.returned_attacker_id = returned_attacker_id
+        self.attack_target_kind = attack_target_kind
+        self.attack_target_id = attack_target_id
+        self.source_zone_generation = source_zone_generation
+        self.keyword = "ninjutsu"
+        self.requires_target = False
+
+    def resolve(self, game_state, controller, context=None):
+        """Put the source card in combat only if it is still in that hand."""
+        owner, zone = game_state.find_card_location(self.card_id)
+        source = game_state._safe_get_card(self.card_id)
+        current_generation = getattr(
+            source, "_zone_change_generation", None) if source else None
+        if (owner is not controller or zone != "hand"
+                or (self.source_zone_generation is not None
+                    and current_generation != self.source_zone_generation)):
+            # Ninjutsu does not reveal the card until resolution. If it left
+            # its owner's hand in response, the ability simply does nothing.
+            return True
+
+        if not game_state.move_card(
+                self.card_id, controller, "hand", controller, "battlefield",
+                cause="ninjutsu_enter", context={"used_ninjutsu": True}):
+            return False
+
+        game_state.tap_permanent(self.card_id, controller)
+        if self.card_id not in game_state.current_attackers:
+            game_state.current_attackers.append(self.card_id)
+
+        if (self.attack_target_kind == "planeswalker"
+                and self.attack_target_id is not None):
+            game_state.planeswalker_attack_targets[
+                self.card_id] = self.attack_target_id
+        elif (self.attack_target_kind == "battle"
+              and self.attack_target_id is not None):
+            game_state.battle_attack_targets[
+                self.card_id] = self.attack_target_id
+
+        # A Ninja entering before the first combat-damage step can create a
+        # first-strike step. Between damage steps, it participates only in the
+        # remaining regular-damage step (CR 510.4).
+        first_step_participants = game_state.first_strike_damage_participants
+        if not game_state.first_strike_damage_dealt:
+            has_first_strike = game_state.check_keyword(
+                self.card_id, "first strike")
+            has_double_strike = game_state.check_keyword(
+                self.card_id, "double strike")
+            if has_first_strike or has_double_strike:
+                first_step_participants.add(self.card_id)
+                underlying_phase = (
+                    game_state.previous_priority_phase
+                    if game_state.phase == game_state.PHASE_PRIORITY
+                    else game_state.phase)
+                if underlying_phase == game_state.PHASE_COMBAT_DAMAGE:
+                    if game_state.phase == game_state.PHASE_PRIORITY:
+                        game_state.previous_priority_phase = \
+                            game_state.PHASE_FIRST_STRIKE_DAMAGE
+                    else:
+                        game_state.phase = \
+                            game_state.PHASE_FIRST_STRIKE_DAMAGE
+
+        logging.info(
+            "Ninjutsu resolved: %s entered tapped and attacking.",
+            getattr(game_state._safe_get_card(self.card_id),
+                    "name", self.card_id))
+        return True
 
 class CombatActionHandler:
     """
@@ -844,59 +924,46 @@ class CombatActionHandler:
              # Need mana system rollback? Assume cost failed cleanly for now.
              return False # Payment failed
 
-        # --- Perform Swap ---
-        logging.debug(f"Performing Ninjutsu: Returning {attacker_card.name}, Putting {ninja_card.name} onto battlefield attacking.")
+        # --- Pay the nonmana activation cost and put Ninjutsu on the stack ---
+        # The returned creature's defender is locked in when the ability is
+        # activated. The Ninja itself stays hidden in hand until resolution,
+        # giving both players the required response window.
+        pw_targets = getattr(gs, 'planeswalker_attack_targets', {})
+        battle_targets = getattr(gs, 'battle_attack_targets', {})
+        attack_target_kind = None
+        attack_target_id = None
+        if attacker_id in pw_targets:
+            attack_target_kind = "planeswalker"
+            attack_target_id = pw_targets.get(attacker_id)
+        elif attacker_id in battle_targets:
+            attack_target_kind = "battle"
+            attack_target_id = battle_targets.get(attacker_id)
+
         success_return = gs.move_card(attacker_id, player, "battlefield", player, "hand", cause="ninjutsu_return")
         if not success_return: logging.error("Failed to return attacker for Ninjutsu."); return False
 
-        success_enter = gs.move_card(
-            ninja_id, player, "hand", player, "battlefield",
-            cause="ninjutsu_enter", context={"used_ninjutsu": True})
-        if not success_enter:
-            logging.error("Failed to put ninja onto battlefield.")
-            # Attempt rollback of attacker
-            gs.move_card(attacker_id, player, "hand", player, "battlefield")
-            # Need cost refund mechanism? Complex.
-            return False
+        if attacker_id in gs.current_attackers:
+            gs.current_attackers.remove(attacker_id)
+        gs.first_strike_damage_participants.discard(attacker_id)
+        gs.blocked_attackers_this_combat.discard(attacker_id)
+        gs.current_block_assignments.pop(attacker_id, None)
+        pw_targets.pop(attacker_id, None)
+        battle_targets.pop(attacker_id, None)
 
-        # Tap the ninja entering, add it to attackers, remove original attacker
-        gs.tap_permanent(ninja_id, player)
-        if hasattr(gs, 'current_attackers'):
-            if attacker_id in gs.current_attackers: gs.current_attackers.remove(attacker_id)
-            gs.current_attackers.append(ninja_id)
-
-        # Ninjutsu occurs before the pending combat-damage turn-based action.
-        # Keep the first-strike eligibility snapshot aligned with the exchanged
-        # creature. If no first-strike step existed yet, inserting a first or
-        # double striker creates one; between damage steps, the first step has
-        # already happened and the new creature participates only in regular
-        # damage as required by CR 510.4.
-        first_step_participants = getattr(
-            gs, 'first_strike_damage_participants', set())
-        first_step_participants.discard(attacker_id)
-        if not getattr(gs, 'first_strike_damage_dealt', False):
-            if (self._has_keyword(ninja_card, "first strike")
-                    or self._has_keyword(ninja_card, "double strike")):
-                first_step_participants.add(ninja_id)
-                if gs.phase == gs.PHASE_COMBAT_DAMAGE:
-                    gs.phase = gs.PHASE_FIRST_STRIKE_DAMAGE
-        gs.first_strike_damage_participants = first_step_participants
-
-        # Transfer attack target (Planeswalker/Battle)
-        pw_targets = getattr(gs, 'planeswalker_attack_targets', {})
-        battle_targets = getattr(gs, 'battle_attack_targets', {})
-        target_description = "" # For logging
-        if attacker_id in pw_targets:
-             target_id = pw_targets.pop(attacker_id)
-             pw_targets[ninja_id] = target_id
-             target_description = f" (Target: {gs._safe_get_card(target_id).name})"
-        if attacker_id in battle_targets:
-             target_id = battle_targets.pop(attacker_id)
-             battle_targets[ninja_id] = target_id
-             target_description = f" (Target: {gs._safe_get_card(target_id).name})"
-
-
-        logging.info(f"Ninjutsu successful: {attacker_card.name} returned, {ninja_card.name} entered attacking{target_description}.")
+        ability = NinjutsuStackAbility(
+            ninja_id, attacker_id, attack_target_kind, attack_target_id,
+            source_zone_generation=getattr(
+                ninja_card, "_zone_change_generation", None))
+        ability.source_card = ninja_card
+        gs.add_to_stack("ABILITY", ninja_id, player, {
+            "ability": ability,
+            "effect_text": ability.effect_text,
+            "ninjutsu": True,
+            "returned_attacker_id": attacker_id,
+        })
+        logging.info(
+            "Ninjutsu activated: %s returned as a cost; %s remains in hand "
+            "until the ability resolves.", attacker_card.name, ninja_card.name)
         return True
     
     def handle_declare_attackers_done(self, param=None, context=None, **kwargs):

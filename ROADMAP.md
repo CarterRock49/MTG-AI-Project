@@ -1,4 +1,4 @@
-# Playersim roadmap — current as of July 17, 2026
+# Playersim roadmap — current as of July 18, 2026
 
 ## Mission and scope
 
@@ -38,10 +38,10 @@ working-tree counts:
 
 | Gate | Result |
 | --- | --- |
-| Golden scenarios | 404/404 |
+| Golden scenarios | 409/409 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
-| Discovered unit tests | 430/430 |
+| Discovered unit tests | 501/501 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
 | Observation schema | v3 / `6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137` |
 
@@ -56,6 +56,36 @@ closed. Card and deck analytics now preserve canonical card identity,
 player-relative turns, draw-aware rates, and atomic per-file persistence.
 Evaluator caches retain only static characteristics, while live state and
 perspective are recomputed for each decision.
+
+### Standard full-pool dynamic probe — July 18, 2026 repair baseline
+
+The fail-closed production-pipeline reconnaissance completed all 4,702 frozen
+Standard cards with hash-valid terminal artifacts: 1,774 `failed`, 2,910
+`coverage_gap`, and 18 `execution_passed`. All 4,702 remain
+`semantic_status=unverified`; a bounded execution pass is not a rules-support
+certification. The report is
+`probe_runs/standard-full-2026-07-18-v2/card_probe_report.json` with SHA-256
+`5a020931c2969c2859653e46504c211e07747acbf157fd9b3a77d52e3699d002`.
+
+| Prior ledger status | Failed | Coverage gap | Mechanical pass |
+| --- | ---: | ---: | ---: |
+| `verified` | 0 | 86 | 10 |
+| `observed_clean` | 0 | 55 | 8 |
+| `unseen` | 579 | 2,769 | 0 |
+| `partial` | 745 | 0 | 0 |
+| `unparsed` | 450 | 0 | 0 |
+
+Compared with the first full-pool run, 168 cards moved from `failed` to
+`coverage_gap`, reducing failures from 1,942 to 1,774. All 14 failures among
+previously `verified`/`observed_clean` cards were repaired; those cards now
+remain coverage gaps rather than being overclaimed as semantic passes. Pest
+Control moved from `execution_passed` to `coverage_gap` because rule-keyword
+metadata is now tracked as an explicit unexercised obligation. There are 1,380
+cards with runtime diagnostics. The largest explicit coverage obligations are
+static effects (2,786), choice branches (2,717), triggers (2,611), and optional
+branches (1,207). These counts are the repair/coverage baseline; no ledger
+promotion follows without scenario-backed exact-state assertions for every
+distinct path.
 
 ### Non-negotiable lineage rules
 

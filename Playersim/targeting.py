@@ -1055,7 +1055,9 @@ class TargetingSystem:
             # Zone restrictions (usually implied by context, but check)
             if ("in a graveyard" in restrictions
                     or "in your graveyard" in restrictions
-                    or "from your graveyard" in restrictions):
+                    or "from your graveyard" in restrictions
+                    or "from a graveyard" in restrictions
+                    or "from a single graveyard" in restrictions):
                 req["zone"] = "graveyard"; req["type"]="card" # Override type
                 if "your graveyard" in restrictions:
                     req["controller_is_caster"] = True

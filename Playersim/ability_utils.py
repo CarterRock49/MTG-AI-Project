@@ -405,6 +405,25 @@ class EffectFactory:
 
         source_key = str(source_name or "").strip().casefold()
         lowered = effect_text.lower()
+
+        # A kicked "deals N ... instead" instruction is one replacement
+        # choice, not two independent damage events.  Parse it before generic
+        # sentence splitting so the base and kicked values cannot stack.
+        kicked_damage = re.search(
+            r"\bdeals\s+(\d+)\s+damage\s+to\s+"
+            r"(any target|target creature)\s*\.\s*"
+            r"if this spell was kicked\s*,\s*it deals\s+(\d+)\s+damage"
+            r"(?:\s+to that creature)?\s+instead\s*\.?",
+            effect_text, re.IGNORECASE | re.DOTALL)
+        if kicked_damage:
+            from .ability_types import KickedDamageEffect
+            target_phrase = kicked_damage.group(2).lower()
+            target_type = ("any target" if target_phrase == "any target"
+                           else "creature")
+            return [KickedDamageEffect(
+                int(kicked_damage.group(1)),
+                int(kicked_damage.group(3)), target_type)]
+
         if re.fullmatch(
                 r"\s*each player exiles all but the bottom six cards of "
                 r"their library face down\.?\s*", lowered):
@@ -1409,6 +1428,7 @@ class EffectFactory:
             ScryEffect, SurveilEffect, CopySpellEffect, TransformEffect, SetDayNightEffect, FightEffect,
             ImpulseDrawEffect, LoseLifeEffect, GainKeywordEffect,
             SacrificeEffect, SacrificeSourceEffect, ReanimateEffect,
+            ReturnSourceFromGraveyardEffect,
             AddManaEffect, ControlEffect,
             RegenerateEffect, DigEffect, PutOnLibraryEffect,
             ShuffleGraveyardEffect, PreventDamageEffect,
@@ -1594,7 +1614,11 @@ class EffectFactory:
                  # Handle "all/each" variations
                  if re.search(r"\b(all|each)\s+creatures?\b", clause_lower): target_type = "all creatures"
                  # ... add other "all X" / "each X" types if needed for exile ...
-                 zone_match = re.search(r"from (?:the |a |your |an opponent's )?(\w+)", clause_lower)
+                 zone_match = re.search(
+                     r"\bfrom\s+(?:(?:an opponent's|the|a|your)\s+)?"
+                     r"(?:single\s+)?"
+                     r"(battlefield|graveyard|hand|library|stack|exile)\b",
+                     clause_lower)
                  zone = zone_match.group(1) if zone_match else "battlefield"
                  created_effect = ExileEffect(target_type=target_type, zone=zone)
 
@@ -1841,6 +1865,14 @@ class EffectFactory:
                  # Using simplified CreateTokenEffect for now
                  created_effect = CreateTokenEffect(power, toughness, token_name_type, count, keywords, colors=colors, is_legendary=is_legendary, count_expr=count_expr)
 
+
+            # A source-bound "this card" instruction is not targeted and
+            # follows the exact graveyard object that created the trigger.
+            elif re.search(
+                    r"return\s+this\s+card\s+from\s+your\s+graveyard\s+to\s+the\s+battlefield",
+                    clause_lower):
+                created_effect = ReturnSourceFromGraveyardEffect(
+                    enters_tapped="tapped" in clause_lower)
 
             # Reanimation: "return ... from (your/a) graveyard to the battlefield".
             # Must come before the bounce branch (which handles "to hand").
