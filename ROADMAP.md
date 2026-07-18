@@ -905,6 +905,20 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
 ## Working agreements
 
 - Write the failing scenario before implementing a defect fix.
+- A card is never "clean" or "fully implemented" on parse evidence alone.
+  The support ledger's `observed_clean` audits parsing/registration, and
+  cards with that status have repeatedly produced runtime bugs (modal
+  continuation, cost choices, trigger wiring — the Three Steps Ahead
+  failure killed a 850k-step run). A card qualifies as fully implemented
+  only when each of its distinct abilities, modes, and choice paths has
+  been driven through the production pipeline — mask exposure including
+  at least one negative case, cast/activation with real payment,
+  resolution, triggers via `process_triggered_abilities`, and any
+  choice/target flows — with post-resolution state asserted (zones,
+  counters, life, tapped state), not merely the absence of
+  `execution_failed`. When such a probe exercises a mechanic with no
+  existing scenario coverage, promote it to a permanent scenario even if
+  it found nothing.
 - Treat any warning, degraded observation, swallowed exception, or fidelity
   counter as a correctness failure until classified.
 - Keep masks and handlers on shared legality predicates and pin paged choices
