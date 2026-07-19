@@ -886,7 +886,8 @@ class CombatResolver:
             return False
             
         # Check for defender
-        if self._has_keyword(attacker_card, "defender"):
+        if (self._has_keyword(attacker_card, "defender")
+                and not gs.has_defender_attack_permission(attacker_id)):
             return False
         
         return True

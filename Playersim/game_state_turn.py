@@ -161,6 +161,31 @@ class GameStateTurnMixin:
             self.trigger_ability(card_id, "PHASED_IN", {"controller": controller})
         return [card_id for card_id, _ in restored]
 
+    def _other_players_with_creature_untap(self, active_player):
+        """Controllers whose creatures also untap in this untap step."""
+        result = []
+        pattern = re.compile(
+            r"(?:^|\n)\s*untap each creature you control during each other "
+            r"player(?:'|\u2019)s untap step\.?(?:\n|$)",
+            re.IGNORECASE)
+        for controller in (self.p1, self.p2):
+            if not controller or controller is active_player:
+                continue
+            for permanent_id in controller.get("battlefield", []):
+                if (hasattr(self, "_rules_text_source_is_active")
+                        and not self._rules_text_source_is_active(
+                            permanent_id)):
+                    continue
+                permanent = self._safe_get_card(permanent_id)
+                rules_text = (
+                    self._active_permanent_rules_text(permanent)
+                    if hasattr(self, "_active_permanent_rules_text")
+                    else str(getattr(permanent, "oracle_text", "") or ""))
+                if pattern.search(rules_text):
+                    result.append(controller)
+                    break
+        return result
+
     def _untap_phase(self, player, previous_turn_spells_cast=None):
         """Reset mana and untap all permanents, handling Phasing."""
         # --- Phasing ---
@@ -210,16 +235,29 @@ class GameStateTurnMixin:
 
         # Untap permanents *that did not phase out*. Route every attempt
         # through untap_permanent so stun and other replacements apply.
-        attempted_ids = set()
-        for card_id in list(player.get("battlefield", [])): # Iterate copy, only those currently on BF
-            # Repeated deck copies currently share definition IDs. Never make
-            # several untap attempts against the same tracked object in one
-            # untap step, which would consume several stun counters at once.
-            if card_id in attempted_ids:
-                 continue
-            attempted_ids.add(card_id)
-            if card_id in player.get("tapped_permanents", set()):
-                 self.untap_permanent(card_id, player)
+        untap_groups = [(player, False)]
+        untap_groups.extend(
+            (controller, True)
+            for controller in self._other_players_with_creature_untap(player))
+        for untap_player, creatures_only in untap_groups:
+            attempted_ids = set()
+            for card_id in list(untap_player.get("battlefield", [])):
+                # Repeated deck copies currently share definition IDs. Never
+                # make several untap attempts against the same tracked object
+                # in one instruction, which would consume several stun
+                # counters at once.
+                if card_id in attempted_ids:
+                    continue
+                attempted_ids.add(card_id)
+                if creatures_only:
+                    card = self._safe_get_card(card_id)
+                    if 'creature' not in {
+                            str(card_type).lower()
+                            for card_type in getattr(
+                                card, 'card_types', [])}:
+                        continue
+                if card_id in untap_player.get("tapped_permanents", set()):
+                    self.untap_permanent(card_id, untap_player)
 
         player["entered_battlefield_this_turn"] = set() # Clear sickness status
         player["land_played"] = False
@@ -825,6 +863,7 @@ class GameStateTurnMixin:
         self.additional_phase_resume = None
         self.additional_phase_stage = None
         self.damage_dealt_this_turn = {}
+        self.defender_attack_permissions.clear()
         self.cards_drawn_this_turn = {'p1': 0, 'p2': 0} # Reset draw counts
         self.cards_milled_this_turn = {'p1': 0, 'p2': 0} # Reset mill counts
         # Proper graveyard tracking reset
@@ -1080,14 +1119,35 @@ class GameStateTurnMixin:
              # e.g., DECLARE_ATTACKERS might have its own triggers checked elsewhere
              pass
 
+    def _maximum_hand_size_for_player(self, player):
+        """Return the live cleanup limit, or ``None`` when it is unlimited."""
+        if not player:
+            return self.max_hand_size
+        for permanent_id in player.get("battlefield", []):
+            if (hasattr(self, "_rules_text_source_is_active")
+                    and not self._rules_text_source_is_active(permanent_id)):
+                continue
+            permanent = self._safe_get_card(permanent_id)
+            if hasattr(self, "_active_permanent_rules_text"):
+                rules_text = self._active_permanent_rules_text(permanent)
+            else:
+                rules_text = str(
+                    getattr(permanent, "oracle_text", "") or "")
+            if re.search(
+                    r"(?:^|\n)\s*you have no maximum hand size\.?(?:\n|$)",
+                    rules_text, re.IGNORECASE):
+                return None
+        return self.max_hand_size
+
     def _cleanup_step_actions(self, player, discard_to_max=True):
         """Handle cleanup actions; return True while waiting for a choice."""
         if not player:
             return False
 
         # 1. Discard down to maximum hand size
-        max_hand = self.max_hand_size # Can be modified by effects
-        if discard_to_max and len(player.get("hand", [])) > max_hand:
+        max_hand = self._maximum_hand_size_for_player(player)
+        if (discard_to_max and max_hand is not None
+                and len(player.get("hand", [])) > max_hand):
             num_to_discard = len(player["hand"]) - max_hand
             logging.info(f"{player['name']} discarding {num_to_discard} card(s) due to hand size.")
             if self.start_discard_choice(
@@ -1147,6 +1207,7 @@ class GameStateTurnMixin:
                     f"Cleanup: Removed {removed_replacements} replacement effects.")
         # Clear other temporary game state trackers (need specific cleanup logic)
         if hasattr(self, 'haste_until_eot'): self.haste_until_eot.clear()
+        self.defender_attack_permissions.clear()
         for _player in (self.p1, self.p2):
             _player.pop('saddled_permanents', None)
         self.delayed_event_triggers = [

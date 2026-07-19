@@ -18,6 +18,21 @@ class GameStatePermanentsMixin:
     # Empty slots: preserves GameState's __slots__ semantics (no instance __dict__).
     __slots__ = ()
 
+    def has_defender_attack_permission(self, card_id):
+        """Whether this exact battlefield incarnation may ignore defender."""
+        expected_generation = getattr(
+            self, "defender_attack_permissions", {}).get(card_id)
+        if expected_generation is None:
+            return False
+        card = self._safe_get_card(card_id)
+        controller = self.get_card_controller(card_id)
+        if (card is None or controller is None
+                or card_id not in controller.get("battlefield", [])):
+            return False
+        current_generation = int(getattr(
+            card, "_zone_change_generation", 0) or 0)
+        return current_generation == int(expected_generation)
+
     def _refresh_control_dependent_effects(self, card_id, controller):
         """Rebind live static/replacement effects after control changes.
 
@@ -462,7 +477,8 @@ class GameStatePermanentsMixin:
         self.trigger_ability(card_id, "UNTAPPED", {"controller": player})
         return True
 
-    def create_token_copy(self, original_card, controller):
+    def create_token_copy(self, original_card, controller, *,
+                          additional_subtypes=None):
         """Create a token copy of a card, handles details like base P/T."""
         if not original_card: return None
         # Create token tracking if it doesn't exist
@@ -511,7 +527,26 @@ class GameStatePermanentsMixin:
         try:
             token = Card(copyable_values)
             token.is_token = True  # Card.__init__ ignores the dict key; set explicitly (matters for stats: tokens aren't deck cards)
+            raw_subtypes = additional_subtypes or ()
+            if isinstance(raw_subtypes, str):
+                raw_subtypes = (raw_subtypes,)
+            token_subtypes = list(getattr(token, "subtypes", []) or [])
+            present_subtypes = {
+                str(subtype).casefold() for subtype in token_subtypes}
+            for subtype in raw_subtypes:
+                normalized = str(subtype or "").strip().lower()
+                if normalized and normalized.casefold() not in present_subtypes:
+                    token_subtypes.append(normalized)
+                    present_subtypes.add(normalized.casefold())
+            if raw_subtypes:
+                token.subtypes = token_subtypes
+                token.type_line = self._build_type_line({
+                    "supertypes": getattr(token, "supertypes", []),
+                    "card_types": getattr(token, "card_types", []),
+                    "subtypes": token_subtypes,
+                })
             token.snapshot_printed()  # the copied values ARE the token's printed identity (CR 707.2)
+            token.compute_subtype_vector()
             token.card_id = token_id # Assign the unique ID
         except Exception as e:
              logging.error(f"Error creating token copy Card object: {e} | Data: {copyable_values}")
@@ -1724,6 +1759,21 @@ class GameStatePermanentsMixin:
             "card_id": card_id,
         })
         self.trigger_ability(card_id, "ENTERS_BATTLEFIELD", context)
+        if (card and getattr(card, "is_room", False)
+                and context.get("was_cast")
+                and context.get("room_cast_door_unlocked_on_entry")
+                and context.get("room_cast_door_number") in (1, 2)):
+            door_number = int(context["room_cast_door_number"])
+            room_context = {
+                **context,
+                "controller": player,
+                "room_id": card_id,
+                "door_number": door_number,
+                "fully_unlocked": False,
+            }
+            self.trigger_ability(card_id, "DOOR_UNLOCKED", room_context)
+            self.trigger_ability(
+                card_id, f"DOOR{door_number}_UNLOCKED", room_context)
         if card and "land" in getattr(card, "card_types", []):
             self.trigger_ability(None, "LANDFALL", context)
             self.trigger_ability(card_id, "LANDFALL_SELF", context)

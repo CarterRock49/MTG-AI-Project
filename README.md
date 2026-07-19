@@ -164,7 +164,7 @@ python tests/train_smoke_test.py
 python tests/invariant_fuzz_test.py --profile default
 ```
 
-For the current working tree, those gates are green at 720/720 discovered unit
+For the current working tree, those gates are green at 736/736 discovered unit
 tests, 409/409 scenarios, 9/9 runtime smoke, 13/13 training smoke, and all 8
 default fuzz seeds x 1,000 valid actions plus the phase-boundary check. The
 previously recorded long-fuzz result remains historical until that
@@ -214,7 +214,10 @@ python tests/invariant_fuzz_test.py --profile default   # 8 seeds x 1,000 action
 
 **Working agreement:** every engine change ships with a failing scenario written
 *first*. Untested subsystems are assumed broken — this practice has repeatedly
-surfaced phantom methods and dead/overfiring subsystems (see the ROADMAP
+surfaced phantom methods and dead/overfiring subsystems. A card is never called
+clean from parsing or a bounded probe alone. Semantic promotion is currently
+hard-locked; permanent exact-state evidence must first gain a machine-verifiable
+scenario-to-surface mapping (see the schema-v2 contract below and the ROADMAP
 appendix bug catalog).
 
 ---
@@ -284,10 +287,10 @@ retained but not played by the best-of-one runtime; Maybeboards are ignored.
 
 ### Support ledger (coverage)
 
-Before widening a format corpus, regenerate its static support ledger, which
-classifies every card in the pool as verified, observed-clean, unseen-clean,
-`partial`, `unparsed`, or `crash` — no card is called supported merely for never
-having produced telemetry:
+Before widening a format corpus, regenerate its support ledger. Schema v2 keeps
+`static_status` (observed-clean, unseen-clean, `partial`, `unparsed`, or
+`crash`) separate from `semantic_status`. Static cleanliness is only a triage
+signal; it is never rules proof:
 
 ```bash
 python -m Playersim.support_preflight \
@@ -299,8 +302,21 @@ python -m Playersim.support_preflight \
   --output formats/standard/support_ledger.json
 ```
 
-The representative metagame currently has no `unparsed`/`crash` cards. Current
-full-pool coverage counts are in the ROADMAP status snapshot.
+The reserved `verified` state requires a nonempty candidate record pinned to the
+card's Oracle ID and rules hash, an independently generated Oracle-text plus
+dynamic-probe surface inventory, exact surface-set equality, and real
+assertion-bearing unittest nodes. The validator rejects skipped, failing,
+assertionless, stale, non-discoverable, or static-issue evidence and executes
+each named node exactly once. Because a passing Python test still cannot prove
+that its assertions establish every declared surface, actual ledger promotion
+is hard-disabled and any nonempty `verified` override is rejected. The 96
+former name-only claims are retained as `legacy_verified_claims` for audit
+only and cannot change card status.
+
+The July 19 ledger has 4,702 cards: 0 semantically verified, 4,702 unverified;
+static status is 119 observed-clean, 3,417 unseen-clean, 833 partial, and 333
+unparsed (75.2% static-clean). Its canonical SHA-256 is
+`ab98966df91afa68995a3f1dc08101cd955b2197920b8e4969f20e53f9401b70`.
 
 ### Dynamic card-pool probe
 
@@ -326,6 +342,20 @@ discovered surface or branch was not independently exercised. Even
 `execution_passed` is bounded mechanical evidence only: every card remains
 `semantic_status=unverified` until permanent scenarios assert its exact rules
 outcomes across all abilities, modes, and choices.
+
+The first schema-v2 affected replay is
+`probe_runs/standard-affected-evidence-2026-07-19-v1/card_probe_report.json`.
+Afterburner Expert, Optimistic Scavenger, Roaring Furnace // Steaming Sauna, and
+Underwater Tunnel // Slimy Aquarium all finished as explicit `coverage_gap`
+with zero failures and zero diagnostics; an identical `--resume` accepted all
+four artifacts. Its physical SHA-256 is
+`f74e355275d311ec2210a66bda1f20383ab4cb3e875f01f25447208fd5dbc9f6`
+(canonical
+`eac24b1f92bce0363fcbd17e8a2fc2c742869ca5e34cee99fd433813f69a865b`).
+The permanent pilot tests cover Afterburner's cast/payment, Exhaust masks and
+trigger negatives, plus Room source/door identity and Roaring Furnace's live
+hand-size damage; uncovered alternate Room faces and missing generic trigger
+fixtures remain gaps rather than promotions.
 
 The repair-affected replay is
 `probe_runs/standard-repair1-expanded5-2026-07-18-v1/card_probe_report.json`.

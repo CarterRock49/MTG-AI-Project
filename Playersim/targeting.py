@@ -347,7 +347,27 @@ class TargetingSystem:
                    else {})
         mana_cost = str(
             getattr(characteristic_card, "mana_cost", "") or "")
-        if context.get("prepared_copy"):
+        if (getattr(characteristic_card, "is_room", False)
+                and context.get("room_cast_face_index") in (0, 1)):
+            mana_cost = str(context.get(
+                "room_cast_face_mana_cost",
+                characteristic_card.get_face_cost(
+                    context["room_cast_face_index"])) or "")
+            value = 0
+            for symbol in re.findall(r"\{([^}]+)\}", mana_cost):
+                upper = symbol.upper()
+                if upper == "X":
+                    continue
+                if upper.isdigit():
+                    value += int(upper)
+                elif "/" in upper:
+                    numeric_parts = [
+                        int(part) for part in upper.split("/")
+                        if part.isdigit()]
+                    value += max(numeric_parts or [1])
+                else:
+                    value += 1
+        elif context.get("prepared_copy"):
             face = context.get("prepared_face", {}) or {}
             mana_cost = str(face.get("mana_cost", "") or "")
             value = face.get("cmc", value)

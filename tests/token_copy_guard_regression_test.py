@@ -23,6 +23,7 @@ from Playersim.ability_types import (  # noqa: E402
     UnsupportedEffect,
 )
 from Playersim.ability_utils import EffectFactory  # noqa: E402
+from Playersim.card import Card  # noqa: E402
 
 
 logging.disable(logging.CRITICAL)
@@ -403,6 +404,144 @@ class TokenCopyGuardRegressionTest(unittest.TestCase):
         self.assertEqual(token.card_types, target.printed("card_types"))
         self.assertEqual(token.subtypes, target.printed("subtypes"))
         self.assertEqual(token.colors, [0, 0, 0, 0, 1])
+
+    def test_mirror_room_adds_reflection_to_printed_copyable_subtypes(self):
+        clause = (
+            "Create a token that's a copy of target creature you control, "
+            "except it's a Reflection in addition to its other creature types.")
+        effects = EffectFactory.create_effects(
+            clause, source_name="Mirror Room // Fractured Realm")
+        self.assertEqual(len(effects), 1)
+        effect = effects[0]
+        self.assertIsInstance(effect, CreateTokenCopyOfTargetEffect)
+        self.assertNotIsInstance(effect, UnsupportedEffect)
+        self.assertEqual(effect.allowed_types, {"creature"})
+        self.assertTrue(effect.controller_only)
+        self.assertEqual(effect.additional_subtypes, ("reflection",))
+
+        game_state = fresh(38512)
+        controller = game_state.p1
+        target_id = inject_into_zone(game_state, controller, {
+            "name": "Printed Rabbit Visionary",
+            "mana_cost": "{1}{G}",
+            "cmc": 2,
+            "type_line": "Creature - Rabbit Warrior",
+            "oracle_text": "Vigilance",
+            "power": 2,
+            "toughness": 3,
+            "color_identity": ["G"],
+        }, "battlefield")
+        target = game_state._safe_get_card(target_id)
+        target.power = 8
+        target.toughness = 9
+        target.subtypes.append("temporary")
+        target.keywords[Card.ALL_KEYWORDS.index("flying")] = 1
+
+        before = set(controller.get("tokens", []))
+        self.assertTrue(effect.apply(
+            game_state, None, controller,
+            {"creatures": [target_id]}, context={}))
+        created = [
+            token_id for token_id in controller.get("tokens", [])
+            if token_id not in before]
+        self.assertEqual(len(created), 1)
+        token_id = created[0]
+        token = game_state._safe_get_card(token_id)
+        self.assertEqual(token.name, target.printed("name"))
+        self.assertEqual(token.mana_cost, target.printed("mana_cost"))
+        self.assertEqual((token.power, token.toughness), (2, 3))
+        self.assertEqual(token.card_types, ["creature"])
+        self.assertEqual(
+            {subtype.casefold() for subtype in token.subtypes},
+            {"rabbit", "warrior", "reflection"})
+        self.assertNotIn("temporary", {
+            subtype.casefold() for subtype in token.subtypes})
+        self.assertEqual(
+            sum(subtype.casefold() == "reflection"
+                for subtype in token.subtypes),
+            1)
+        self.assertEqual(
+            {subtype.casefold()
+             for subtype in token.printed("subtypes", [])},
+            {"rabbit", "warrior", "reflection"})
+        self.assertIn("reflection", token.type_line.casefold())
+        self.assertEqual(token.colors, [0, 0, 0, 0, 1])
+        self.assertTrue(game_state.check_keyword(token_id, "vigilance"))
+        self.assertFalse(game_state.check_keyword(token_id, "flying"))
+
+        second_id = game_state.create_token_copy(token, controller)
+        self.assertIsNotNone(second_id)
+        second = game_state._safe_get_card(second_id)
+        self.assertEqual(
+            {subtype.casefold() for subtype in second.subtypes},
+            {"rabbit", "warrior", "reflection"})
+        self.assertEqual(
+            sum(subtype.casefold() == "reflection"
+                for subtype in second.subtypes),
+            1)
+
+    def test_mirror_room_copy_exception_stays_bounded_and_checks_target(self):
+        for clause in (
+                "Create a token that's a copy of target creature you control, "
+                "except it has flying.",
+                "Create a token that's a copy of target creature you control, "
+                "except it's a Reflection and it has flying."):
+            with self.subTest(clause=clause):
+                effects = EffectFactory.create_effects(clause)
+                self.assertEqual(len(effects), 1)
+                self.assertIsInstance(effects[0], UnsupportedEffect)
+
+        mirror_clause = (
+            "Create a token that's a copy of target creature you control, "
+            "except it's a Reflection in addition to its other types.")
+        effect = EffectFactory.create_effects(mirror_clause)[0]
+        self.assertIsInstance(effect, CreateTokenCopyOfTargetEffect)
+
+        game_state = fresh(38513)
+        controller, opponent = game_state.p1, game_state.p2
+        own_artifact = inject_into_zone(game_state, controller, {
+            "name": "Mirror Artifact",
+            "mana_cost": "{2}",
+            "cmc": 2,
+            "type_line": "Artifact",
+            "oracle_text": "",
+            "color_identity": [],
+        }, "battlefield")
+        opposing_creature = inject_into_zone(game_state, opponent, {
+            "name": "Opposing Mirror Target",
+            "mana_cost": "{1}{R}",
+            "cmc": 2,
+            "type_line": "Creature - Goblin",
+            "oracle_text": "",
+            "power": 2,
+            "toughness": 2,
+            "color_identity": ["R"],
+        }, "battlefield")
+        departing_creature = inject_into_zone(game_state, controller, {
+            "name": "Departing Mirror Target",
+            "mana_cost": "{1}{U}",
+            "cmc": 2,
+            "type_line": "Creature - Wizard",
+            "oracle_text": "",
+            "power": 2,
+            "toughness": 2,
+            "color_identity": ["U"],
+        }, "battlefield")
+        self.assertTrue(game_state.move_card(
+            departing_creature, controller, "battlefield", controller,
+            "graveyard", cause="mirror_target_left"))
+
+        before = set(controller.get("tokens", []))
+        self.assertFalse(effect.apply(
+            game_state, None, controller,
+            {"artifacts": [own_artifact]}, context={}))
+        self.assertFalse(effect.apply(
+            game_state, None, controller,
+            {"creatures": [opposing_creature]}, context={}))
+        self.assertFalse(effect.apply(
+            game_state, None, controller,
+            {"creatures": [departing_creature]}, context={}))
+        self.assertEqual(set(controller.get("tokens", [])), before)
 
 
 if __name__ == "__main__":

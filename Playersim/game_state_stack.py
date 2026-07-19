@@ -2622,6 +2622,49 @@ class GameStateStackMixin:
         if not card:
              logging.error(f"Cannot cast spell: Invalid card_id {card_id}")
              return False
+        if getattr(card, "is_room", False):
+            room_face_index = context.get("room_cast_face_index", 0)
+            if (not isinstance(room_face_index, int)
+                    or room_face_index not in (0, 1)
+                    or len(getattr(card, "faces", []) or []) < 2
+                    or (context.get("card_id") is not None
+                        and context.get("card_id") != card_id)
+                    or context.get(
+                        "room_cast_door_number", room_face_index + 1)
+                    != room_face_index + 1
+                    or context.get("fuse")
+                    or (context.get("cast_left_half")
+                        and room_face_index != 0)
+                    or (context.get("cast_right_half")
+                        and room_face_index != 1)):
+                logging.warning(
+                    "Invalid Room face announcement for %s.", card.name)
+                return False
+            room_face = card.faces[room_face_index]
+            room_face_cost = room_face.get("mana_cost", "") or ""
+            room_mana_symbols = re.findall(
+                r"\{([^}]+)\}", room_face_cost.upper())
+            room_colored_parts = {
+                part
+                for symbol in room_mana_symbols
+                for part in symbol.split("/")
+                if part in set("WUBRG")
+            }
+            context.update({
+                "room_cast_face_index": room_face_index,
+                "room_cast_door_number": room_face_index + 1,
+                "room_cast_face_name": room_face.get(
+                    "name", f"Door {room_face_index + 1}"),
+                "room_cast_face_mana_cost": room_face.get(
+                    "mana_cost", ""),
+                "room_cast_face_colors": [
+                    int(symbol in room_colored_parts)
+                    for symbol in "WUBRG"],
+            })
+            if room_face_index == 1:
+                context["cast_as_back_face"] = True
+            else:
+                context.pop("cast_as_back_face", None)
         if context.get("prepared_copy"):
             prepared_face = self._prepare_spell_face(card)
             expected_generation = context.get("prepared_source_generation")
@@ -2884,7 +2927,10 @@ class GameStateStackMixin:
              if final_cost_dict is None: return False
         else: # Normal cost
             base_cost_str = getattr(card, 'mana_cost', '')
-            if context.get('cast_as_adventure') and hasattr(
+            if getattr(card, 'is_room', False):
+                base_cost_str = context.get(
+                    'room_cast_face_mana_cost', base_cost_str)
+            elif context.get('cast_as_adventure') and hasattr(
                     card, 'get_adventure_data'):
                 adventure = card.get_adventure_data() or {}
                 if not adventure:
@@ -2895,7 +2941,9 @@ class GameStateStackMixin:
             # when this cast is flagged as the back face. Previously the spell
             # path always used the front cost, so casting a spell MDFC's back
             # face charged the wrong amount.
-            if context.get('cast_as_back_face') and hasattr(card, 'get_face_cost'):
+            if (context.get('cast_as_back_face')
+                    and not getattr(card, 'is_room', False)
+                    and hasattr(card, 'get_face_cost')):
                 _back_cost = card.get_face_cost(1)
                 base_cost_str = _back_cost if _back_cost is not None else base_cost_str
                 context['effect_text'] = card.get_face_text(1)
@@ -3780,6 +3828,12 @@ class GameStateStackMixin:
             type_line = prepared_face.get('type_line', '') or type_line
             oracle_text = prepared_face.get('oracle_text', '') or ''
             use_printed_card_types = False
+        elif (getattr(card, 'is_room', False)
+                and context.get('room_cast_face_index') in (0, 1)):
+            room_face_index = context['room_cast_face_index']
+            type_line = card.get_face_type_line(room_face_index) or type_line
+            oracle_text = card.get_face_text(room_face_index) or ''
+            use_printed_card_types = False
         elif context.get('cast_as_back_face') and hasattr(card, 'get_face_type_line'):
             type_line = card.get_face_type_line(1) or type_line
             oracle_text = card.get_face_text(1) or ''
@@ -3815,6 +3869,18 @@ class GameStateStackMixin:
             getattr(self, "layer_system", None)
             and self.layer_system.source_has_lost_all_abilities(card_id))
 
+    @staticmethod
+    def _active_permanent_rules_text(card):
+        """Return only rules text that currently functions on a permanent."""
+        if card and getattr(card, "is_room", False):
+            return "\n".join(
+                str(door.get("oracle_text", "") or "")
+                for door in (
+                    getattr(card, "door1", None),
+                    getattr(card, "door2", None))
+                if door and door.get("unlocked", False))
+        return str(getattr(card, "oracle_text", "") or "") if card else ""
+
     def can_player_cast_spells(self, player):
         """Return False under a live "opponents can't cast" turn rule."""
         active_player = self._get_active_player()
@@ -3824,7 +3890,7 @@ class GameStateStackMixin:
             if not self._rules_text_source_is_active(permanent_id):
                 continue
             permanent = self._safe_get_card(permanent_id)
-            text = str(getattr(permanent, "oracle_text", "") or "").lower()
+            text = self._active_permanent_rules_text(permanent).lower()
             if re.search(
                     r"\byour opponents can(?:'|\u2019)t cast spells during "
                     r"your turn\b", text):
@@ -3838,7 +3904,7 @@ class GameStateStackMixin:
             if not self._rules_text_source_is_active(permanent_id):
                 continue
             permanent = self._safe_get_card(permanent_id)
-            text = str(getattr(permanent, "oracle_text", "") or "").lower()
+            text = self._active_permanent_rules_text(permanent).lower()
             if re.search(
                     r"\byou may play an additional land on each of your turns\b",
                     text):
@@ -3861,7 +3927,7 @@ class GameStateStackMixin:
             if not self._rules_text_source_is_active(permanent_id):
                 continue
             permanent = self._safe_get_card(permanent_id)
-            text = str(getattr(permanent, "oracle_text", "") or "").lower()
+            text = self._active_permanent_rules_text(permanent).lower()
             if re.search(r"\byou may play lands from your graveyard\b", text):
                 return True
         return False

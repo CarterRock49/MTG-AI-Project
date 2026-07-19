@@ -2193,6 +2193,21 @@ class TriggeredAbility(Ability):
         
     def can_trigger(self, event_type, context=None):
         """Check if the ability should trigger based on an event and additional conditions with improved pattern matching."""
+        # A Room face's rules text functions only while that exact door is
+        # unlocked. The unlock transaction flips the flag before broadcasting
+        # DOOR_UNLOCKED, so the newly opened door can hear its own event.
+        room_door_number = getattr(self, "room_door_number", None)
+        if room_door_number is not None:
+            room_context = context or {}
+            source_card = room_context.get("source_card")
+            game_state = room_context.get("game_state")
+            if source_card is None and game_state is not None:
+                source_card = game_state._safe_get_card(self.card_id)
+            door = (getattr(
+                source_card, f"door{room_door_number}", None)
+                if source_card else None)
+            if not door or not door.get("unlocked", False):
+                return False
         if (_is_grouped_zone_change_trigger(
                 self.trigger_condition, event_type)
                 and not _accept_complete_grouped_zone_change_batch(
@@ -2375,6 +2390,56 @@ class TriggeredAbility(Ability):
                 return False
             if event_type in ("DOOR_UNLOCKED", "ROOM_FULLY_UNLOCKED"):
                 context = context or {}
+                source_card_id = context.get("source_card_id", self.card_id)
+                event_room_id = context.get(
+                    "event_card_id", context.get("room_id"))
+                names_this_room = any(
+                    re.search(r"\bthis\s+(?:door|room)\b", clause,
+                              re.IGNORECASE)
+                    for clause in matching_trigger_clauses)
+                if names_this_room and event_room_id != source_card_id:
+                    return False
+
+                # A Room's deictic "this door" trigger belongs to one
+                # physical half, not to either door on that Room. Recover the
+                # door number from the source's parsed face text and fail
+                # closed if the condition cannot be bound unambiguously.
+                if (event_type == "DOOR_UNLOCKED"
+                        and any(re.search(r"\bthis\s+door\b", clause,
+                                          re.IGNORECASE)
+                                for clause in matching_trigger_clauses)):
+                    printed_door_number = getattr(
+                        self, "room_door_number", None)
+                    if printed_door_number is not None:
+                        if (int(context.get("door_number", 0) or 0)
+                                != int(printed_door_number)):
+                            return False
+                    else:
+                        source_card = context.get("source_card")
+                        normalized_ability_text = re.sub(
+                            r"\s+", " ",
+                            str(self.effect_text or "").casefold()).strip(" .")
+                        if not normalized_ability_text:
+                            normalized_ability_text = re.sub(
+                                r"\s+", " ",
+                                f"{self.trigger_condition}, {self.effect}"
+                                .casefold()).strip(" .")
+                        matching_doors = []
+                        for door_number in (1, 2):
+                            door = getattr(
+                                source_card, f"door{door_number}", None) or {}
+                            door_text = re.sub(
+                                r"\s+", " ",
+                                str(door.get(
+                                    "oracle_text", "")).casefold()).strip()
+                            if (normalized_ability_text
+                                    and normalized_ability_text in door_text):
+                                matching_doors.append(door_number)
+                        if (len(matching_doors) != 1
+                                or int(context.get("door_number", 0) or 0)
+                                != matching_doors[0]):
+                            return False
+
                 # Second-person Room triggers belong only to events performed
                 # by the ability controller. check_abilities preserves the
                 # actor as event_controller before installing the source's
@@ -3823,6 +3888,14 @@ class StaticAbility(Ability):
 
     def _dynamic_affected_scope(self, effect_lower_clean):
         """Describe scopes whose membership must be recomputed each layer pass."""
+        if re.search(
+                r"\bcreatures you control have base power and toughness "
+                r"(?:are )?each equal to the number of creatures you control\b",
+                effect_lower_clean):
+            return {
+                'player': 'controller',
+                'all_card_types': ('creature',),
+            }
         if re.search(r"\bnonbasic lands?\b", effect_lower_clean):
             return {
                 'players': 'all',
@@ -3842,6 +3915,24 @@ class StaticAbility(Ability):
                     'all_card_types': required_types,
                 }
         return None
+
+    def _continuous_source_condition(self, extra_condition=None):
+        """Compose battlefield and Room-door activity with a layer condition."""
+        def condition(game_state):
+            controller = game_state.get_card_controller(self.card_id)
+            if (not controller
+                    or self.card_id not in controller.get("battlefield", [])):
+                return False
+            door_number = getattr(self, "room_door_number", None)
+            if door_number is not None:
+                source_card = game_state._safe_get_card(self.card_id)
+                door = (getattr(
+                    source_card, f"door{door_number}", None)
+                    if source_card else None)
+                if not door or not door.get("unlocked", False):
+                    return False
+            return bool(extra_condition(game_state)) if extra_condition else True
+        return condition
 
     def apply(self, game_state, affected_cards=None):
         """Register the static ability's effect with the LayerSystem. Validates controller."""
@@ -3878,6 +3969,18 @@ class StaticAbility(Ability):
 
         # Clean effect text for layer determination
         effect_lower_clean = self.effect.lower().strip('.—\u2014: ')
+
+        # Player rules such as maximum-hand-size permissions are continuous
+        # effects, but they do not belong to CR 613's object-characteristic
+        # layers.  The turn engine evaluates this rule dynamically from live
+        # battlefield text (including Room-door state), so registration is
+        # complete here and must not emit an unsupported-layer warning.
+        if re.fullmatch(
+                r"(?:you have no maximum hand size|"
+                r"untap each creature you control during each other "
+                r"player(?:'|\u2019)s untap step)", effect_lower_clean):
+            return True
+
         layer = self._determine_layer_for_effect(effect_lower_clean)
         dynamic_scope = self._dynamic_affected_scope(effect_lower_clean)
 
@@ -3903,10 +4006,11 @@ class StaticAbility(Ability):
                     'effect_text': self.effect_text, # Store original text
                     'source_ability': effect_lower_clean,
                     'duration': 'permanent',
-                    'condition': lambda gs_check: (self.card_id in controller.get("battlefield", [])), # Standard condition
                     'controller_id': controller,
                     **layer_data # Merge parsed layer, sublayer, type, value
                 }
+                final_data['condition'] = self._continuous_source_condition(
+                    final_data.get('condition'))
                 if dynamic_scope:
                     final_data['affected_scope'] = dynamic_scope
                 if game_state.layer_system.register_effect(final_data):
@@ -3937,10 +4041,11 @@ class StaticAbility(Ability):
                      'effect_text': self.effect_text,
                      'source_ability': effect_lower_clean,
                      'duration': 'permanent',
-                     'condition': lambda gs_check: (self.card_id in controller.get("battlefield", [])),
                      'controller_id': controller,
                      **parsed_data_single # Add sublayer, type, value
                  }
+                 effect_data['condition'] = self._continuous_source_condition(
+                     effect_data.get('condition'))
                  if dynamic_scope:
                      effect_data['affected_scope'] = dynamic_scope
                  if game_state.layer_system.register_effect(effect_data):
@@ -4082,6 +4187,18 @@ class StaticAbility(Ability):
         
     def _parse_layer7_effect(self, effect_lower):
         """Parse P/T effects for Layer 7."""
+        # Shared base-P/T definitions such as Porcelain Gallery apply to a
+        # live group rather than only to the source object.  The declarative
+        # affected scope is installed by ``apply``; layer 7a recomputes the
+        # value from the current creature count on every pass.
+        if re.search(
+                r"\bbase power and toughness (?:are )?each equal to "
+                r"the number of creatures you control\b", effect_lower):
+            return {
+                'sublayer': 'a',
+                'effect_type': 'set_pt_cda',
+                'effect_value': 'creature_count_self',
+            }
         # Layer 7a: Set Base P/T (e.g., from copy effects or abilities setting base)
         match = re.search(r"(?:base power and toughness|base power|base toughness)\s+(?:is|are)\s+(\d+)/(\d+)", effect_lower)
         if match:
@@ -4434,6 +4551,7 @@ class StaticAbility(Ability):
         pt_patterns = [
             r"([+\-]\d+)\s*/\s*([+\-]\d+)",  # +N/+M, -N/-M
             r"\b(base power and toughness|base power|base toughness)\s+(?:is|are)\b", # Set base P/T
+            r"\bbase power and toughness (?:are )?each equal to\b",
             r"\b(is|are|becomes)\s+\d+/\d+", # Set P/T to specific value
             r"(?:power and toughness are each equal to|power is equal to|toughness is equal to)", # CDA P/T setting
             r"switch.*power and toughness" # Switch P/T
@@ -5278,10 +5396,24 @@ class ReturnSourceFromGraveyardEffect(AbilityEffect):
     before the trigger resolves.
     """
 
-    def __init__(self, enters_tapped=False, condition=None):
+    _DESTINATIONS = frozenset({"battlefield", "hand"})
+
+    def __init__(self, enters_tapped=False, condition=None, *,
+                 destination="battlefield", optional=False):
+        destination = str(destination or "battlefield").lower()
+        if destination not in self._DESTINATIONS:
+            raise ValueError(
+                f"Unsupported source-bound return destination: "
+                f"{destination}")
         self.enters_tapped = enters_tapped
+        self.destination = destination
+        self.optional = bool(optional)
+        destination_text = (
+            "the battlefield" if destination == "battlefield"
+            else "your hand")
         super().__init__(
-            "Return this card from your graveyard to the battlefield",
+            f"{'You may return' if self.optional else 'Return'} this card "
+            f"from your graveyard to {destination_text}",
             condition)
         self.requires_target = False
 
@@ -5302,11 +5434,37 @@ class ReturnSourceFromGraveyardEffect(AbilityEffect):
         owner, zone = game_state.find_card_location(source_id)
         if owner is None or zone != "graveyard":
             return True
+        if self.optional:
+            game_state.choice_context = {
+                "type": "dig_select", "player": controller,
+                "options": [source_id], "remaining": 1, "selected": [],
+                "source_zone": "graveyard",
+                "destination": self.destination,
+                "rest_destination": "stay", "optional": True,
+                "move_cause": "source_bound_graveyard_return",
+                "source_bound_return": True,
+                "source_id": source_id,
+                "source_zone_generation": current_generation,
+                "resume_phase": game_state.phase,
+                "choice_page": 0,
+                "enters_tapped": bool(
+                    self.enters_tapped
+                    and self.destination == "battlefield"),
+            }
+            game_state.phase = game_state.PHASE_CHOOSE
+            game_state.priority_player = controller
+            game_state.priority_pass_count = 0
+            return True
+        destination_player = (
+            controller if self.destination == "battlefield" else owner)
         if not game_state.move_card(
-                source_id, owner, "graveyard", controller, "battlefield",
-                cause="source_bound_reanimate"):
+                source_id, owner, "graveyard", destination_player,
+                self.destination,
+                cause=("source_bound_reanimate"
+                       if self.destination == "battlefield"
+                       else "source_bound_graveyard_return")):
             return False
-        if self.enters_tapped:
+        if self.enters_tapped and self.destination == "battlefield":
             controller.setdefault("tapped_permanents", set()).add(source_id)
         return True
 
@@ -5318,32 +5476,86 @@ class ReanimateEffect(AbilityEffect):
     the battlefield destination hit the generic no-op (July 2026 parser
     expansion). Distinct effect so the card lands in play, not hand.
     """
-    def __init__(self, target_type="creature", from_zone="graveyard", enters_tapped=False, condition=None):
+    _PERMANENT_TYPES = frozenset({
+        "artifact", "battle", "creature", "enchantment", "land",
+        "planeswalker",
+    })
+
+    def __init__(self, target_type="creature", from_zone="graveyard",
+                 enters_tapped=False, condition=None, scope="target"):
         self.target_type = target_type.lower()
         self.from_zone = from_zone.lower()
         self.enters_tapped = enters_tapped
-        super().__init__(f"Return target {self.target_type} card from {self.from_zone} to the battlefield", condition)
-        self.requires_target = True
+        self.scope = str(scope or "target").lower()
+        if self.scope not in {"target", "all_yours"}:
+            raise ValueError(f"Unsupported reanimation scope: {self.scope}")
+        if self.scope == "all_yours":
+            effect_text = (
+                f"Return all {self.target_type} cards from your "
+                f"{self.from_zone} to the battlefield")
+        else:
+            effect_text = (
+                f"Return target {self.target_type} card from "
+                f"{self.from_zone} to the battlefield")
+        super().__init__(effect_text, condition)
+        self.requires_target = self.scope == "target"
+
+    def _matches_mass_type(self, game_state, card_id):
+        card = game_state._safe_get_card(card_id)
+        if card is None:
+            return False
+        if self.target_type == "card":
+            return True
+        card_types = {
+            str(card_type).lower()
+            for card_type in getattr(card, "card_types", [])}
+        if self.target_type == "permanent":
+            return bool(card_types.intersection(self._PERMANENT_TYPES))
+        return self.target_type in card_types
 
     def _apply_effect(self, game_state, source_id, controller, targets):
-        ids = []
-        if isinstance(targets, dict):
-            ids = list(targets.get("cards", []) or targets.get("creatures", []))
+        if self.scope == "all_yours":
+            ids = [
+                card_id for card_id in list(
+                    controller.get(self.from_zone, []))
+                if self._matches_mass_type(game_state, card_id)
+            ]
+        else:
+            ids = []
+            if isinstance(targets, dict):
+                ids = list(
+                    targets.get("cards", [])
+                    or targets.get("creatures", []))
         if not ids:
+            if self.scope == "all_yours":
+                return True
             logging.warning(f"ReanimateEffect: no target card in {targets}")
             return False
         revived = 0
+        all_succeeded = True
         for cid in ids:
-            loc = game_state.find_card_location(cid)
-            if not loc or loc[1] != self.from_zone:
-                logging.debug(f"ReanimateEffect: {cid} not in {self.from_zone} (in {loc}).")
-                continue
-            owner = loc[0]
+            if self.scope == "all_yours":
+                if cid not in controller.get(self.from_zone, []):
+                    all_succeeded = False
+                    continue
+                owner = controller
+            else:
+                loc = game_state.find_card_location(cid)
+                if not loc or loc[1] != self.from_zone:
+                    logging.debug(
+                        f"ReanimateEffect: {cid} not in {self.from_zone} "
+                        f"(in {loc}).")
+                    continue
+                owner = loc[0]
             # Reanimated cards enter under the CONTROLLER's control (owner keeps ownership).
             if game_state.move_card(cid, owner, self.from_zone, controller, "battlefield", cause="reanimate"):
                 revived += 1
                 if self.enters_tapped:
                     controller.setdefault("tapped_permanents", set()).add(cid)
+            else:
+                all_succeeded = False
+        if self.scope == "all_yours":
+            return all_succeeded and revived == len(ids)
         return revived > 0
 
 
@@ -5390,6 +5602,41 @@ class LoseLifeEffect(AbilityEffect):
             # Feed life-loss triggers (e.g. 'whenever an opponent loses life').
             game_state.trigger_ability(source_id, "LIFE_LOSS",
                                        {"player": p, "amount": amount, "controller": controller})
+        return True
+
+
+class DefenderAttackPermissionEffect(AbilityEffect):
+    """Let the resolving source creature ignore defender this turn."""
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "This creature can attack this turn as though it didn't have "
+            "defender", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        source = game_state._safe_get_card(source_id)
+        if source is None:
+            return True
+        expected_generation = self.resolution_context.get(
+            "source_zone_generation")
+        current_generation = int(getattr(
+            source, "_zone_change_generation", 0) or 0)
+        if (expected_generation is not None
+                and current_generation != int(expected_generation)):
+            logging.debug(
+                "Defender attack permission for %s lost its source object "
+                "after a zone change.", source_id)
+            return True
+        source_controller = game_state.get_card_controller(source_id)
+        if (source_controller is None
+                or source_id not in source_controller.get("battlefield", [])
+                or "creature" not in {
+                    str(card_type).lower()
+                    for card_type in getattr(source, "card_types", [])}):
+            return True
+        game_state.defender_attack_permissions[
+            source_id] = current_generation
         return True
 
 
@@ -5442,9 +5689,12 @@ class GainKeywordEffect(AbilityEffect):
 
 class DamageEffect(AbilityEffect):
     """Effect that deals damage to targets."""
-    def __init__(self, amount, target_type="any target", condition=None):
+    def __init__(self, amount, target_type="any target", condition=None,
+                 count_expr=None):
         target_type_str = str(target_type).lower() if target_type is not None else "any target"
-        if amount == "source_last_known_power":
+        if count_expr:
+            amount_str = f"the number of {count_expr}"
+        elif amount == "source_last_known_power":
             amount_str = "its last-known power"
         elif amount == "previous_target_power":
             amount_str = "the previous target's power"
@@ -5453,6 +5703,7 @@ class DamageEffect(AbilityEffect):
         super().__init__(f"Deal {amount_str} damage to {target_type_str}", condition)
         # Store original amount which might be 'x' or a number
         self.base_amount = amount
+        self.count_expr = count_expr
         self.target_type = target_type_str # e.g., "creature", "player", "any target", "each opponent"
         self.requires_target = "target" in self.target_type or "any" in self.target_type or "each" not in self.target_type
 
@@ -5481,7 +5732,24 @@ class DamageEffect(AbilityEffect):
         # --- X Cost Handling ---
         has_chosen_x = isinstance(targets, dict) and 'X' in targets
         x_value = targets.get('X', 0) if has_chosen_x else 0
-        if self.base_amount == 'x' and has_chosen_x:
+        if self.count_expr:
+            effective_amount = game_state.count_dynamic_quantity(
+                self.count_expr, controller, strict=True)
+            if effective_amount is None:
+                counters = game_state._ensure_fidelity_counters()
+                counters["unparsed_effects"] += 1
+                source = game_state._safe_get_card(source_id)
+                counters["unparsed_cards"].add(getattr(
+                    source, "name", f"card_{source_id}"))
+                logging.warning(
+                    "DamageEffect cannot resolve dynamic count %r for "
+                    "source %r. Failing closed.",
+                    self.count_expr, source_id)
+                return False
+            logging.debug(
+                "DamageEffect: dynamic count %r = %s.",
+                self.count_expr, effective_amount)
+        elif self.base_amount == 'x' and has_chosen_x:
             effective_amount = x_value
             logging.debug(f"DamageEffect: Using X={x_value} for damage amount.")
         elif self.base_amount == "source_last_known_power":
@@ -5905,7 +6173,8 @@ class DamageWithExileReplacementEffect(AbilityEffect):
 
 class AddCountersEffect(AbilityEffect):
     """Effect that adds counters to permanents or players."""
-    def __init__(self, counter_type, count=1, target_type="creature", condition=None):
+    def __init__(self, counter_type, count=1, target_type="creature",
+                 condition=None, min_targets=1, max_targets=1):
         count_str = ("X" if count == 'x' else "its power"
                      if count == "source_power" else str(count))
         target_prefix = "target " if "target" in str(target_type).lower() else ""
@@ -5917,6 +6186,8 @@ class AddCountersEffect(AbilityEffect):
         self.base_count = count
         self.target_type = target_type.lower() # Normalize
         self.requires_target = "target" in self.target_type
+        self.min_targets = max(0, int(min_targets))
+        self.max_targets = max(self.min_targets, int(max_targets))
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         # --- X Cost Handling ---
@@ -5956,6 +6227,8 @@ class AddCountersEffect(AbilityEffect):
         # --- Target Collection Logic (remains the same) ---
         if self.requires_target:
             if not targets or not any(v for v in targets.values()):
+                 if self.min_targets == 0:
+                     return True
                  logging.warning(f"AddCountersEffect requires targets, none provided/resolved: {targets}")
                  return False
             relevant_categories = set()
@@ -5996,6 +6269,8 @@ class AddCountersEffect(AbilityEffect):
             # Nontargeted aggregate instructions legally resolve when their
             # affected set is empty. Mandatory targeted effects still fail.
             if not self.requires_target:
+                return True
+            if self.min_targets == 0:
                 return True
             logging.warning(f"AddCountersEffect: No valid targets collected for '{self.effect_text}'. Targets: {targets}")
             return False
@@ -6341,6 +6616,82 @@ class CreateTokenEffect(AbilityEffect):
             created_context.setdefault("_created_object_ids", []).extend(
                 created_token_ids)
         return len(created_token_ids) > 0
+
+
+class CreateSourceCounterSizedTokenEffect(AbilityEffect):
+    """Create one X/X token using counters on this source object's LKI.
+
+    The ``where X`` rider is inseparable from the token instruction.  A dies
+    trigger normally resolves after its source has left the battlefield, so X
+    comes from the matching last-known-information snapshot rather than the
+    mutable card definition now sitting in the graveyard.
+    """
+
+    def __init__(self, token_clause, condition=None):
+        self.token_clause = str(token_clause or "").strip(" .")
+        super().__init__(
+            f"{self.token_clause}, where X is the number of counters on "
+            "this creature", condition)
+        self.requires_target = False
+
+    def _source_counters(self, game_state, source_id):
+        context = getattr(self, "resolution_context", {}) or {}
+        for key in ("source_last_known", "last_known"):
+            snapshot = context.get(key)
+            if (isinstance(snapshot, dict)
+                    and snapshot.get("card_id") == source_id
+                    and isinstance(snapshot.get("counters"), dict)):
+                return snapshot["counters"]
+
+        source = game_state._safe_get_card(source_id)
+        source_controller = game_state.get_card_controller(source_id)
+        if (source is not None and source_controller is not None
+                and source_id in source_controller.get("battlefield", [])):
+            counters = getattr(source, "counters", None)
+            if isinstance(counters, dict):
+                return counters
+        return None
+
+    def _fail_closed(self, game_state, source_id, reason):
+        CreateTokenEffect._record_unresolved_dynamic_count(
+            game_state, source_id)
+        self._report_support_issue(
+            game_state, source_id, reason, "unparsed")
+        logging.warning("%s Failing closed.", reason)
+        return False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        counters = self._source_counters(game_state, source_id)
+        if counters is None:
+            return self._fail_closed(
+                game_state, source_id,
+                "source-counter-sized token has no matching source LKI")
+
+        x_value = sum(
+            max(0, safe_int(amount, 0) or 0)
+            for amount in counters.values())
+        numeric_clause = re.sub(
+            r"\bx/x\b", f"{x_value}/{x_value}", self.token_clause,
+            count=1, flags=re.IGNORECASE)
+        if numeric_clause == self.token_clause:
+            return self._fail_closed(
+                game_state, source_id,
+                "source-counter-sized token lost its X/X token template")
+
+        # Reuse the established numeric token parser so colors, subtypes,
+        # keyword bits, token identity, entry events, and SBA behavior remain
+        # identical to ordinary printed numeric tokens.
+        from .ability_utils import EffectFactory
+        parsed = EffectFactory.create_effects(numeric_clause)
+        if (len(parsed) != 1
+                or not isinstance(parsed[0], CreateTokenEffect)):
+            return self._fail_closed(
+                game_state, source_id,
+                "source-counter-sized token did not reduce to one numeric "
+                "token effect")
+        return parsed[0].apply(
+            game_state, source_id, controller, targets,
+            context=self.resolution_context)
 
 
 class ManifestDreadEffect(AbilityEffect):
@@ -8726,13 +9077,40 @@ class CreateTokenCopyOfTargetEffect(AbilityEffect):
     """Create a token using a targeted permanent's copyable values."""
 
     def __init__(self, allowed_types=None, controller_only=True,
-                 condition=None):
+                 condition=None, additional_subtypes=None):
         allowed = set(allowed_types or {"artifact", "creature"})
         self.allowed_types = {str(card_type).lower() for card_type in allowed}
         self.controller_only = bool(controller_only)
-        super().__init__(
-            "Create a token that's a copy of target artifact or creature you control",
-            condition)
+        raw_subtypes = additional_subtypes or ()
+        if isinstance(raw_subtypes, str):
+            raw_subtypes = (raw_subtypes,)
+        elif isinstance(raw_subtypes, set):
+            raw_subtypes = sorted(raw_subtypes, key=lambda value: str(value))
+        normalized_subtypes = []
+        seen_subtypes = set()
+        for subtype in raw_subtypes:
+            normalized = str(subtype or "").strip().lower()
+            if normalized and normalized not in seen_subtypes:
+                normalized_subtypes.append(normalized)
+                seen_subtypes.add(normalized)
+        self.additional_subtypes = tuple(normalized_subtypes)
+
+        ordered_types = [
+            card_type for card_type in ("artifact", "creature")
+            if card_type in self.allowed_types]
+        ordered_types.extend(sorted(
+            self.allowed_types.difference(ordered_types)))
+        target_description = " or ".join(ordered_types) or "permanent"
+        effect_text = (
+            "Create a token that's a copy of target "
+            f"{target_description}"
+            f"{' you control' if self.controller_only else ''}")
+        if self.additional_subtypes:
+            subtype_text = " and ".join(self.additional_subtypes)
+            effect_text += (
+                f", except it's a {subtype_text} in addition to its other "
+                "types")
+        super().__init__(effect_text, condition)
         self.requires_target = True
 
     def _apply_effect(self, game_state, source_id, controller, targets):
@@ -8751,6 +9129,10 @@ class CreateTokenCopyOfTargetEffect(AbilityEffect):
             return False
 
         target_id = target_ids[0]
+        target_controller, target_zone = game_state.find_card_location(
+            target_id)
+        if target_zone != "battlefield":
+            return False
         target = game_state._safe_get_card(target_id)
         if not target:
             return False
@@ -8759,10 +9141,11 @@ class CreateTokenCopyOfTargetEffect(AbilityEffect):
             for card_type in getattr(target, 'card_types', [])}
         if not target_types.intersection(self.allowed_types):
             return False
-        if (self.controller_only
-                and game_state.get_card_controller(target_id) is not controller):
+        if self.controller_only and target_controller is not controller:
             return False
-        return game_state.create_token_copy(target, controller) is not None
+        return game_state.create_token_copy(
+            target, controller,
+            additional_subtypes=self.additional_subtypes) is not None
 
 
 class CreateTokenCopyOfSourceEffect(AbilityEffect):

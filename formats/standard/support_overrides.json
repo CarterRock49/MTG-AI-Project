@@ -1,7 +1,7 @@
 {
   "excluded": {},
-  "schema_version": 1,
-  "verified": [
+  "schema_version": 2,
+  "legacy_verified_claims": [
     "Aang, Swift Savior // Aang and La, Ocean's Fury",
     "Accumulate Wisdom",
     "Afterburner Expert",
@@ -98,5 +98,6 @@
     "Torch the Tower",
     "Turn Inside Out",
     "Winternight Stories"
-  ]
+  ],
+  "verified": {}
 }

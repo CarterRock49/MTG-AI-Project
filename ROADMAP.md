@@ -1,4 +1,4 @@
-# Playersim roadmap — current as of July 18, 2026
+# Playersim roadmap — current as of July 19, 2026
 
 ## Mission and scope
 
@@ -39,7 +39,7 @@ The current working tree is green at the following delivery gates:
 | Golden scenarios | 409/409 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
-| Discovered unit tests | 720/720 |
+| Discovered unit tests | 736/736 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
 | Observation schema | v3 / `6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137` |
 
@@ -54,6 +54,40 @@ closed. Card and deck analytics now preserve canonical card identity,
 player-relative turns, draw-aware rates, and atomic per-file persistence.
 Evaluator caches retain only static characteristics, while live state and
 perspective are recomputed for each decision.
+
+### Evidence-ledger reset and first trusted-card repair — July 19, 2026
+
+Support ledger/override schema v2 removed every name-only semantic
+certification. All 96 former names remain as `legacy_verified_claims` audit
+metadata, while all 4,702 cards are `semantic_status=unverified`. A future
+`verified` record must have no static issues and must pin Oracle identity and
+rules, an independent Oracle-text plus dynamic-probe surface inventory, exact
+surface coverage declarations, test-file/node hashes, and
+`exact_state_v1`. The validator executes each named assertion-bearing
+unittest exactly once and rejects stale, skipped, failing, assertionless, fake,
+or incomplete candidate evidence. A passing Python test cannot itself prove
+that every declared surface was semantically established, so promotion is
+hard-disabled until that mapping has a machine-verifiable artifact; nonempty
+`verified` overrides currently fail. The regenerated ledger's canonical SHA-256 is
+`ab98966df91afa68995a3f1dc08101cd955b2197920b8e4969f20e53f9401b70`.
+
+The first trusted-card pilot added permanent public-pipeline evidence for
+Afterburner Expert and Room unlock triggers. It found and repaired two concrete
+Roaring Furnace false-clean bugs: the trigger heard another Room or the wrong
+door, and variable damage silently defaulted to 1 instead of the live hand
+size. A duplicate-condition review then caught and repaired the corresponding
+false-negative risk for Rooms whose two halves both say “When you unlock this
+door.” Dynamic “damage equal to the number of” expressions now retain their
+quantity through resolution; supported counts resolve strictly and unsupported
+counts fail closed instead of dealing 1.
+
+The affected replay at
+`probe_runs/standard-affected-evidence-2026-07-19-v1/card_probe_report.json`
+contains four resumable artifacts: 0 failed, 4 coverage gaps, and 0 mechanical
+passes. The gaps are retained deliberately: generic Exhaust/Room trigger
+fixtures, full-Room unlock coverage, alternate Room-face registration, and
+split-layout paths are not yet complete. The report's canonical SHA-256 is
+`eac24b1f92bce0363fcbd17e8a2fc2c742869ca5e34cee99fd433813f69a865b`.
 
 ### Repair-affected schema-v3 replay — July 18, 2026
 
@@ -770,23 +804,26 @@ persists them beside statistics. Worst severity sticks per card. The builder
 must exclude crash/unparsed cards and distrust or down-weight partial-card
 statistics.
 
-Standard's pinned 4,702-card ledger, last measured July 17, contains:
+Standard's pinned 4,702-card schema-v2 ledger, measured July 19, contains:
 
 | Evidence class | Cards |
 | --- | ---: |
-| Verified | 96 |
-| Observed clean | 63 |
-| Unseen/static clean | 3,348 |
-| Partial | 745 |
-| Unparsed | 450 |
+| Semantic verified | 0 |
+| Semantic unverified | 4,702 |
+| Legacy name-only claims (overlapping audit metadata) | 96 |
+| Static observed clean | 119 |
+| Static unseen/clean | 3,417 |
+| Static partial | 833 |
+| Static unparsed | 333 |
 
-That is 74.6% static-clean but only 3.4% evidence-qualified. A clean manifest
-for the representative corpus does not prove unseen cards are faithful.
+That is 75.2% static-clean and 0% semantically verified. A clean manifest for
+the representative corpus does not prove unseen cards are faithful, and the 96
+legacy claims confer no qualification.
 
 Workflow: harvest → rank failures by real frequency/impact → write a failing
 scenario → implement the smallest reusable parser or exact-card fix → verify
-the ledger promotion. Untested subsystems remain suspect even when static
-classification is clean.
+the evidence contract before ledger promotion. Untested subsystems remain
+suspect even when static classification is clean.
 
 ### 3. Verification and replay — ✅ infrastructure, ◐ calibration
 
@@ -1123,6 +1160,11 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
 - Treat every probe result, including `execution_passed`, as bounded mechanical
   evidence; semantic status remains unverified until exact-state scenarios cover
   every distinct rules path.
+- Never copy a historical card name into `verified`. Candidate evidence
+  requires fresh Oracle/surface hashes, exact coverage equality, and passing
+  assertion-bearing test nodes, but promotion remains hard-locked until the
+  test-to-surface mapping is machine-verifiable. `legacy_verified_claims` is
+  audit metadata only.
 - Treat any warning, degraded observation, swallowed exception, or fidelity
   counter as a correctness failure until classified.
 - Keep masks and handlers on shared legality predicates and pin paged choices

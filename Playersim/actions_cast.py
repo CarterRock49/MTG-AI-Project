@@ -13,6 +13,40 @@ class CastingHandlersMixin:
 
     __slots__ = ()
 
+    def _canonical_room_cast_context(
+            self, card, card_id, incoming_context, player, source_zone,
+            source_index, required_face_index=None, extra_context=None):
+        """Validate a public Room announcement and discard untrusted flags."""
+        if not getattr(card, "is_room", False):
+            return dict(incoming_context or {})
+        incoming = dict(incoming_context or {})
+        face_index = incoming.get("room_cast_face_index")
+        if (len(getattr(card, "faces", []) or []) < 2
+                or face_index not in (0, 1)
+                or (required_face_index is not None
+                    and face_index != required_face_index)
+                or incoming.get("room_cast_door_number") != face_index + 1
+                or incoming.get("card_id") != card_id):
+            logging.warning(
+                "Rejected incomplete or mismatched public Room cast context "
+                "for %s.", getattr(card, "name", card_id))
+            return None
+
+        controller_id = "p1" if player is self.game_state.p1 else "p2"
+        base_context = {
+            "source_zone": source_zone,
+            "card_id": card_id,
+            "controller_id": controller_id,
+        }
+        if source_zone == "hand":
+            base_context["hand_idx"] = source_index
+        else:
+            base_context["source_idx"] = source_index
+        canonical = self._room_cast_contexts(card, base_context)[face_index]
+        if extra_context:
+            canonical.update(dict(extra_context))
+        return canonical
+
     def _handle_pay_offspring_cost(self, param, context=None, **kwargs):
         gs = self.game_state
         context = dict(context or {})
@@ -226,11 +260,14 @@ class CastingHandlersMixin:
         player = self._get_policy_player(context)
         context = dict(context or {})
         source_index = context.get("source_idx", param)
+        if (not isinstance(source_index, int)
+                or not 0 <= source_index < len(player.get("graveyard", []))):
+            return -0.15, False
+        live_card_id = player["graveyard"][source_index]
+        if (context.get("card_id") is not None
+                and context.get("card_id") != live_card_id):
+            return -0.15, False
         if context.get("harmonize_cast"):
-            if (not isinstance(source_index, int)
-                    or not 0 <= source_index < len(
-                        player.get("graveyard", []))):
-                return -0.15, False
             card_id = player["graveyard"][source_index]
             harmonize_cost = gs.harmonize_cost_for(player, card_id)
             if not harmonize_cost:
@@ -277,9 +314,6 @@ class CastingHandlersMixin:
             success = gs.cast_spell(card_id, player, context=cast_context)
             return (0.2, True) if success else (-0.1, False)
         if context.get("flashback_cast"):
-            if (not isinstance(source_index, int)
-                    or not 0 <= source_index < len(player.get("graveyard", []))):
-                return -0.15, False
             card_id = player["graveyard"][source_index]
             flashback_cost = gs.flashback_cost_for(player, card_id)
             if not flashback_cost:
@@ -293,9 +327,6 @@ class CastingHandlersMixin:
             success = gs.cast_spell(card_id, player, context=cast_context)
             return (0.2, True) if success else (-0.1, False)
         if context.get("graveyard_adventure_cast"):
-            if (not isinstance(source_index, int)
-                    or not 0 <= source_index < len(player.get("graveyard", []))):
-                return -0.15, False
             card_id = player["graveyard"][source_index]
             if not gs.has_graveyard_adventure_permission(player, card_id):
                 return -0.15, False
@@ -316,9 +347,6 @@ class CastingHandlersMixin:
             and gs.can_play_lands_from_graveyard(player))
         if not (has_emblem_permission or has_permanent_land_permission):
             return -0.15, False
-        if (not isinstance(source_index, int)
-                or not 0 <= source_index < len(player.get("graveyard", []))):
-            return -0.15, False
         card_id = player["graveyard"][source_index]
         card = gs._safe_get_card(card_id)
         if not card:
@@ -336,18 +364,25 @@ class CastingHandlersMixin:
         if not card_types.intersection(
                 {"creature", "artifact", "enchantment", "planeswalker", "battle"}):
             return -0.1, False
-        cast_context = dict(context or {})
-        cast_context.update({
-            "source_zone": "graveyard",
-            "source_idx": source_index,
-            "emblem_graveyard_cast": True,
-        })
+        if getattr(card, "is_room", False):
+            cast_context = self._canonical_room_cast_context(
+                card, card_id, context, player, "graveyard", source_index,
+                extra_context={"emblem_graveyard_cast": True})
+            if cast_context is None:
+                return -0.2, False
+        else:
+            cast_context = dict(context or {})
+            cast_context.update({
+                "source_zone": "graveyard",
+                "source_idx": source_index,
+                "emblem_graveyard_cast": True,
+            })
         success = gs.cast_spell(card_id, player, context=cast_context)
         return (0.2, True) if success else (-0.1, False)
 
     def _handle_play_spell(self, param, **kwargs):
         gs = self.game_state
-        context = kwargs.get('context', {})
+        context = dict(kwargs.get('context', {}) or {})
         player = self._get_policy_player(context)
         hand_idx = context.get('hand_idx', param)
 
@@ -374,8 +409,15 @@ class CastingHandlersMixin:
         card = gs._safe_get_card(card_id)
         if not card: return -0.2, False
 
-        if 'hand_idx' not in context: context['hand_idx'] = hand_idx
-        if 'source_zone' not in context: context['source_zone'] = 'hand'
+        if getattr(card, "is_room", False):
+            context = self._canonical_room_cast_context(
+                card, card_id, context, player, "hand", hand_idx,
+                required_face_index=0)
+            if context is None:
+                return -0.2, False
+        else:
+            if 'hand_idx' not in context: context['hand_idx'] = hand_idx
+            if 'source_zone' not in context: context['source_zone'] = 'hand'
 
         card_value = 0
         if self.card_evaluator:
@@ -424,28 +466,49 @@ class CastingHandlersMixin:
         player = self._get_policy_player(kwargs.get('context'))
         context = dict(kwargs.get('context', {}) or {})
         castable_options = gs.get_exile_cast_options(player)
+        option_index = context.get("exile_option_index", param)
 
-        if param >= len(castable_options):
-             logging.warning(f"CAST_FROM_EXILE: Invalid index {param}, only {len(castable_options)} available.")
+        if (not isinstance(option_index, int)
+                or not 0 <= option_index < len(castable_options)):
+             logging.warning(f"CAST_FROM_EXILE: Invalid index {option_index}, only {len(castable_options)} available.")
              return -0.2, False
 
-        option = castable_options[param]
+        option = castable_options[option_index]
         card_id = option["card_id"]
         card = gs._safe_get_card(card_id)
+        if (context.get("card_id") is not None
+                and context.get("card_id") != card_id):
+             return -0.2, False
         # Verify card still exists in player's exile (might have moved)
         if card_id not in player.get("exile",[]):
              logging.warning(f"CAST_FROM_EXILE: Card {card_id} no longer in {player['name']}'s exile.")
              return -0.15, False
 
-        context['source_zone'] = 'exile'
-        context['source_idx'] = option.get('source_idx', player['exile'].index(card_id))
-        if option.get("permission") == "plot":
-            context['use_alt_cost'] = 'plot'
-            context['plot_cast'] = True
-        elif option.get("permission") == "airbend":
-            context['use_alt_cost'] = 'exile_permission'
-            context['alternative_cost'] = option.get('alternative_cost', '{2}')
-            context['airbend_cast'] = True
+        permission = option.get("permission", "ordinary")
+        source_index = option.get('source_idx', player['exile'].index(card_id))
+        authorized_context = {
+            "exile_option_index": option_index,
+            "exile_permission": permission,
+        }
+        if permission == "plot":
+            authorized_context.update({
+                'use_alt_cost': 'plot', 'plot_cast': True})
+        elif permission == "airbend":
+            authorized_context.update({
+                'use_alt_cost': 'exile_permission',
+                'alternative_cost': option.get('alternative_cost', '{2}'),
+                'airbend_cast': True,
+            })
+        if getattr(card, "is_room", False):
+            context = self._canonical_room_cast_context(
+                card, card_id, context, player, "exile", source_index,
+                extra_context=authorized_context)
+            if context is None:
+                return -0.2, False
+        else:
+            context['source_zone'] = 'exile'
+            context['source_idx'] = source_index
+            context.update(authorized_context)
 
         card_value = 0
         if self.card_evaluator:
@@ -1283,18 +1346,39 @@ class CastingHandlersMixin:
     def _handle_cast_split(self, param, action_type, **kwargs):
         """Handler for casting split cards. (Updated Context)"""
         gs = self.game_state
-        player = gs.p1 if gs.agent_is_p1 else gs.p2
-        context = kwargs.get('context', {}) # Use context passed in
+        context = dict(kwargs.get('context', {}) or {})
+        player = self._get_policy_player(context)
         hand_idx = context.get('hand_idx', param)
 
         if isinstance(hand_idx, int) and 0 <= hand_idx < len(player["hand"]):
             card_id = player["hand"][hand_idx]
             card = gs._safe_get_card(card_id)
             if not card: return -0.2, False
+            if (context.get('card_id') is not None
+                    and context.get('card_id') != card_id):
+                return -0.2, False
 
             # Update context based on action_type
             context["source_zone"] = "hand"
             context["hand_idx"] = hand_idx # Add hand_idx for clarity
+            if getattr(card, 'is_room', False):
+                face_index = {
+                    "CAST_LEFT_HALF": 0,
+                    "CAST_RIGHT_HALF": 1,
+                }.get(action_type)
+                if (face_index is None
+                        or len(getattr(card, 'faces', []) or []) < 2
+                        or context.get(
+                            'room_cast_face_index', face_index) != face_index
+                        or context.get(
+                            'room_cast_door_number', face_index + 1)
+                        != face_index + 1):
+                    return -0.2, False
+                context = self._canonical_room_cast_context(
+                    card, card_id, context, player, "hand", hand_idx,
+                    required_face_index=face_index)
+                if context is None:
+                    return -0.2, False
             if action_type == "CAST_LEFT_HALF": context["cast_left_half"] = True
             elif action_type == "CAST_RIGHT_HALF": context["cast_right_half"] = True
             elif action_type == "CAST_FUSE": context["fuse"] = True

@@ -29,6 +29,22 @@ class ReplacementEffectSystem:
         """Register a replacement effect with improved indexing."""
         effect_id = f"replace_{self.effect_counter}"
         self.effect_counter += 1
+
+        # Text-derived Room effects are registered one face at a time.  Keep
+        # that printed source identity on the effect so the common application
+        # path can make a locked door inert without teaching every individual
+        # replacement parser about Rooms.
+        room_provenance = getattr(
+            self, '_text_registration_room_provenance', None)
+        if (room_provenance
+                and effect_data.get('source_id')
+                == room_provenance.get('source_id')):
+            effect_data.setdefault(
+                'room_face_index', room_provenance.get('face_index'))
+            effect_data.setdefault(
+                'room_door_number', room_provenance.get('door_number'))
+            effect_data.setdefault(
+                'room_face_name', room_provenance.get('face_name'))
         
         # Add current turn for duration tracking
         effect_data['start_turn'] = self.game_state.turn
@@ -68,11 +84,39 @@ class ReplacementEffectSystem:
         self.active_effects = [effect for effect in self.active_effects 
                             if effect.get('effect_id') != effect_id]
 
+    def _room_replacement_effect_is_active(self, effect):
+        """Return whether a face-stamped Room replacement can function."""
+        door_number = effect.get('room_door_number')
+        if door_number is None:
+            return True
+        try:
+            door_number = int(door_number)
+        except (TypeError, ValueError):
+            return False
+        if door_number not in (1, 2):
+            return False
+
+        source_id = effect.get('source_id')
+        source_card = self.game_state._safe_get_card(source_id)
+        if not source_card or not getattr(source_card, 'is_room', False):
+            return False
+        try:
+            location = self.game_state.find_card_location(source_id)
+        except Exception:
+            return False
+        if not location or location[1] != 'battlefield':
+            return False
+
+        door = getattr(source_card, f'door{door_number}', None)
+        return bool(isinstance(door, dict) and door.get('unlocked', False))
+
     def damage_cannot_be_prevented(self, event_context=None):
         """Whether an active continuous rule forbids damage prevention."""
         context = dict(event_context or {})
         for effect in self.active_effects:
             if not effect.get('stops_damage_prevention'):
+                continue
+            if not self._room_replacement_effect_is_active(effect):
                 continue
             if self._is_effect_expired(
                     effect, self.game_state.turn, self.game_state.phase):
@@ -120,7 +164,8 @@ class ReplacementEffectSystem:
         
         return card_id, []
     
-    def register_card_replacement_effects(self, card_id, player):
+    def register_card_replacement_effects(
+            self, card_id, player, *, _oracle_text=None):
         """
         Scan a card's text for replacement effects and register them.
 
@@ -135,17 +180,75 @@ class ReplacementEffectSystem:
         if not card or not hasattr(card, 'oracle_text'):
             return []
 
-        # Text-derived registration runs at game setup AND again on every
-        # battlefield entry; the re-registrations stacked duplicate live
-        # effects. One registration per card per game. (v1: a control change
-        # does not re-register; these self-replacements key on the card.)
-        if not hasattr(self, '_text_registered_cards'):
-            self._text_registered_cards = set()
-        if card_id in self._text_registered_cards:
-            return []
-        self._text_registered_cards.add(card_id)
+        internal_text_registration = _oracle_text is not None
+        if not internal_text_registration:
+            # Text-derived registration runs at game setup AND again on every
+            # battlefield entry; the re-registrations stacked duplicate live
+            # effects. One outer registration per physical card covers every
+            # Room face, while a later zone-entry rebuild remains possible
+            # after remove_effects_by_source clears this guard.
+            if not hasattr(self, '_text_registered_cards'):
+                self._text_registered_cards = set()
+            if card_id in self._text_registered_cards:
+                return []
+            self._text_registered_cards.add(card_id)
 
-        oracle_text = card.oracle_text
+            if getattr(card, 'is_room', False):
+                face_sources = []
+                faces = getattr(card, 'faces', None) or []
+                if faces:
+                    for face_index, face in enumerate(faces[:2]):
+                        if isinstance(face, dict):
+                            face_text = face.get('oracle_text', '') or ''
+                            face_name = face.get('name', '')
+                        else:
+                            face_text = getattr(face, 'oracle_text', '') or ''
+                            face_name = getattr(face, 'name', '')
+                        if face_text.strip():
+                            face_sources.append({
+                                'text': face_text,
+                                'face_index': face_index,
+                                'door_number': face_index + 1,
+                                'face_name': face_name,
+                            })
+                elif (card.oracle_text or '').strip():
+                    face_sources.append({
+                        'text': card.oracle_text,
+                        'face_index': 0,
+                        'door_number': 1,
+                        'face_name': getattr(card, 'name', ''),
+                    })
+
+                if face_sources:
+                    registered_effects = []
+                    sentinel = object()
+                    previous_provenance = getattr(
+                        self, '_text_registration_room_provenance',
+                        sentinel)
+                    try:
+                        for source in face_sources:
+                            self._text_registration_room_provenance = {
+                                'source_id': card_id,
+                                'face_index': source['face_index'],
+                                'door_number': source['door_number'],
+                                'face_name': source['face_name'],
+                            }
+                            registered_effects.extend(
+                                self.register_card_replacement_effects(
+                                    card_id, player,
+                                    _oracle_text=source['text']))
+                    finally:
+                        if previous_provenance is sentinel:
+                            delattr(
+                                self,
+                                '_text_registration_room_provenance')
+                        else:
+                            self._text_registration_room_provenance = (
+                                previous_provenance)
+                    return registered_effects
+
+        oracle_text = (
+            _oracle_text if internal_text_registration else card.oracle_text)
         # Split/aftermath cards keep their text on faces; the battlefield
         # object is the front face (Callous Sell-Sword // Burn Together).
         if not (oracle_text or '').strip():
@@ -157,7 +260,6 @@ class ReplacementEffectSystem:
                 if face_text.strip():
                     oracle_text = face_text
                     break
-        source_name = card.name if hasattr(card, 'name') else f"Card {card_id}"
         registered_effects = []
 
         low_hand_draw_bonus = re.search(
@@ -225,9 +327,14 @@ class ReplacementEffectSystem:
         # life-gain replacement here doubled printed lifelink while missing
         # layer-granted lifelink.
 
-        # Check for deathtouch
-        if "deathtouch" in oracle_text.lower() or (hasattr(card, 'keywords') and
-                                                len(card.keywords) > 2 and card.keywords[2]):
+        # Check for intrinsic deathtouch.  A Room face can mention granting
+        # deathtouch inside a triggered instruction (Widow's Walk); that does
+        # not give the Room itself a damage replacement.
+        if (not getattr(card, 'is_room', False)
+                and ("deathtouch" in oracle_text.lower()
+                     or (hasattr(card, 'keywords')
+                         and len(card.keywords) > 2
+                         and card.keywords[2]))):
             effect_id = self._register_deathtouch_effect(card_id, player)
             if effect_id:
                 registered_effects.append(effect_id)
@@ -584,6 +691,8 @@ class ReplacementEffectSystem:
             valid_effects = []
             for effect in applicable_effects:
                 # ... (expiration check) ...
+                if not self._room_replacement_effect_is_active(effect):
+                    continue
                 if self._is_effect_expired(effect, self.game_state.turn, self.game_state.phase):
                      logging.debug(f"Skipping expired replacement effect {effect.get('effect_id')}.")
                      continue
@@ -683,6 +792,8 @@ class ReplacementEffectSystem:
                 # --- END ADDED ---
                 for effect in ordered_effects:
                     if effect.get('effect_id') in applied_ids: continue
+                    if not self._room_replacement_effect_is_active(effect):
+                        continue
                     condition_met = True
                     if 'condition' in effect and callable(effect['condition']):
                         try: condition_met = effect['condition'](dict(modified_context))

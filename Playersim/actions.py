@@ -576,8 +576,12 @@ class ActionHandler(
             generated_context = dict(
                 self.action_reasons_with_context.get(action_idx, {}).get(
                     "context", {}) or {})
-        action_context = generated_context
-        action_context.update(kwargs.get('context', {}) or {})
+        # A caller may supplement a generated action, but it may not rewrite
+        # the source/face/permission contract that made the action legal.
+        # Copy both dictionaries so neither the mask nor the caller-owned
+        # object is mutated while handlers add transaction details.
+        action_context = dict(kwargs.get('context', {}) or {})
+        action_context.update(generated_context)
         # --- Merge context (remains the same) ---
         if hasattr(gs, 'phase'): # Check phase exists first
                 if gs.phase == gs.PHASE_TARGETING and hasattr(gs, 'targeting_context') and gs.targeting_context:

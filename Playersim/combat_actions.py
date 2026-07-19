@@ -492,10 +492,9 @@ class CombatActionHandler:
              return False
 
         # Defender check (using central keyword check)
-        if self._has_keyword(card, "defender"):
-             # Simple exception check - might be overridden by layer effects
-             if "can attack as though it didn't have defender" not in getattr(card, 'oracle_text', '').lower():
-                  return False
+        if (self._has_keyword(card, "defender")
+                and not gs.has_defender_attack_permission(card_id)):
+            return False
 
         # --- Check Layer System Effects for 'cant_attack' ---
         cant_attack = False
@@ -1398,17 +1397,9 @@ class CombatActionHandler:
         for idx, card_id in enumerate(player["battlefield"]):
             if idx >= 20:  # Limit to 20 creatures
                 break
-                
-            card = gs._safe_get_card(card_id)
-            if (card and hasattr(card, 'card_types') and 'creature' in card.card_types and 
-                card_id not in player.get("tapped_permanents", set())):
-                
-                # Check for summoning sickness
-                has_haste = self._has_keyword(card, "haste")
-                if card_id in player.get("entered_battlefield_this_turn", set()) and not has_haste:
-                    continue  # Skip creatures with summoning sickness
-                    
-                available_creatures.append((idx, card_id, card))
+            if self.is_valid_attacker(card_id):
+                available_creatures.append(
+                    (idx, card_id, gs._safe_get_card(card_id)))
         
         # For each battle card, add action using indices 462-466 (for battle 0-4)
         for battle_idx, battle_id, battle_card in enumerate(battle_cards):

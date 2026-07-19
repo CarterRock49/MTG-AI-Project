@@ -278,6 +278,13 @@ class AbilityHandler:
         door_data['unlocked'] = True
         logging.info(f"Unlocked Door {door_to_unlock_num} for Room {room_card.name}")
 
+        # Continuous effects from the newly unlocked face begin functioning
+        # immediately. Recompute them before trigger conditions inspect the
+        # post-unlock game state.
+        if hasattr(gs, 'layer_system') and gs.layer_system:
+             gs.layer_system.invalidate_cache()
+             gs.layer_system.apply_all_effects()
+
         # --- Check if fully unlocked ---
         parsed_doors = [
             door for door in (
@@ -324,13 +331,9 @@ class AbilityHandler:
                       self.check_abilities(room_id, "ROOM_COMPLETED", chapter_context)
 
 
-        # Re-register abilities if unlocking changes available effects or state
-        self._parse_and_register_abilities(room_id, room_card)
-        # Trigger layer update if needed
-        if hasattr(gs, 'layer_system') and gs.layer_system:
-             gs.layer_system.invalidate_cache()
-             # gs.layer_system.apply_all_effects() # Redundant if applying below
-
+        # Both Room faces are registered once with explicit door provenance.
+        # Re-parsing here would duplicate already-installed continuous effects;
+        # changing the door flag is enough to activate their live conditions.
         gs.phase = gs.PHASE_PRIORITY # Reset priority
         # Let game loop handle layer application
 
@@ -456,7 +459,8 @@ class AbilityHandler:
             logging.debug(f"No base_ability in context, searching on card {card.name}...")
             # Fallback: Find the first activated ability with "choose" or potential modal structure
             for ability in self.registered_abilities.get(card_id, []):
-                if isinstance(ability, ActivatedAbility):
+                if (isinstance(ability, ActivatedAbility)
+                        and self._room_ability_is_active(ability, card)):
                      effect_lower = getattr(ability, 'effect', '').lower()
                      if "choose" in effect_lower or '•' in effect_lower: # Basic check for modal marker
                           base_ability = ability
@@ -753,6 +757,11 @@ class AbilityHandler:
             activated_ability_counter = 0 # Tracks the index for non-mana activated abilities
 
             try:
+                # Each text block carries its printed source provenance.  Most
+                # cards expose exactly one active face; a Room is one
+                # permanent whose two doors have independently functioning
+                # rules text, so both faces must be parsed without changing
+                # current_face.
                 oracle_text_sources = []
                 keywords_from_card_data = []
                 processed_special_text_markers = "" # Track text handled by Spree, Class etc.
@@ -763,9 +772,26 @@ class AbilityHandler:
                 is_mdfc = card_layout == 'modal_dfc'
 
                 # Handle different card layouts/types to get text sources
-                if hasattr(card, 'faces') and card.faces and current_face_index < len(card.faces):
+                if (getattr(card, 'is_room', False)
+                        and getattr(card, 'faces', None)):
+                    for face_index, face_data in enumerate(card.faces[:2]):
+                        oracle_text_sources.append({
+                            'text': face_data.get('oracle_text', ''),
+                            'face_index': face_index,
+                            'door_number': face_index + 1,
+                        })
+                    # Scryfall's top-level keyword list is not face-scoped.
+                    # Treating that union as unconditional would let a locked
+                    # door grant a keyword. Room face text is still parsed
+                    # clause-by-clause below.
+                    keywords_from_card_data = []
+                elif hasattr(card, 'faces') and card.faces and current_face_index < len(card.faces):
                     face_data = card.faces[current_face_index]
-                    oracle_text_sources.append(face_data.get('oracle_text', ''))
+                    oracle_text_sources.append({
+                        'text': face_data.get('oracle_text', ''),
+                        'face_index': current_face_index,
+                        'door_number': None,
+                    })
                     keywords_from_card_data = face_data.get('keywords', [])
                     # Special text handling for MDFC faces if needed (e.g., Spree)
                     # if is_mdfc and 'spree' in (kw.lower() for kw in keywords_from_card_data):
@@ -774,7 +800,12 @@ class AbilityHandler:
                     current_level_data = card.get_current_class_data()
                     if current_level_data:
                         # Class abilities are cumulative, get all abilities for the current level
-                        oracle_text_sources.extend(current_level_data.get('all_abilities', []))
+                        oracle_text_sources.extend({
+                            'text': ability_text,
+                            'face_index': None,
+                            'door_number': None,
+                        } for ability_text in current_level_data.get(
+                            'all_abilities', []))
                         # These sources are already the exact unlocked Class
                         # ability rows; no level declaration text reaches the
                         # generic parser.  Processed markers are reserved for
@@ -782,7 +813,11 @@ class AbilityHandler:
                         # source text (Spree and Tiered).
                     if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
                 else: # Normal card or other layout type
-                    oracle_text_sources.append(getattr(card, 'oracle_text', ''))
+                    oracle_text_sources.append({
+                        'text': getattr(card, 'oracle_text', ''),
+                        'face_index': None,
+                        'door_number': None,
+                    })
                     if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
                     # Spree marker (check if base card itself is Spree)
                     if hasattr(card, 'is_spree') and card.is_spree:
@@ -841,7 +876,18 @@ class AbilityHandler:
 
                 # --- Process Oracle Text Blocks ---
                 processed_clauses_hashes = set()
-                for text_block in oracle_text_sources:
+                for source_descriptor in oracle_text_sources:
+                    # Accept the former string shape defensively for callers
+                    # that construct a source list out of tree.
+                    if isinstance(source_descriptor, str):
+                        source_descriptor = {
+                            'text': source_descriptor,
+                            'face_index': None,
+                            'door_number': None,
+                        }
+                    text_block = source_descriptor.get('text', '')
+                    source_face_index = source_descriptor.get('face_index')
+                    source_door_number = source_descriptor.get('door_number')
                     if not text_block or not isinstance(text_block, str): continue
 
                     # Remove reminder text early. Only eat spaces/tabs around
@@ -892,7 +938,10 @@ class AbilityHandler:
                         if re.match(r'^[+\-\u2212]?\d+\s*:', clause_text):
                             continue
 
-                        clause_hash = hash(clause_text)
+                        # The same words printed on both Room halves are two
+                        # distinct abilities.  Door provenance is therefore
+                        # part of the deduplication identity.
+                        clause_hash = (source_door_number, clause_text)
                         if clause_hash in processed_clauses_hashes: continue # Skip identical text blocks
                         processed_clauses_hashes.add(clause_hash) # Mark original clause as processed
 
@@ -964,6 +1013,13 @@ class AbilityHandler:
                                         new_activated_count_sub = 0
                                         for ability in created_abilities_sub:
                                             setattr(ability, 'source_card', card)
+                                            if source_door_number is not None:
+                                                setattr(
+                                                    ability, 'room_face_index',
+                                                    source_face_index)
+                                                setattr(
+                                                    ability, 'room_door_number',
+                                                    source_door_number)
                                             abilities_list.append(ability)
                                             if isinstance(ability, ActivatedAbility) and not isinstance(ability, ManaAbility):
                                                 new_activated_count_sub += 1
@@ -986,6 +1042,13 @@ class AbilityHandler:
                                 # Attach card reference if not already done by classify function
                                 if not getattr(ability, 'source_card', None):
                                     setattr(ability, 'source_card', card)
+                                if source_door_number is not None:
+                                    setattr(
+                                        ability, 'room_face_index',
+                                        source_face_index)
+                                    setattr(
+                                        ability, 'room_door_number',
+                                        source_door_number)
                                 abilities_list.append(ability)
                                 # Increment activated counter ONLY if a NEW ActivatedAbility was added
                                 if isinstance(ability, ActivatedAbility) and not isinstance(ability, ManaAbility):
@@ -1073,7 +1136,8 @@ class AbilityHandler:
                         r"\bwhile\s+this\s+card\s+is\s+in\s+your\s+graveyard\b",
                         trigger_text))
                     returns_self_from_graveyard = bool(re.search(
-                        r"return\s+this\s+card\s+from\s+your\s+graveyard\s+to\s+the\s+battlefield",
+                        r"return\s+this\s+card\s+from\s+your\s+graveyard\s+to\s+"
+                        r"(?:the\s+battlefield|your\s+hand)",
                         effect_text))
                     source_moves_in_trigger = bool(re.search(
                         r"\b(?:dies|is discarded|is put into (?:a|your) graveyard|"
@@ -1392,7 +1456,13 @@ class AbilityHandler:
             card and hasattr(card, 'card_types')
             and any(ct in permanent_types for ct in card.card_types))
         action_verb_pattern = r'\b(destroy|exile|counter|draw|discard|create|search|tap|untap|target|deal|sacrifice|return.*?to|put.*?on|put.*?into|attach|manifest|look at)\b'
-        has_action_verb = bool(re.search(action_verb_pattern, text_lower))
+        is_untap_step_rule = bool(re.fullmatch(
+            r"untap each creature you control during each other "
+            r"player(?:'|\u2019)s untap step\.?",
+            text_lower_stripped))
+        has_action_verb = (
+            bool(re.search(action_verb_pattern, text_lower))
+            and not is_untap_step_rule)
 
         if is_permanent_type and not activated_ability_instance and not is_likely_triggered and not has_action_verb:
              try:
@@ -1979,7 +2049,13 @@ class AbilityHandler:
 
         # Add check for common action verbs unlikely in static abilities
         action_verbs = [r'\b(destroy|exile|counter|draw|discard|create|search|tap|untap|target|deal|sacrifice)\b']
-        is_likely_action = any(re.search(verb, text_lower_for_check) for verb in action_verbs)
+        is_untap_step_rule = bool(re.fullmatch(
+            r"untap each creature you control during each other "
+            r"player(?:'|\u2019)s untap step\.?",
+            text_lower_for_check.strip()))
+        is_likely_action = (
+            any(re.search(verb, text_lower_for_check) for verb in action_verbs)
+            and not is_untap_step_rule)
 
         # --- ADDED: Check if the source card is a type that can have inherent static abilities ---
         permanent_types = {'creature', 'artifact', 'enchantment', 'land', 'planeswalker', 'battle', 'class', 'room'}
@@ -2105,6 +2181,19 @@ class AbilityHandler:
          # Convert defaultdict back to regular dict for consistency if needed
          return dict(produced)
     
+    def _room_ability_is_active(self, ability, source_card=None):
+        """Return whether a face-scoped Room ability currently functions."""
+        door_number = getattr(ability, 'room_door_number', None)
+        if door_number is None:
+            return True
+        if source_card is None:
+            source_card = self.game_state._safe_get_card(
+                getattr(ability, 'card_id', None))
+        if not source_card or not getattr(source_card, 'is_room', False):
+            return False
+        door = getattr(source_card, f"door{door_number}", None)
+        return bool(door and door.get('unlocked', False))
+
     def check_abilities(self, event_origin_card_id, event_type, context=None):
         """
         Checks all registered triggered abilities to see if they should trigger based on the event.
@@ -2188,6 +2277,8 @@ class AbilityHandler:
 
              source_card = gs._safe_get_card(card_id) # Fetch card for context checks
              if not source_card: continue # Card disappeared?
+             if not self._room_ability_is_active(ability, source_card):
+                 continue
 
              # --- Zone Filtering Logic ---
              # Check if the ability can trigger from its *current* zone for the *given* event
@@ -2316,7 +2407,12 @@ class AbilityHandler:
                 and layer_system.source_has_lost_all_abilities(card_id)):
             return []
         card_abilities = self.registered_abilities.get(card_id, [])
-        return [ability for ability in card_abilities if isinstance(ability, ActivatedAbility)]
+        source_card = self.game_state._safe_get_card(card_id)
+        return [
+            ability for ability in card_abilities
+            if (isinstance(ability, ActivatedAbility)
+                and self._room_ability_is_active(ability, source_card))
+        ]
 
     def suppresses_target_protection(self, controller, target_id, protection):
         """Return whether a live source creates this targeting exception."""
@@ -2332,7 +2428,10 @@ class AbilityHandler:
             if (getattr(gs, 'layer_system', None)
                     and gs.layer_system.source_has_lost_all_abilities(source_id)):
                 continue
+            source_card = gs._safe_get_card(source_id)
             for ability in self.registered_abilities.get(source_id, []):
+                if not self._room_ability_is_active(ability, source_card):
+                    continue
                 if (getattr(ability, "targeting_override", None) == protection
                         and getattr(ability, "scope", None) == "opponent_creatures"):
                     return True
@@ -2372,6 +2471,14 @@ class AbilityHandler:
         """
         effect_text = getattr(
             ability, "effect", getattr(ability, "effect_text", "")) or ""
+        # Retargeting a copy is an optional property of the copy instruction,
+        # not a target required to announce the original activation.  Remove
+        # only this bounded rider; any genuine ``copy target ...`` instruction
+        # remains in the targeting surface.
+        effect_text = re.sub(
+            r"\byou may choose new targets? for "
+            r"(?:the|that|this|those) cop(?:y|ies)\b\.?",
+            "", effect_text, flags=re.IGNORECASE).strip()
         lowered = effect_text.lower()
         if "earthbend" in lowered and "target" not in lowered:
             return "Target land you control"
@@ -2380,6 +2487,9 @@ class AbilityHandler:
     def activated_ability_functions_from_zone(
             self, card_id, ability, controller):
         """Whether this activated ability functions from the source's zone."""
+        if not self._room_ability_is_active(
+                ability, self.game_state._safe_get_card(card_id)):
+            return False
         expected_zone = str(
             getattr(ability, 'zone', 'battlefield') or 'battlefield').lower()
         holder, actual_zone = self.game_state.find_card_location(card_id)
@@ -3146,6 +3256,8 @@ class AbilityHandler:
 
         costs = []
         for ability in self.registered_abilities.get(card_id, []):
+            if not self._room_ability_is_active(ability, live_card):
+                continue
             if getattr(ability, 'keyword', None) == "ward":
                 cost = getattr(ability, 'keyword_value', None)
                 if cost and cost != "ward_generic":

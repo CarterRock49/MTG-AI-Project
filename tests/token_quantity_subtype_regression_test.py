@@ -17,6 +17,7 @@ for path in (REPO_ROOT, REPO_ROOT / "tests"):
 from scenario_test import fresh, inject_into_zone, inject_real_card  # noqa: E402
 from Playersim.ability_types import (  # noqa: E402
     CreateTokenEffect,
+    DamageEffect,
     TriggeredAbility,
     UnsupportedEffect,
 )
@@ -504,6 +505,131 @@ class TokenQuantitySubtypeRegressionTest(unittest.TestCase):
             "Pinnacle Starcage",
             game_state.fidelity_counters["unparsed_cards"])
 
+    def test_variable_damage_parser_retains_frozen_count_expressions(self):
+        cases = (
+            ("equipped creatures you control", "defending player"),
+            ("lands you control", "target creature"),
+            ("swamps you control", "any target"),
+            ("creatures you control", "target creature or planeswalker"),
+            ("+1/+1 counters on him", "any other target"),
+            ("cards in your hand", "target creature an opponent controls"),
+            (
+                "creatures you control plus the number of equipment you "
+                "control",
+                "target creature",
+            ),
+            (
+                "instant and sorcery cards in your graveyard",
+                "target creature or planeswalker",
+            ),
+            (
+                "noncreature, nonland cards in your graveyard",
+                "target creature an opponent controls",
+            ),
+            ("artifacts you control", "target creature an opponent controls"),
+        )
+        for count_expr, target in cases:
+            with self.subTest(count_expr=count_expr):
+                effects = EffectFactory.create_effects(
+                    "This creature deals damage equal to the number of "
+                    f"{count_expr} to {target}.")
+                damage_effects = [
+                    effect for effect in effects
+                    if isinstance(effect, DamageEffect)]
+                self.assertEqual(len(damage_effects), 1)
+                effect = damage_effects[0]
+                self.assertEqual(effect.count_expr, count_expr)
+                self.assertEqual(effect.base_amount, 0)
+
+    def test_dynamic_damage_counts_hand_at_resolution_including_zero(self):
+        game_state = fresh(38417)
+        controller = game_state.p1
+        opponent = game_state.p2
+        controller["hand"] = []
+        source_id = inject_into_zone(game_state, controller, {
+            "name": "Hand Size Damage Source",
+            "mana_cost": "{1}{R}",
+            "cmc": 2,
+            "type_line": "Enchantment",
+            "oracle_text": "",
+            "color_identity": ["R"],
+        }, "battlefield")
+        target_id = inject_into_zone(game_state, opponent, {
+            "name": "Hand Size Damage Target",
+            "mana_cost": "{1}",
+            "cmc": 1,
+            "type_line": "Creature - Wall",
+            "oracle_text": "",
+            "color_identity": [],
+            "power": 0,
+            "toughness": 20,
+        }, "battlefield")
+        effect = EffectFactory.create_effects(
+            "This enchantment deals damage equal to the number of cards in "
+            "your hand to target creature an opponent controls.")[0]
+        self.assertIsInstance(effect, DamageEffect)
+        self.assertEqual(effect.count_expr, "cards in your hand")
+        self.assertEqual(game_state.count_dynamic_quantity(
+            effect.count_expr, controller, strict=True), 0)
+
+        targets = {"creatures": [target_id]}
+        self.assertTrue(effect.apply(
+            game_state, source_id, controller, targets, context={}))
+        self.assertNotIn(target_id, opponent["damage_counters"])
+
+        for index in range(3):
+            inject_into_zone(game_state, controller, {
+                "name": f"Hand Count Fixture {index}",
+                "mana_cost": "",
+                "cmc": 0,
+                "type_line": "Sorcery",
+                "oracle_text": "",
+                "color_identity": [],
+            }, "hand")
+        self.assertEqual(game_state.count_dynamic_quantity(
+            effect.count_expr, controller, strict=True), 3)
+        self.assertTrue(effect.apply(
+            game_state, source_id, controller, targets, context={}))
+        self.assertEqual(opponent["damage_counters"].get(target_id), 3)
+
+    def test_unsupported_dynamic_damage_fails_closed_without_one_damage(self):
+        game_state = fresh(38418)
+        controller = game_state.p1
+        opponent = game_state.p2
+        source_id = inject_into_zone(game_state, controller, {
+            "name": "Unsupported Dynamic Damage Source",
+            "mana_cost": "{2}{R}",
+            "cmc": 3,
+            "type_line": "Creature - Warrior",
+            "oracle_text": "",
+            "color_identity": ["R"],
+            "power": 3,
+            "toughness": 3,
+        }, "battlefield")
+        effect = EffectFactory.create_effects(
+            "This creature deals damage equal to the number of equipped "
+            "creatures you control to defending player.")[0]
+        self.assertIsInstance(effect, DamageEffect)
+        self.assertEqual(
+            effect.count_expr, "equipped creatures you control")
+        self.assertIsNone(game_state.count_dynamic_quantity(
+            effect.count_expr, controller, strict=True))
+
+        life_before = opponent["life"]
+        fidelity_before = game_state.fidelity_counters["unparsed_effects"]
+        with patch("Playersim.ability_types.logging.warning") as warning:
+            self.assertFalse(effect.apply(
+                game_state, source_id, controller,
+                {"players": ["p2"]}, context={}))
+        self.assertEqual(warning.call_count, 1)
+        self.assertEqual(opponent["life"], life_before)
+        self.assertEqual(
+            game_state.fidelity_counters["unparsed_effects"],
+            fidelity_before + 1)
+        self.assertIn(
+            "Unsupported Dynamic Damage Source",
+            game_state.fidelity_counters["unparsed_cards"])
+
     def test_exact_graveyard_token_counts_keep_type_conjunctions(self):
         cases = (
             (
@@ -750,6 +876,77 @@ class TokenQuantitySubtypeRegressionTest(unittest.TestCase):
                 self.assertIn(
                     card_name,
                     game_state.fidelity_counters["unparsed_cards"])
+
+    def test_source_counter_sized_token_uses_matching_last_known_counters(self):
+        clause = (
+            "Create an X/X blue Spirit creature token with flying, where X "
+            "is the number of counters on this creature.")
+        effects = EffectFactory.create_effects(
+            clause, source_name="Unwilling Vessel")
+        self.assertEqual(len(effects), 1)
+        effect = effects[0]
+        self.assertEqual(
+            type(effect).__name__, "CreateSourceCounterSizedTokenEffect")
+        self.assertFalse(effect.requires_target)
+
+        game_state = fresh(38481)
+        controller = game_state.p1
+        source_id = "departed-unwilling-vessel"
+        before = set(controller.get("tokens", []))
+        self.assertTrue(effect.apply(
+            game_state, source_id, controller, {}, context={
+                "last_known": {
+                    "card_id": source_id,
+                    "counters": {"possession": 2, "stun": 1},
+                },
+            }))
+        created = self._created_tokens(game_state, controller, before)
+        self.assertEqual(len(created), 1)
+        token = game_state._safe_get_card(created[0])
+        self.assertEqual(token.name, "Spirit Token")
+        self.assertEqual((token.power, token.toughness), (3, 3))
+        self.assertEqual(token.card_types, ["creature"])
+        self.assertEqual(token.subtypes, ["spirit"])
+        self.assertEqual(token.colors, [0, 1, 0, 0, 0])
+        self.assertTrue(game_state.check_keyword(created[0], "flying"))
+
+    def test_source_counter_sized_token_distinguishes_zero_from_missing_lki(self):
+        clause = (
+            "Create an X/X blue Spirit creature token with flying, where X "
+            "is the number of counters on this creature.")
+
+        zero_state = fresh(38482)
+        zero_controller = zero_state.p1
+        zero_source = "zero-counter-vessel"
+        zero_effect = EffectFactory.create_effects(clause)[0]
+        before = set(zero_controller.get("tokens", []))
+        self.assertTrue(zero_effect.apply(
+            zero_state, zero_source, zero_controller, {}, context={
+                "last_known": {
+                    "card_id": zero_source,
+                    "counters": {},
+                },
+            }))
+        created = self._created_tokens(zero_state, zero_controller, before)
+        self.assertEqual(len(created), 1)
+        token_id = created[0]
+        token = zero_state._safe_get_card(token_id)
+        self.assertEqual((token.power, token.toughness), (0, 0))
+        zero_state.check_state_based_actions()
+        self.assertNotIn(token_id, zero_controller["battlefield"])
+
+        missing_state = fresh(38483)
+        missing_controller = missing_state.p1
+        missing_effect = EffectFactory.create_effects(clause)[0]
+        fidelity_before = missing_state.fidelity_counters[
+            "unparsed_effects"]
+        self.assertFalse(missing_effect.apply(
+            missing_state, "missing-vessel", missing_controller, {},
+            context={}))
+        self.assertEqual(missing_controller.get("tokens", []), [])
+        self.assertEqual(
+            missing_state.fidelity_counters["unparsed_effects"],
+            fidelity_before + 1)
 
     def test_twitching_doll_unsupported_activation_pays_no_costs(self):
         game_state = fresh(38479)

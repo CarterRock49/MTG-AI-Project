@@ -301,6 +301,14 @@ class Card:
             
     def reset_state_on_zone_change(self):
          """Reset temporary states when card leaves battlefield (e.g., flip, morph)."""
+         # A Room entering a new zone is a new object. Neither door remains
+         # unlocked across a bounce, recast, exile, or graveyard move.
+         if getattr(self, 'is_room', False):
+             for door_number in (1, 2):
+                 door = getattr(self, f'door{door_number}', None)
+                 if door:
+                     door['unlocked'] = False
+
          # Transforming double-faced cards return to their front face in every
          # zone other than the battlefield or stack. Keep the printed snapshot
          # in sync so the layer system cannot restore the face that just left.

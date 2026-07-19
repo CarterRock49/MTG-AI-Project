@@ -300,6 +300,29 @@ class EnhancedManaSystem:
         
         return effects
 
+    def _permanent_rules_text_for_costs(self, permanent):
+        """Return only the permanent rules text currently affecting costs."""
+        active_rules_text = getattr(
+            self.game_state, "_active_permanent_rules_text", None)
+        if callable(active_rules_text):
+            return str(active_rules_text(permanent) or "")
+        return str(getattr(permanent, "oracle_text", "") or "")
+
+    @staticmethod
+    def _spell_colors_for_cast(card, context=None):
+        """Return the announced Room face's colors, or printed card colors."""
+        printed_colors = getattr(card, "colors", [0, 0, 0, 0, 0])
+        if not getattr(card, "is_room", False) or not isinstance(context, dict):
+            return printed_colors
+        face_colors = context.get("room_cast_face_colors")
+        if (not isinstance(face_colors, (list, tuple))
+                or len(face_colors) != 5
+                or not all(
+                    isinstance(value, (bool, int)) and int(value) in (0, 1)
+                    for value in face_colors)):
+            return printed_colors
+        return [int(bool(value)) for value in face_colors]
+
     def spell_characteristics_for_cast(self, card, context=None):
         """Return the announced spell's types, subtypes, and Flying status.
 
@@ -416,10 +439,11 @@ class EnhancedManaSystem:
             return effects
 
         # Get info for conditional checks - use getattr for safety
-        oracle_text = getattr(permanent, 'oracle_text', '').lower()
+        oracle_text = self._permanent_rules_text_for_costs(permanent).lower()
         target_card_types = getattr(target_card, 'card_types', [])
         target_card_subtypes = getattr(target_card, 'subtypes', [])
-        target_card_colors = getattr(target_card, 'colors', [0, 0, 0, 0, 0]) # Default to colorless if missing
+        target_card_colors = self._spell_colors_for_cast(
+            target_card, context=context)
         perm_name = getattr(permanent, 'name', f"Card {permanent_id}")
 
         momo_reduction = re.search(
@@ -996,7 +1020,8 @@ class EnhancedManaSystem:
                 if not battlefield_card or not hasattr(battlefield_card, 'oracle_text'):
                     continue
                     
-                oracle_text = battlefield_card.oracle_text.lower()
+                oracle_text = self._permanent_rules_text_for_costs(
+                    battlefield_card).lower()
                 
                 # Trinisphere effect
                 if "each spell with mana value less than" in oracle_text and "has a mana value of" in oracle_text:
@@ -1900,6 +1925,8 @@ class EnhancedManaSystem:
             return self._normalize_mana_cost(cost)
         
         reduced_cost = self._normalize_mana_cost(cost)
+        target_card_colors = self._spell_colors_for_cast(
+            card, context=context)
         
         # Check for cost reduction effects on the battlefield
         for battlefield_id in player["battlefield"]:
@@ -1907,7 +1934,8 @@ class EnhancedManaSystem:
             if not battlefield_card or not hasattr(battlefield_card, 'oracle_text'):
                 continue
                 
-            oracle_text = battlefield_card.oracle_text.lower()
+            oracle_text = self._permanent_rules_text_for_costs(
+                battlefield_card).lower()
             
             # Check for generic cost reduction
             if "spells you cast cost" in oracle_text and "less to cast" in oracle_text:
@@ -1922,7 +1950,7 @@ class EnhancedManaSystem:
             for color, symbol in zip(['white', 'blue', 'black', 'red', 'green'], ['W', 'U', 'B', 'R', 'G']):
                 if f"{color} spells you cast cost" in oracle_text and "less to cast" in oracle_text:
                     # Check if spell is the right color
-                    if hasattr(card, 'colors') and card.colors[list('WUBRG').index(symbol)]:
+                    if target_card_colors[list('WUBRG').index(symbol)]:
                         match = re.search(r"cost \{(\d+)\} less", oracle_text)
                         if match:
                             reduction = int(match.group(1))
@@ -1984,7 +2012,8 @@ class EnhancedManaSystem:
                 if not battlefield_card or not hasattr(battlefield_card, 'oracle_text'):
                     continue
                     
-                oracle_text = battlefield_card.oracle_text.lower()
+                oracle_text = self._permanent_rules_text_for_costs(
+                    battlefield_card).lower()
                 
                 # Tax effects like "Spells cost {1} more to cast"
                 if "spells cost" in oracle_text and "more to cast" in oracle_text:
@@ -2143,6 +2172,8 @@ class EnhancedManaSystem:
         
         increased_cost = self._normalize_mana_cost(cost)
         opponent = gs.p2 if player == gs.p1 else gs.p1
+        target_card_colors = self._spell_colors_for_cast(
+            card, context=context)
         
         # Check for cost increasing effects on the battlefield for all players
         for battlefield_player in [gs.p1, gs.p2]:
@@ -2153,7 +2184,8 @@ class EnhancedManaSystem:
                 if not battlefield_card or not hasattr(battlefield_card, 'oracle_text'):
                     continue
                     
-                oracle_text = battlefield_card.oracle_text.lower()
+                oracle_text = self._permanent_rules_text_for_costs(
+                    battlefield_card).lower()
                 
                 # Basic tax effects
                 if "spells cost" in oracle_text and "more to cast" in oracle_text:
@@ -2169,7 +2201,7 @@ class EnhancedManaSystem:
                 for color, symbol in zip(['white', 'blue', 'black', 'red', 'green'], ['W', 'U', 'B', 'R', 'G']):
                     if f"{color} spells" in oracle_text and "cost" in oracle_text and "more" in oracle_text:
                         # Check if spell is the right color
-                        if hasattr(card, 'colors') and card.colors[list('WUBRG').index(symbol)]:
+                        if target_card_colors[list('WUBRG').index(symbol)]:
                             match = re.search(r"cost \{(\d+)\} more", oracle_text)
                             if match:
                                 increase = int(match.group(1))

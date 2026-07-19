@@ -295,6 +295,7 @@ class EffectFactory:
         "kaya, spirits' justice",
         "kitsa, otterball elite",
         "loki laufeyson",
+        "pit automaton",
         "pyromancer's goggles",
         "ral, crackling wit",
         "rimefire torque",
@@ -520,6 +521,12 @@ class EffectFactory:
         source_key = str(source_name or "").strip().casefold()
         lowered = effect_text.lower()
 
+        if re.fullmatch(
+                r"\s*this creature can attack this turn as though it "
+                r"didn(?:'|\u2019)t have defender\.?\s*", lowered):
+            from .ability_types import DefenderAttackPermissionEffect
+            return [DefenderAttackPermissionEffect()]
+
         # A kicked "deals N ... instead" instruction is one replacement
         # choice, not two independent damage events.  Parse it before generic
         # sentence splitting so the base and kicked values cannot stack.
@@ -550,6 +557,22 @@ class EffectFactory:
         sequence_surface = re.sub(
             r"\([^()]*\)", " ", effect_text, flags=re.DOTALL)
         sequence_surface = re.sub(r"\s+", " ", sequence_surface).strip()
+
+        # A token whose X/X is defined by counters on the source must keep the
+        # ``where X`` rider attached to the creation instruction.  The generic
+        # comma splitter would otherwise manufacture a fixed 1/1 token and a
+        # separate unsupported rider.  This bounded Oracle template is
+        # source-bound but not card-name-bound.
+        source_counter_token = re.fullmatch(
+            r"(?P<token>create(?:s)?\s+(?:a|an|one)\s+x/x\s+.+?\s+"
+            r"creature\s+tokens?(?:\s+with\s+[^,.;]+)?)\s*,\s*"
+            r"where\s+x\s+is\s+the\s+number\s+of\s+counters\s+on\s+"
+            r"(?:this creature|it)\.?",
+            sequence_surface, re.IGNORECASE)
+        if source_counter_token:
+            from .ability_types import CreateSourceCounterSizedTokenEffect
+            return [CreateSourceCounterSizedTokenEffect(
+                source_counter_token.group("token"))]
 
         # These current Standard cards express variable token quantities that
         # the generic parser cannot derive from live state. Some never capture
@@ -697,7 +720,8 @@ class EffectFactory:
         # "would create ... tokens" preamble as an ordinary CreateTokenEffect
         # and mutate state before a later copy fragment fails (Mirrormind
         # Crown and Moonlit Meditation). The exact Three Steps Ahead template
-        # is the sole generic target-copy instruction implemented here;
+        # and a bounded subtype-addition exception are the generic target-copy
+        # instructions implemented here;
         # Colorstorm's dedicated whole-effect route has already returned
         # above, and real Offspring uses its flagged trigger resolver.
         coupled_token_copy = re.search(
@@ -711,6 +735,22 @@ class EffectFactory:
         # return through the exact supported branch on its recursive call.
         if (coupled_token_copy
                 and not re.match(r"\s*spree\b", lowered)):
+            subtype_addition_copy = re.fullmatch(
+                r"\s*create(?:s)?\s+a\s+token\s+"
+                r"that(?:['\u2019]s|\s+is)\s+a\s+copy\s+of\s+"
+                r"target\s+creature\s+you\s+control\s*,\s*except\s+"
+                r"it(?:['\u2019]s|\s+is)\s+(?:a|an)\s+"
+                r"(?P<subtype>[a-z][a-z'\u2019-]*"
+                r"(?:\s+[a-z][a-z'\u2019-]*)*?)\s+in\s+addition\s+to\s+"
+                r"its\s+other\s+(?:creature\s+)?types\s*\.?\s*",
+                lowered)
+            if subtype_addition_copy:
+                from .ability_types import CreateTokenCopyOfTargetEffect
+                return [CreateTokenCopyOfTargetEffect(
+                    allowed_types={"creature"}, controller_only=True,
+                    additional_subtypes=(
+                        subtype_addition_copy.group("subtype"),))]
+
             exact_target_copy = re.fullmatch(
                 r"\s*create(?:s)?\s+a\s+token\s+"
                 r"that(?:['\u2019]s|\s+is)\s+a\s+copy\s+of\s+"
@@ -1741,6 +1781,28 @@ class EffectFactory:
                          r'(?<=\.)\s+(?=(?i:create\s+(?:a|an|one)\s+(?:cursed|monster|royal|sorcerer|young\s+hero|virtuous|wicked)\s+role token\b))|'
                          r'\s*—\s*|\s*\u2014\s*')
         split_text = re.sub(r'\s*\([^()]*\)\s*', ' ', effect_text).strip('. ')
+        # A dynamic damage quantity is one semantic noun phrase. Preserve
+        # conjunctions and commas inside it until the instruction splitter has
+        # finished, then restore them before parsing the effect.
+        dynamic_damage_comma_marker = "__DYNAMIC_DAMAGE_COMMA__"
+        dynamic_damage_and_marker = "__DYNAMIC_DAMAGE_AND__"
+        dynamic_damage_quantity = re.compile(
+            r"(?P<prefix>\bdeals?\s+damage\s+equal\s+to\s+the\s+"
+            r"number\s+of\s+)(?P<count>.+?)(?P<suffix>\s+to\s+\S)",
+            re.IGNORECASE)
+
+        def protect_dynamic_damage_quantity(match):
+            protected_count = match.group("count").replace(
+                ",", dynamic_damage_comma_marker)
+            protected_count = re.sub(
+                r"\s+and\s+",
+                f" {dynamic_damage_and_marker} ",
+                protected_count, flags=re.IGNORECASE)
+            return (match.group("prefix") + protected_count
+                    + match.group("suffix"))
+
+        split_text = dynamic_damage_quantity.sub(
+            protect_dynamic_damage_quantity, split_text)
         # A comma that introduces the characteristics of a named legendary
         # token is part of the same instruction. Protect that delimiter and
         # any comma inside the printed name (for example, ``Primo, the
@@ -1787,6 +1849,8 @@ class EffectFactory:
         for raw_part in parts:
             part = raw_part.replace(token_color_and_marker, "and")
             part = part.replace(token_noun_comma_marker, ",").strip()
+            part = part.replace(dynamic_damage_comma_marker, ",")
+            part = part.replace(dynamic_damage_and_marker, "and")
             if not part:
                 continue
             subject_match = re.match(
@@ -1928,10 +1992,29 @@ class EffectFactory:
             # Damage
             elif re.search(r"\b(deals?)\b.*\bdamage\b", clause_lower):
                 amount_match = re.search(r"deals?\s+(\d+|x)\s+damage", clause_lower)
+                dynamic_amount_prefix = re.search(
+                    r"deals?\s+damage\s+equal\s+to\s+the\s+number\s+of\s+",
+                    clause_lower)
+                dynamic_amount_match = re.search(
+                    r"deals?\s+damage\s+equal\s+to\s+the\s+number\s+of\s+"
+                    r"(?P<count>.+?)\s+to\s+(?=\S)",
+                    clause_lower)
                 amount = 1 # Default if not specified
+                count_expr = None
                 if amount_match:
                     amount_str = amount_match.group(1)
                     amount = 'x' if amount_str == 'x' else text_to_number(amount_str)
+                elif dynamic_amount_prefix:
+                    # Preserve the quantity expression until resolution. The
+                    # strict resolver can then distinguish a supported zero
+                    # from an unsupported expression instead of silently
+                    # degrading variable damage to the legacy default of 1.
+                    amount = 0
+                    count_expr = (
+                        dynamic_amount_match.group("count")
+                        if dynamic_amount_match
+                        else clause_lower[dynamic_amount_prefix.end():]
+                    ).strip(" .,;")
                 elif "damage equal to its power" in clause_lower:
                     amount = (
                         "previous_target_power"
@@ -1963,7 +2046,8 @@ class EffectFactory:
                 elif "player" in target_desc or "opponent" in target_desc: target_type="player"
                 elif "planeswalker" in target_desc: target_type="planeswalker"
                 elif "battle" in target_desc: target_type="battle"
-                created_effect = DamageEffect(amount, target_type=target_type) # Pass 'x' or number
+                created_effect = DamageEffect(
+                    amount, target_type=target_type, count_expr=count_expr)
 
             # Destroy
             elif re.search(r"\b(destroy(?:s)?)\b\s+(target|all|each)", clause_lower):
@@ -2431,6 +2515,14 @@ class EffectFactory:
             # A source-bound "this card" instruction is not targeted and
             # follows the exact graveyard object that created the trigger.
             elif re.search(
+                    r"return\s+this\s+card\s+from\s+your\s+graveyard\s+to\s+your\s+hand",
+                    clause_lower):
+                created_effect = ReturnSourceFromGraveyardEffect(
+                    destination="hand",
+                    optional=bool(re.search(
+                        r"\bmay\s+return\b", clause_lower)))
+
+            elif re.search(
                     r"return\s+this\s+card\s+from\s+your\s+graveyard\s+to\s+the\s+battlefield",
                     clause_lower):
                 created_effect = ReturnSourceFromGraveyardEffect(
@@ -2439,13 +2531,40 @@ class EffectFactory:
             # Reanimation: "return ... from (your/a) graveyard to the battlefield".
             # Must come before the bounce branch (which handles "to hand").
             elif re.search(r"return\s+.*from\s+(?:your|a|target player's)?\s*graveyard\s+to\s+the\s+battlefield", clause_lower):
-                tt = "creature"
-                if "artifact" in clause_lower: tt = "artifact"
-                elif "enchantment" in clause_lower: tt = "enchantment"
-                elif "permanent" in clause_lower: tt = "permanent"
-                elif "card" in clause_lower and "creature" not in clause_lower: tt = "card"
-                tapped = "tapped" in clause_lower
-                created_effect = ReanimateEffect(target_type=tt, from_zone="graveyard", enters_tapped=tapped)
+                mass_own_graveyard = bool(re.search(
+                    r"\breturn\s+all\b.*\bfrom\s+your\s+graveyard\b",
+                    clause_lower))
+                simple_creature_mass = bool(re.fullmatch(
+                    r"\s*return\s+all\s+creature\s+cards\s+from\s+your\s+"
+                    r"graveyard\s+to\s+the\s+battlefield\.?\s*",
+                    clause_lower))
+                if mass_own_graveyard and not simple_creature_mass:
+                    # Mass movement needs an exact supported filter.  Do not
+                    # reinterpret land cards as every card or discard printed
+                    # qualifiers such as mana value / chosen creature type.
+                    from .ability_types import UnsupportedEffect
+                    reason = (
+                        "unsupported mass reanimation instruction: "
+                        f"{clause_clean[:100]}")
+                    if source_name:
+                        from .card_support import report_unsupported
+                        report_unsupported(
+                            source_name, reason, severity="partial")
+                    created_effect = UnsupportedEffect(
+                        clause_clean, reason=reason, severity="partial")
+                else:
+                    tt = "creature"
+                    if "artifact" in clause_lower: tt = "artifact"
+                    elif "enchantment" in clause_lower: tt = "enchantment"
+                    elif "permanent" in clause_lower: tt = "permanent"
+                    elif ("card" in clause_lower
+                          and "creature" not in clause_lower):
+                        tt = "card"
+                    created_effect = ReanimateEffect(
+                        target_type=tt, from_zone="graveyard",
+                        enters_tapped="tapped" in clause_lower,
+                        scope=("all_yours" if simple_creature_mass
+                               else "target"))
 
             # Sacrifice / Edict: "sacrifice a <type>", "target player sacrifices
             # a <type>", "each player/opponent sacrifices a <type>".
@@ -2765,7 +2884,18 @@ class EffectFactory:
                                                    for value in targets.values()))
                       target_type = "target permanent" if has_prior_targets else "self"
 
-                 created_effect = AddCountersEffect(counter_type, count, target_type=target_type) # Pass 'x' or number
+                 optional_targets = re.search(
+                     r"\bup to\s+(one|two|three|four|five|\d+)\s+target\b",
+                     clause_lower)
+                 max_targets = 1
+                 if optional_targets:
+                     max_targets = text_to_number(optional_targets.group(1))
+                     if not isinstance(max_targets, int) or max_targets < 1:
+                         max_targets = 1
+                 created_effect = AddCountersEffect(
+                     counter_type, count, target_type=target_type,
+                     min_targets=0 if optional_targets else 1,
+                     max_targets=max_targets) # Pass 'x' or number
 
             # Counter Spell
             elif re.search(r"\bcounter(?:s)?\b\s+target", clause_lower):

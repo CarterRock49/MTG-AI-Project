@@ -27,7 +27,9 @@ class CombatHandlersMixin:
         # Use GameState's _has_haste method which likely checks LayerSystem
         if card_id in me.get("entered_battlefield_this_turn", set()) and not self._has_haste(card_id): return False
         # Check defender keyword via centralized check
-        if self._has_keyword(card, "defender"): return False
+        if (self._has_keyword(card, "defender")
+                and not gs.has_defender_attack_permission(card_id)):
+            return False
         return True
 
     def find_optimal_attack(self):
@@ -75,12 +77,7 @@ class CombatHandlersMixin:
         if self.combat_handler:
             can_attack = self.combat_handler.is_valid_attacker(card_id)
         else: # Fallback
-            if 'creature' in getattr(card, 'card_types', []):
-                 tapped_set = player.get("tapped_permanents", set())
-                 entered_set = player.get("entered_battlefield_this_turn", set())
-                 has_haste = self._has_keyword(card, "haste")
-                 if card_id not in tapped_set and not (card_id in entered_set and not has_haste):
-                      can_attack = True
+            can_attack = self.is_valid_attacker(card_id)
 
         if not hasattr(gs, 'current_attackers'): gs.current_attackers = []
         if not hasattr(gs, 'planeswalker_attack_targets'): gs.planeswalker_attack_targets = {}

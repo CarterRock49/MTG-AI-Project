@@ -1935,6 +1935,24 @@ class ChoiceHandlersMixin:
                 return 0.05, True
             source_zone = ctx.get('source_zone', 'library_implicit')
             destination = ctx.get('destination', 'hand')
+            if ctx.get('source_bound_return'):
+                source_id = ctx.get('source_id')
+                source = gs._safe_get_card(source_id)
+                expected_generation = ctx.get('source_zone_generation')
+                current_generation = int(getattr(
+                    source, '_zone_change_generation', 0) or 0)
+                source_owner, current_zone = gs.find_card_location(source_id)
+                if (card_id != source_id or source is None
+                        or expected_generation is None
+                        or current_generation != int(expected_generation)
+                        or source_owner is not player
+                        or current_zone != source_zone):
+                    # The optional decision belongs to the exact source object
+                    # that opened it.  If that object has changed zones, the
+                    # stale choice finishes as a no-op instead of following a
+                    # later incarnation carrying the same database id.
+                    self._finish_dig_select_choice(ctx)
+                    return 0.0, True
             if not gs.move_card(
                     card_id, player, source_zone, player, destination,
                     cause=ctx.get('move_cause', 'dig')):

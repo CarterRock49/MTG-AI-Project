@@ -134,6 +134,43 @@ class SelfDiesTriggerIdentityRegressionTest(unittest.TestCase):
         self.assertEqual(permissions[0]["granted_turn"], game_state.turn)
         self.assertGreater(permissions[0]["expires_turn"], game_state.turn)
 
+    def test_unwilling_vessel_token_uses_frozen_mixed_counter_lki(self):
+        game_state = fresh(seed=35004)
+        controller = game_state.p1
+        vessel_id = inject_real_card(
+            game_state, controller, "Unwilling Vessel", "battlefield")
+        vessel = game_state._safe_get_card(vessel_id)
+        vessel.counters = {"possession": 2, "stun": 1}
+        game_state.ability_handler.active_triggers = []
+
+        self.assertTrue(game_state.move_card(
+            vessel_id, controller, "battlefield", controller,
+            "graveyard", cause="destroy"))
+        queued = self._dies_triggers(game_state, vessel_id)
+        self.assertEqual(len(queued), 1)
+        self.assertEqual(
+            queued[0][2]["last_known"]["counters"],
+            {"possession": 2, "stun": 1})
+
+        # The graveyard object is not the object that died. Resolution must
+        # use the frozen event snapshot, not mutable current card state.
+        vessel.counters.clear()
+        game_state.ability_handler.process_triggered_abilities()
+        self.assertEqual(len(game_state.stack), 1)
+        self.assertTrue(game_state.resolve_top_of_stack())
+
+        spirit_ids = [
+            token_id for token_id in controller.get("tokens", [])
+            if token_id in controller.get("battlefield", [])
+            and game_state._safe_get_card(token_id).name == "Spirit Token"
+        ]
+        self.assertEqual(len(spirit_ids), 1)
+        spirit = game_state._safe_get_card(spirit_ids[0])
+        self.assertEqual((spirit.power, spirit.toughness), (3, 3))
+        self.assertEqual(spirit.subtypes, ["spirit"])
+        self.assertEqual(spirit.colors, [0, 1, 0, 0, 0])
+        self.assertTrue(game_state.check_keyword(spirit_ids[0], "flying"))
+
     def test_controlled_creature_dies_watcher_still_hears_the_matching_event(self):
         game_state = fresh(seed=35003)
         controller, opponent = game_state.p1, game_state.p2

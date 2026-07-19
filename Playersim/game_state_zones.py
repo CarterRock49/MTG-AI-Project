@@ -830,6 +830,7 @@ class GameStateZonesMixin:
         # ... (Keep existing LTB logic) ...
         if actual_from_zone == "battlefield" and from_player:
             self.prepared_cards.discard(card_id)
+            self.defender_attack_permissions.pop(card_id, None)
             for player in (self.p1, self.p2):
                 if player:
                     player.get("targeted_permanents_this_turn", set()).discard(card_id)
@@ -963,6 +964,22 @@ class GameStateZonesMixin:
         enter_trigger_context = {'controller': final_destination_player, 'from_zone': actual_from_zone, 'to_zone': final_destination_zone, 'cause': cause, **event_context } # Pass merged context
 
         if final_destination_zone == "battlefield":
+            # Casting either half of a Room unlocks exactly that door as the
+            # permanent enters. Keep the combined Room identity/current_face;
+            # only the independent door-state dictionaries change.
+            room_cast_door = event_context.get("room_cast_door_number")
+            if (card and getattr(card, "is_room", False)
+                    and cause == "spell_resolution"
+                    and event_context.get("was_cast")
+                    and room_cast_door in (1, 2)):
+                for door_number in (1, 2):
+                    door = getattr(card, f"door{door_number}", None)
+                    if door:
+                        door["unlocked"] = door_number == room_cast_door
+                event_context["room_cast_door_unlocked_on_entry"] = True
+                enter_trigger_context[
+                    "room_cast_door_unlocked_on_entry"] = True
+
             if (card and getattr(card, "layout", "") == "prepare"
                     and re.search(r"\benters prepared\b",
                                   getattr(card, "oracle_text", ""),

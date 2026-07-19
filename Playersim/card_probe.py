@@ -1132,6 +1132,50 @@ def _trigger_condition_match_score(
     return (len(printed_set & runtime_set) / len(union)) if union else 0.0
 
 
+def _nested_trigger_activated_surface(
+        unmatched: dict, discovered: Sequence[dict]) -> dict | None:
+    """Match a non-boundary trigger lexeme to its containing activation.
+
+    Delayed and reflexive instructions can begin with ``When`` inside an
+    activated ability's effect.  They are not independent printed abilities
+    that exist before the activation resolves.  Attribute only exact lexical
+    containment in one registered ordinary activation; ambiguous or merely
+    nearby trigger words remain fail-visible standalone lexeme gaps.
+    """
+    if unmatched.get("reason") != "not_line_or_sentence_boundary":
+        return None
+    source_text = " ".join(str(
+        unmatched.get("source_text", "") or "").casefold().split()
+    ).rstrip(" .;")
+    if not re.match(r"^(?:when|whenever|at)\b", source_text):
+        return None
+
+    line_text = str(unmatched.get("line_text", "") or "")
+    line_lower = line_text.casefold()
+    source_start = line_lower.find(source_text)
+    # The lexical trigger must occur in the effect after a printed activation
+    # separator.  This prevents a malformed static line or an unmatched
+    # top-level trigger from being excused merely because a parser registered
+    # an unrelated activated surface on the same card.
+    separator = line_text.find(":")
+    if separator < 0 or source_start < 0 or source_start <= separator:
+        return None
+
+    candidates = []
+    for surface in discovered:
+        if surface.get("class") != "ActivatedAbility":
+            continue
+        runtime_effect = " ".join(str(
+            surface.get("effect", "") or "").casefold().split()
+        ).rstrip(" .;")
+        runtime_text = " ".join(str(
+            surface.get("effect_text", "") or "").casefold().split()
+        ).rstrip(" .;")
+        if source_text in runtime_effect or source_text in runtime_text:
+            candidates.append(surface)
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def _reconcile_printed_triggers(
         entry: dict, obligations: list[dict], discovered: list[dict]) -> dict:
     """Match independent lexical trigger clauses to registered runtime ones."""
@@ -1187,7 +1231,33 @@ def _reconcile_printed_triggers(
             "sha256": printed.get("sha256"),
         })
 
+    attributed_nested_lexemes = []
     for unmatched in inventory.get("unmatched_lexical_surfaces", []):
+        activated_surface = _nested_trigger_activated_surface(
+            unmatched, discovered)
+        if activated_surface is not None:
+            lexeme_id = f"printed-trigger-lexeme:{unmatched['sha256'][:24]}"
+            activated_surface.setdefault(
+                "nested_trigger_lexeme_ids", []).append(lexeme_id)
+            activated_obligation = next((
+                obligation for obligation in obligations
+                if obligation.get("id") == activated_surface.get("id")), None)
+            if activated_obligation is not None:
+                activated_obligation.setdefault(
+                    "nested_trigger_lexeme_ids", []).append(lexeme_id)
+            discovered.append({
+                "id": f"nested_trigger_lexeme:{unmatched['sha256'][:24]}",
+                "class": "nested_delayed_trigger_lexeme",
+                "printed_trigger_lexeme_id": lexeme_id,
+                "matched_surface": activated_surface.get("id"),
+                "attribution": "containing_activated_effect",
+                "reason": unmatched.get("reason"),
+                "face_index": unmatched.get("face_index"),
+                "source_text": unmatched.get("source_text"),
+                "sha256": unmatched.get("sha256"),
+            })
+            attributed_nested_lexemes.append(lexeme_id)
+            continue
         discovered.append({
             "id": f"printed_lexeme:{unmatched['sha256'][:24]}",
             "class": "unmatched_trigger_lexeme",
@@ -1216,9 +1286,44 @@ def _reconcile_printed_triggers(
         "matched_printed_trigger_count": len(printed_matches),
         "unmatched_printed_trigger_count": (
             len(inventory.get("triggers", [])) - len(printed_matches)),
-        "unmatched_lexeme_count": len(
-            inventory.get("unmatched_lexical_surfaces", [])),
+        "unmatched_lexeme_count": (
+            len(inventory.get("unmatched_lexical_surfaces", []))
+            - len(attributed_nested_lexemes)),
+        "attributed_nested_lexeme_count": len(
+            attributed_nested_lexemes),
     }
+
+
+def _room_trigger_provenance_obligation(surface: dict) -> dict:
+    """Require a registered Room trigger to identify its exact printed door."""
+    surface_id = str(surface.get("id", "triggered:unknown"))
+    face_value = surface.get("room_face_index")
+    door_value = surface.get("room_door_number")
+    try:
+        face_index = int(face_value)
+        door_number = int(door_value)
+    except (TypeError, ValueError):
+        face_index = door_number = None
+    valid = (
+        face_index in (0, 1)
+        and door_number == face_index + 1
+    )
+    obligation = {
+        "id": f"{surface_id}:room_provenance",
+        "kind": "room_face_provenance",
+        "matched_surface": surface_id,
+        "status": "exercised" if valid else "failed",
+        "room_face_index": face_value,
+        "room_door_number": door_value,
+        "expected_room_door_number": (
+            face_index + 1 if face_index in (0, 1) else None),
+    }
+    if not valid:
+        obligation["reason"] = (
+            "registered Room trigger provenance is missing or inconsistent: "
+            f"face_index={face_value!r}, door_number={door_value!r}; "
+            "door_number must equal face_index + 1")
+    return obligation
 
 
 def _discover_obligations(entry: dict) -> tuple[list[dict], list[dict], dict]:
@@ -1229,6 +1334,8 @@ def _discover_obligations(entry: dict) -> tuple[list[dict], list[dict], dict]:
     fidelity_before = _fidelity_snapshot(game_state)
     game_state.ability_handler.register_card_abilities(target_id, game_state.p1)
     abilities = list(game_state.ability_handler.registered_abilities.get(target_id, []))
+    source_card = game_state._safe_get_card(target_id)
+    source_is_room = bool(getattr(source_card, "is_room", False))
     primary_kind = ("land" if "land" in str(entry["raw"].get(
         "type_line", "")).lower() else "spell")
     obligations = [
@@ -1273,6 +1380,7 @@ def _discover_obligations(entry: dict) -> tuple[list[dict], list[dict], dict]:
                 "evidence is not complete"),
         })
     activated_index = triggered_index = static_index = 0
+    room_provenance = []
     for ability in abilities:
         if isinstance(ability, (ActivatedAbility, ManaAbility)):
             obligation_id = f"activated:{activated_index}"
@@ -1312,13 +1420,38 @@ def _discover_obligations(entry: dict) -> tuple[list[dict], list[dict], dict]:
                 "status": "coverage_gap",
                 "reason": "matched activated-ability legality proof is pending",
             })
-        discovered.append({
+        surface = {
             "id": obligation_id,
             "class": type(ability).__name__,
             "cost": getattr(ability, "cost", None),
             "effect": getattr(ability, "effect", getattr(ability, "effect_text", None)),
+            "effect_text": getattr(ability, "effect_text", None),
             "trigger_condition": getattr(ability, "trigger_condition", None),
-        })
+        }
+        if isinstance(ability, TriggeredAbility):
+            trigger_zone = str(
+                getattr(ability, "zone", "battlefield") or "battlefield"
+            ).lower()
+            surface["zone"] = trigger_zone
+            surface["trigger_zone"] = trigger_zone
+            for key in ("room_face_index", "room_door_number"):
+                value = getattr(ability, key, None)
+                if value is not None:
+                    surface[key] = int(value)
+            if source_is_room:
+                provenance = _room_trigger_provenance_obligation(surface)
+                obligations.append(provenance)
+                surface["room_provenance_status"] = provenance["status"]
+                room_provenance.append({
+                    key: provenance.get(key)
+                    for key in (
+                        "matched_surface", "status", "room_face_index",
+                        "room_door_number", "expected_room_door_number",
+                        "reason",
+                    )
+                    if provenance.get(key) is not None
+                })
+        discovered.append(surface)
     printed_trigger_summary = _reconcile_printed_triggers(
         entry, obligations, discovered)
     replacement_effects = [
@@ -1478,6 +1611,7 @@ def _discover_obligations(entry: dict) -> tuple[list[dict], list[dict], dict]:
         "final_nonzero": _nonzero_fidelity(fidelity_after),
         "changes": _fidelity_changes(fidelity_before, fidelity_after),
         "printed_trigger_inventory": printed_trigger_summary,
+        "room_face_provenance": room_provenance,
     }
 
 
@@ -1644,14 +1778,55 @@ def _fund_until_activated(handler, land_ids: Sequence[int], *,
     return None, trace, mana_setup_land_ids
 
 
+def _stage_activated_timing_fixture(
+        game_state: GameState, ability, controller: dict) -> dict:
+    """Stage an activation in its exact public timing class.
+
+    Ordinary activated abilities are instant-speed actions.  Probe them in a
+    priority wrapper over the end step so no sorcery-speed action can mask the
+    attribution.  Explicit sorcery-only activations retain the empty-stack
+    main-phase fixture.
+    """
+    effect_text = str(getattr(ability, "effect_text", "") or "")
+    requires_sorcery = "activate only as a sorcery" in effect_text.casefold()
+    if requires_sorcery:
+        underlying_phase = game_state.PHASE_MAIN_PRECOMBAT
+        game_state.phase = underlying_phase
+        game_state.previous_priority_phase = None
+        timing_kind = "sorcery_speed"
+    else:
+        underlying_phase = game_state.PHASE_END_STEP
+        game_state.phase = underlying_phase
+        game_state.previous_priority_phase = underlying_phase
+        game_state.phase = game_state.PHASE_PRIORITY
+        timing_kind = "priority_speed"
+    game_state.priority_player = controller
+    game_state.priority_pass_count = 0
+    game_state.agent_is_p1 = controller is game_state.p1
+    return {
+        "kind": timing_kind,
+        "phase": game_state._PHASE_NAMES.get(
+            game_state.phase, str(game_state.phase)),
+        "phase_id": int(game_state.phase),
+        "underlying_phase": game_state._PHASE_NAMES.get(
+            underlying_phase, str(underlying_phase)),
+        "underlying_phase_id": int(underlying_phase),
+        "controller_has_priority": game_state.priority_player is controller,
+        "sorcery_speed_available": bool(
+            game_state._can_act_at_sorcery_speed(controller)),
+    }
+
+
 def _find_activated_dispatch(handler, *, target_id: int,
                              ability_index: int,
+                             player: dict | None = None,
                              sync_policy: bool = True) -> dict | None:
     """Find a fixed or overflow-catalog public action for one ability."""
     game_state = handler.game_state
-    if target_id not in game_state.p1.get("battlefield", []):
+    player = player or game_state.p1
+    if target_id not in player.get("battlefield", []):
         return None
-    battlefield_index = game_state.p1["battlefield"].index(target_id)
+    battlefield_index = player["battlefield"].index(target_id)
     mask = _generate_mask(handler, sync_policy=sync_policy)
     for action, allowed in enumerate(mask):
         if not bool(allowed):
@@ -2052,6 +2227,26 @@ def _trigger_fixture_spec(entry: dict, trigger_condition: str) -> dict | None:
         r"permanent|vehicle|card|class)"
         + (rf"|{named_subject}" if named_subject else "") + r")")
 
+    if "activate an exhaust ability" in condition:
+        return {
+            "kind": "exhaust_activation",
+            "event_type": "EXHAUST_ABILITY_ACTIVATED",
+            "target_zone": "battlefield",
+        }
+    if ("unlock this door" in condition
+            or "this door is unlocked" in condition):
+        return {
+            "kind": "room_door_unlock",
+            "event_type": "DOOR_UNLOCKED",
+            "target_zone": "battlefield",
+        }
+    if "fully unlock a room" in condition:
+        return {
+            "kind": "room_full_unlock",
+            "event_type": "ROOM_FULLY_UNLOCKED",
+            "target_zone": "battlefield",
+        }
+
     if re.match(
             rf"^when(?:ever)?\s+{self_subject}\s+enters\b", condition):
         spec = {
@@ -2160,7 +2355,31 @@ def _trigger_fixture_spec(entry: dict, trigger_condition: str) -> dict | None:
     return None
 
 
-def _trigger_fixture_variants(entry: dict, trigger_condition: str) -> list[dict]:
+def _trigger_fixture_with_surface(
+        spec: dict, surface: dict | None) -> dict:
+    """Carry registration provenance into a fresh trigger-event fixture."""
+    decorated = dict(spec)
+    if not surface:
+        return decorated
+    trigger_zone = str(
+        surface.get("trigger_zone", surface.get("zone", "")) or "").lower()
+    if trigger_zone:
+        decorated["trigger_zone"] = trigger_zone
+        # A self-ETB probe must begin in hand even though its registered
+        # trigger functions on the battlefield. Other event fixtures stage
+        # the source in the exact zone discovered during registration.
+        if decorated.get("kind") != "self_etb":
+            decorated["target_zone"] = trigger_zone
+    for key in ("room_face_index", "room_door_number"):
+        value = surface.get(key)
+        if value is not None:
+            decorated[key] = int(value)
+    return decorated
+
+
+def _trigger_fixture_variants(
+        entry: dict, trigger_condition: str,
+        trigger_surface: dict | None = None) -> list[dict]:
     """Return every independently required event arm for one trigger.
 
     A single registered TriggeredAbility can encode several disjunctive event
@@ -2176,13 +2395,13 @@ def _trigger_fixture_variants(entry: dict, trigger_condition: str) -> list[dict]
             ("ENTERS_BATTLEFIELD", "grouped_etb_batch"),
             ("DIES", "grouped_dies_batch")):
         if _is_grouped_zone_change_trigger(trigger_condition, event_type):
-            return [{
+            return [_trigger_fixture_with_surface({
                 "event_arm": event_arm,
                 "unsupported_reason": (
                     "the grouped zone-change trigger requires a complete "
                     f"atomic {event_type} batch; no deterministic public "
                     "batch fixture is registered"),
-            }]
+            }, trigger_surface)]
 
     if "enters or attacks" in condition:
         etb = _trigger_fixture_spec(entry, trigger_condition)
@@ -2207,11 +2426,15 @@ def _trigger_fixture_variants(entry: dict, trigger_condition: str) -> list[dict]
                 "unsupported_reason": (
                     "the attack arm requires a legal animation or crew fixture"),
             })
-        return variants
+        return [
+            _trigger_fixture_with_surface(spec, trigger_surface)
+            for spec in variants]
 
     if ("enchantment you control enters" in condition
             and "fully unlock a room" in condition):
         return [
+            _trigger_fixture_with_surface(spec, trigger_surface)
+            for spec in (
             {
                 "kind": "controlled_enchantment_etb",
                 "event_type": "ENTERS_BATTLEFIELD",
@@ -2220,12 +2443,12 @@ def _trigger_fixture_variants(entry: dict, trigger_condition: str) -> list[dict]
                 "event_arm": "controlled_enchantment_enters",
             },
             {
+                "kind": "room_full_unlock",
+                "event_type": "ROOM_FULLY_UNLOCKED",
+                "target_zone": "battlefield",
                 "event_arm": "fully_unlock_room",
-                "unsupported_reason": (
-                    "no deterministic public Room full-unlock fixture is "
-                    "registered for this trigger arm"),
             },
-        ]
+        )]
 
     trigger_clauses = re.split(
         r"\s+and\s+(?=(?:when|whenever|at)\b)", condition)
@@ -2233,7 +2456,8 @@ def _trigger_fixture_variants(entry: dict, trigger_condition: str) -> list[dict]
         variants = []
         seen_arms = set()
         for clause_index, clause in enumerate(trigger_clauses):
-            for spec in _trigger_fixture_variants(entry, clause):
+            for spec in _trigger_fixture_variants(
+                    entry, clause, trigger_surface):
                 arm = str(spec.get("event_arm", "default"))
                 if arm in seen_arms:
                     arm = f"clause_{clause_index + 1}_{arm}"
@@ -2264,7 +2488,8 @@ def _trigger_fixture_variants(entry: dict, trigger_condition: str) -> list[dict]
             })
             return [
                 _with_trigger_event_requirements(
-                    entry, condition, spec)
+                    entry, condition,
+                    _trigger_fixture_with_surface(spec, trigger_surface))
                 for spec in variants]
         for detail in details:
             label = detail.pop("event_fixture_label")
@@ -2279,7 +2504,9 @@ def _trigger_fixture_variants(entry: dict, trigger_condition: str) -> list[dict]
             })
         return [
             _with_trigger_event_requirements(entry, condition, spec)
-            for spec in variants]
+            for spec in (
+                _trigger_fixture_with_surface(row, trigger_surface)
+                for row in variants)]
 
     for verb_pattern, verb_label, event_type in (
             (r"enter(?:s)?", "enters", "ENTERS_BATTLEFIELD"),
@@ -2289,12 +2516,12 @@ def _trigger_fixture_variants(entry: dict, trigger_condition: str) -> list[dict]
             continue
         details = _trigger_fixture_details(criteria)
         if details is None:
-            return [{
+            return [_trigger_fixture_with_surface({
                 "event_arm": f"controlled_{verb_label}",
                 "unsupported_reason": (
                     "the controlled event has qualifiers for which no isolated "
                     "deterministic fixture is registered"),
-            }]
+            }, trigger_surface)]
         variants = [{
             **{key: value for key, value in detail.items()
                if key != "event_fixture_label"},
@@ -2307,19 +2534,22 @@ def _trigger_fixture_variants(entry: dict, trigger_condition: str) -> list[dict]
                 f"controlled_{detail['event_fixture_label']}_{verb_label}"),
         } for detail in details]
         return [
-            _with_trigger_event_requirements(entry, condition, spec)
+            _with_trigger_event_requirements(
+                entry, condition,
+                _trigger_fixture_with_surface(spec, trigger_surface))
             for spec in variants]
 
     spec = _trigger_fixture_spec(entry, trigger_condition)
     if spec is None:
-        return [{
+        return [_trigger_fixture_with_surface({
             "event_arm": "default",
             "unsupported_reason": (
                 "no deterministic real-event fixture is registered for this "
                 "trigger condition"),
-        }]
+        }, trigger_surface)]
     return [_with_trigger_event_requirements(
-        entry, condition, {**spec, "event_arm": spec["kind"]})]
+        entry, condition, _trigger_fixture_with_surface(
+            {**spec, "event_arm": spec["kind"]}, trigger_surface))]
 
 
 def _trigger_negative_fixture_spec_single(
@@ -2334,6 +2564,31 @@ def _trigger_negative_fixture_spec_single(
         return any(re.match(
             rf"^when(?:ever)?\s+{re.escape(value)}\s+{verb_pattern}\b",
             condition) for value in names)
+
+    if "activate an exhaust ability" in condition:
+        return {
+            "kind": "exhaust_activation",
+            "event_type": "EXHAUST_ABILITY_ACTIVATED",
+            "fixture_owner": "opponent",
+            "negative_case": "opponent activates an exhaust ability",
+        }
+    if ("unlock this door" in condition
+            or "this door is unlocked" in condition):
+        return {
+            "kind": "room_door_unlock",
+            "event_type": "DOOR_UNLOCKED",
+            "fixture_owner": "own",
+            "nonmatching_room_door": True,
+            "negative_case": "the other door of this Room is unlocked",
+        }
+    if "fully unlock a room" in condition:
+        return {
+            "kind": "room_full_unlock",
+            "event_type": "ROOM_FULLY_UNLOCKED",
+            "fixture_owner": "own",
+            "partial_room_unlock": True,
+            "negative_case": "a Room remains partially locked",
+        }
 
     if ("enchantment you control enters" in condition
             and "fully unlock a room" in condition):
@@ -2459,10 +2714,31 @@ def _trigger_negative_fixture_spec_single(
     return None
 
 
-def _trigger_negative_fixture_specs(
-        entry: dict, trigger_condition: str) -> list[dict]:
+def _trigger_negative_fixture_specs_core(
+        entry: dict, trigger_condition: str,
+        trigger_surface: dict | None = None) -> list[dict]:
     """Return one close opponent event for every supported criteria arm."""
     condition = str(trigger_condition or "").strip().casefold()
+    if ("enchantment you control enters" in condition
+            and "fully unlock a room" in condition):
+        return [
+            _trigger_fixture_with_surface({
+                "kind": "other_etb",
+                "event_type": "ENTERS_BATTLEFIELD",
+                "fixture_owner": "opponent",
+                "event_fixture_index": 2,
+                "negative_arm": "opponent_enchantment_enters",
+                "negative_case": "opponent enchantment enters",
+            }, trigger_surface),
+            _trigger_fixture_with_surface({
+                "kind": "room_full_unlock",
+                "event_type": "ROOM_FULLY_UNLOCKED",
+                "fixture_owner": "own",
+                "partial_room_unlock": True,
+                "negative_arm": "room_remains_partially_locked",
+                "negative_case": "a Room remains partially locked",
+            }, trigger_surface),
+        ]
     if any(_is_grouped_zone_change_trigger(trigger_condition, event_type)
            for event_type in ("ENTERS_BATTLEFIELD", "DIES")):
         # A singular event without the complete batch contract cannot prove
@@ -2475,7 +2751,8 @@ def _trigger_negative_fixture_specs(
         fixtures = []
         used_arms: set[str] = set()
         for clause_index, clause in enumerate(trigger_clauses):
-            for fixture in _trigger_negative_fixture_specs(entry, clause):
+            for fixture in _trigger_negative_fixture_specs_core(
+                    entry, clause, trigger_surface):
                 decorated = dict(fixture)
                 arm = str(decorated.get(
                     "negative_arm", f"clause_{clause_index + 1}"))
@@ -2494,7 +2771,9 @@ def _trigger_negative_fixture_specs(
         if criteria is not None:
             return [
                 _with_trigger_event_requirements(
-                    entry, condition, fixture)
+                    entry, condition,
+                    _trigger_fixture_with_surface(
+                        fixture, trigger_surface))
                 for fixture in _opponent_matching_trigger_fixtures(
                     criteria, verb, event_type)]
 
@@ -2505,7 +2784,9 @@ def _trigger_negative_fixture_specs(
         if criteria is not None:
             return [
                 _with_trigger_event_requirements(
-                    entry, condition, fixture)
+                    entry, condition,
+                    _trigger_fixture_with_surface(
+                        fixture, trigger_surface))
                 for fixture in _opponent_matching_trigger_fixtures(
                     criteria, verb, event_type)]
 
@@ -2514,7 +2795,8 @@ def _trigger_negative_fixture_specs(
     if fixture is None:
         return []
     decorated = _with_trigger_event_requirements(
-        entry, condition, fixture)
+        entry, condition,
+        _trigger_fixture_with_surface(fixture, trigger_surface))
     if "negative_arm" not in decorated:
         label = re.sub(
             r"[^a-z0-9]+", "_",
@@ -2522,6 +2804,81 @@ def _trigger_negative_fixture_specs(
         ).strip("_") or "default"
         decorated["negative_arm"] = label
     return [decorated]
+
+
+def _trigger_negative_fixture_specs(
+        entry: dict, trigger_condition: str,
+        trigger_surface: dict | None = None) -> list[dict]:
+    """Return independent close negatives for every recognized criterion."""
+    condition = str(trigger_condition or "").strip().casefold()
+    fixtures = _trigger_negative_fixture_specs_core(
+        entry, trigger_condition, trigger_surface)
+
+    if "activate an exhaust ability" in condition:
+        fixtures.append(_trigger_fixture_with_surface({
+            "kind": "non_exhaust_activation",
+            "event_type": "ABILITY_ACTIVATED",
+            "fixture_owner": "own",
+            "negative_arm": "own_non_exhaust_activation",
+            "negative_case": "you activate a non-Exhaust ability",
+        }, trigger_surface))
+
+    names_this_door = (
+        "unlock this door" in condition
+        or "this door is unlocked" in condition)
+    if names_this_door:
+        fixtures.append(_trigger_fixture_with_surface({
+            "kind": "room_door_unlock",
+            "event_type": "DOOR_UNLOCKED",
+            "fixture_owner": "own",
+            "matching_door_other_room": True,
+            "negative_arm": "matching_door_on_another_room",
+            "negative_case": (
+                "the matching-number door of another Room is unlocked"),
+        }, trigger_surface))
+
+    if "fully unlock a room" in condition:
+        fixtures.append(_trigger_fixture_with_surface({
+            "kind": "room_full_unlock",
+            "event_type": "ROOM_FULLY_UNLOCKED",
+            "fixture_owner": "opponent",
+            "opponent_full_room_unlock": True,
+            "negative_arm": "opponent_fully_unlocks_room",
+            "negative_case": "an opponent fully unlocks a Room",
+        }, trigger_surface))
+
+    provenance_door = (trigger_surface or {}).get("room_door_number")
+    if provenance_door in (1, 2) and not names_this_door:
+        supported_locked_kinds = {
+            "phase_begin", "controlled_creature_dies", "self_tapped",
+            "self_dies",
+        }
+        for positive_spec in _trigger_fixture_variants(
+                entry, trigger_condition, trigger_surface):
+            if positive_spec.get("unsupported_reason"):
+                continue
+            kind = positive_spec.get("kind")
+            supports_fixture_etb = (
+                positive_spec.get("event_type") == "ENTERS_BATTLEFIELD"
+                and "event_fixture_index" in positive_spec)
+            if kind not in supported_locked_kinds and not supports_fixture_etb:
+                continue
+            locked_spec = copy.deepcopy(positive_spec)
+            event_arm = re.sub(
+                r"[^a-z0-9]+", "_",
+                str(positive_spec.get("event_arm", kind)).casefold()
+            ).strip("_") or "matching_event"
+            locked_spec.update({
+                "fixture_owner": "own",
+                "source_room_face_locked": True,
+                "matching_event_while_source_locked": True,
+                "negative_arm": f"source_room_face_locked_{event_arm}",
+                "negative_case": (
+                    "the matching event occurs while the source Room door "
+                    "is locked"),
+            })
+            fixtures.append(locked_spec)
+    return fixtures
 
 
 def _trigger_negative_fixture_spec(
@@ -2625,6 +2982,175 @@ def _configure_trigger_event_fixture(
             game_state.current_attackers.append(card_id)
 
 
+def _reorder_battlefield_fixture(
+        player: dict, card_id: int, *, after_card_id: int | None = None) -> None:
+    """Keep a staged fixture inside the fixed public-action window."""
+    battlefield = player.get("battlefield", [])
+    if card_id not in battlefield:
+        raise AssertionError(f"event fixture {card_id} is not on the battlefield")
+    battlefield.remove(card_id)
+    insert_at = 0
+    if after_card_id is not None and after_card_id in battlefield:
+        insert_at = battlefield.index(after_card_id) + 1
+    battlefield.insert(insert_at, card_id)
+
+
+def _stage_synthetic_activation_fixture(
+        game_state: GameState, fixture: dict, player: dict, *,
+        is_exhaust: bool) -> tuple[int, int]:
+    """Register one targetless zero-cost activated ability for public use."""
+    fixture_ids = (fixture["own_fixture_ids"]
+                   if player is game_state.p1
+                   else fixture["opponent_fixture_ids"])
+    card_id = fixture_ids[0]
+    card = game_state._safe_get_card(card_id)
+    oracle_text = (
+        "Exhaust - {0}: Put a +1/+1 counter on this creature. "
+        "(Activate each exhaust ability only once.)"
+        if is_exhaust else
+        "{0}: You gain 1 life.")
+    card.oracle_text = oracle_text
+    if getattr(card, "_printed", None) is not None:
+        card._printed["oracle_text"] = oracle_text
+    after_card_id = (fixture["target_id"]
+                     if fixture["target_id"] in player.get(
+                         "battlefield", []) else None)
+    _reorder_battlefield_fixture(
+        player, card_id, after_card_id=after_card_id)
+    game_state.ability_handler.register_card_abilities(card_id, player)
+    abilities = game_state.ability_handler.get_activated_abilities(card_id)
+    matching_indices = [
+        index for index, ability in enumerate(abilities)
+        if bool(getattr(ability, "is_exhaust", False)) is is_exhaust]
+    if len(abilities) != 1 or len(matching_indices) != 1:
+        raise AssertionError(
+            "synthetic activation fixture did not register exactly one "
+            f"{'Exhaust' if is_exhaust else 'non-Exhaust'} ability")
+    return card_id, matching_indices[0]
+
+
+def _stage_exhaust_activation_fixture(
+        game_state: GameState, fixture: dict, player: dict) -> tuple[int, int]:
+    """Register one targetless zero-cost Exhaust ability for public use."""
+    return _stage_synthetic_activation_fixture(
+        game_state, fixture, player, is_exhaust=True)
+
+
+def _stage_non_exhaust_activation_fixture(
+        game_state: GameState, fixture: dict, player: dict) -> tuple[int, int]:
+    """Register one targetless ordinary ability for an Exhaust negative."""
+    return _stage_synthetic_activation_fixture(
+        game_state, fixture, player, is_exhaust=False)
+
+
+def _stage_synthetic_room_fixture(
+        game_state: GameState, fixture: dict, *, fully_unlock: bool,
+        player: dict | None = None, unlock_door_number: int = 2) \
+        -> tuple[int, int]:
+    """Stage a two-door Room whose next public unlock is deterministic."""
+    player = player or game_state.p1
+    if unlock_door_number not in (1, 2):
+        raise AssertionError("synthetic Room requires door number 1 or 2")
+    fixture_ids = (fixture["own_fixture_ids"]
+                   if player is game_state.p1
+                   else fixture["opponent_fixture_ids"])
+    card_id = fixture_ids[2]
+    card = game_state._safe_get_card(card_id)
+    card.is_room = True
+    door1 = {
+        "name": "Probe Open Door", "mana_cost": "{0}",
+        "oracle_text": "",
+        "unlocked": bool(fully_unlock and unlock_door_number != 1),
+    }
+    door2 = {
+        "name": "Probe Locked Door", "mana_cost": "{0}",
+        "oracle_text": "",
+        "unlocked": bool(fully_unlock and unlock_door_number != 2),
+    }
+    card.door1 = door1
+    card.door2 = door2
+    card.doors = [door1, door2]
+    after_card_id = (fixture["target_id"]
+                     if fixture["target_id"] in player.get(
+                         "battlefield", []) else None)
+    _reorder_battlefield_fixture(
+        player, card_id, after_card_id=after_card_id)
+    return card_id, unlock_door_number
+
+
+def _stage_source_room_unlock(
+        game_state: GameState, room_id: int, door_number: int, *,
+        nonmatching: bool = False) -> int:
+    """Stage one exact source-Room door as the next payable public action."""
+    room = game_state._safe_get_card(room_id)
+    if not room or not getattr(room, "is_room", False):
+        raise AssertionError("Room-door trigger source is not a Room")
+    if door_number not in (1, 2):
+        raise AssertionError("Room-door trigger lacks door provenance")
+    other_number = 1 if door_number == 2 else 2
+    for candidate in (1, 2):
+        door = getattr(room, f"door{candidate}", None)
+        if not door or not door.get("mana_cost"):
+            raise AssertionError("Room-door trigger source lacks two payable doors")
+        door["unlocked"] = candidate != door_number
+    if nonmatching:
+        getattr(room, f"door{door_number}")["unlocked"] = True
+        getattr(room, f"door{other_number}")["unlocked"] = False
+        return other_number
+    return door_number
+
+
+def _stage_source_room_face_active(
+        game_state: GameState, room_id: int, door_number: int) -> None:
+    """Expose one Room face for an event unrelated to unlocking it."""
+    room = game_state._safe_get_card(room_id)
+    if (not room or not getattr(room, "is_room", False)
+            or door_number not in (1, 2)):
+        raise AssertionError("registered Room face lacks usable door provenance")
+    for candidate in (1, 2):
+        door = getattr(room, f"door{candidate}", None)
+        if not door:
+            raise AssertionError("registered Room face lacks two parsed doors")
+        door["unlocked"] = candidate == door_number
+
+
+def _stage_source_room_face_locked(
+        game_state: GameState, room_id: int, door_number: int) -> None:
+    """Lock the watched Room face while leaving the other face functional."""
+    room = game_state._safe_get_card(room_id)
+    if (not room or not getattr(room, "is_room", False)
+            or door_number not in (1, 2)):
+        raise AssertionError("registered Room face lacks usable door provenance")
+    for candidate in (1, 2):
+        door = getattr(room, f"door{candidate}", None)
+        if not door:
+            raise AssertionError("registered Room face lacks two parsed doors")
+        door["unlocked"] = candidate != door_number
+
+
+def _find_room_unlock_dispatch(
+        handler, *, room_id: int, door_number: int,
+        player: dict | None = None) -> dict | None:
+    """Find the public Room action pinned to one physical locked door."""
+    game_state = handler.game_state
+    player = player or game_state.p1
+    if room_id not in player.get("battlefield", []):
+        return None
+    mask = _generate_mask(handler)
+    for action, allowed in enumerate(mask):
+        if not bool(allowed):
+            continue
+        action_type, _ = handler.get_action_info(action)
+        metadata = getattr(
+            handler, "action_reasons_with_context", {}).get(action, {})
+        context = metadata.get("context", {}) or {}
+        if (action_type == "UNLOCK_DOOR"
+                and context.get("card_id") == room_id
+                and context.get("door_number") == door_number):
+            return {"kind": "fixed", "action": action}
+    return None
+
+
 def _relocate_fixture_to_hand(
         game_state: GameState, card_id: int, player: dict | None = None) -> None:
     """Stage a neutral permanent for a later ETB event without firing one."""
@@ -2713,13 +3239,28 @@ def _probe_triggered(
     decision_state = {"branch_ordinal": 0, "selected_prefix": []}
     trace: list[dict] = []
     event_card_id = target_id
+    event_evidence: dict = {}
+    desired = None
     before_state = None
     try:
         _assert_fidelity_clean(
             before_fidelity, game_state, f"{path_id} baseline")
-        if spec["target_zone"] == "battlefield":
+        if spec["target_zone"] != "hand":
             game_state.ability_handler.register_card_abilities(
                 target_id, game_state.p1)
+            registered_triggers = [
+                ability for ability in game_state.ability_handler.
+                registered_abilities.get(target_id, [])
+                if isinstance(ability, TriggeredAbility)
+            ]
+            if not 0 <= ability_index < len(registered_triggers):
+                path["reason"] = (
+                    "triggered ability was not rediscovered in its registered "
+                    "source zone")
+                return path, issues
+            # Room unlock actions re-register the source after dispatch. Keep
+            # the pre-event object identity that the trigger pipeline queues.
+            desired = registered_triggers[ability_index]
 
         if "event_fixture_index" in spec:
             event_card_id = fixture["own_fixture_ids"][
@@ -2792,10 +3333,78 @@ def _probe_triggered(
             game_state._last_turn_phase = game_state.phase
             game_state.previous_priority_phase = game_state.phase
 
-        before_state = _state_payload(game_state)
         kind = spec["kind"]
+        provenance_door = spec.get("room_door_number")
+        if (kind != "room_door_unlock"
+                and provenance_door in (1, 2)
+                and getattr(game_state._safe_get_card(target_id),
+                            "is_room", False)):
+            _stage_source_room_face_active(
+                game_state, target_id, int(provenance_door))
+            event_evidence["source_room_door_number"] = int(
+                provenance_door)
+        if kind == "exhaust_activation":
+            event_card_id, exhaust_index = _stage_exhaust_activation_fixture(
+                game_state, fixture, game_state.p1)
+            event_evidence["event_ability_index"] = exhaust_index
+            event_evidence["fixture_owner"] = "own"
+        elif kind == "room_door_unlock":
+            door_number = spec.get("room_door_number")
+            if door_number not in (1, 2):
+                path["reason"] = (
+                    "registered Room-door trigger lacks exact door provenance")
+                return path, issues
+            event_card_id = target_id
+            unlock_number = _stage_source_room_unlock(
+                game_state, target_id, int(door_number))
+            event_evidence.update({
+                "room_id": target_id,
+                "door_number": unlock_number,
+                "expected_trigger_door_number": int(door_number),
+            })
+        elif kind == "room_full_unlock":
+            event_card_id, unlock_number = _stage_synthetic_room_fixture(
+                game_state, fixture, fully_unlock=True)
+            event_evidence.update({
+                "room_id": event_card_id,
+                "door_number": unlock_number,
+                "fully_unlocked_before": False,
+            })
+
+        before_state = _state_payload(game_state)
         offspring_paid_fixture = False
-        if kind == "self_etb":
+        if kind == "exhaust_activation":
+            dispatch = _find_activated_dispatch(
+                handler, target_id=event_card_id,
+                ability_index=int(event_evidence["event_ability_index"]),
+                player=game_state.p1)
+            if dispatch is None:
+                path["reason"] = (
+                    "the synthetic Exhaust ability was not exposed by the "
+                    "public activation mask")
+                path["trace"] = trace
+                return path, issues
+            event_evidence["dispatch"] = dispatch
+            trace.extend(_apply_activated_dispatch(handler, dispatch))
+            event_result = True
+        elif kind in {"room_door_unlock", "room_full_unlock"}:
+            dispatch = _find_room_unlock_dispatch(
+                handler, room_id=event_card_id,
+                door_number=int(event_evidence["door_number"]),
+                player=game_state.p1)
+            if dispatch is None:
+                path["reason"] = (
+                    "the staged Room door was not exposed by the pinned "
+                    "public unlock mask")
+                path["trace"] = trace
+                return path, issues
+            event_evidence["dispatch"] = dispatch
+            trace.append(_apply_public_action(handler, dispatch["action"]))
+            room = game_state._safe_get_card(event_card_id)
+            event_evidence["fully_unlocked_after"] = bool(
+                room.door1.get("unlocked") and room.door2.get("unlocked"))
+            event_result = True
+        elif kind == "self_etb":
             move_context = _trigger_entry_context(entry, ability_index)
             source_card = game_state._safe_get_card(target_id)
             if (getattr(source_card, "is_offspring", False)
@@ -2873,20 +3482,21 @@ def _probe_triggered(
                 handler, max_decisions=max_decisions,
                 choice_plan=choice_plan, decision_state=decision_state))
 
-        triggered = [
-            ability for ability in game_state.ability_handler.
-            registered_abilities.get(target_id, [])
-            if isinstance(ability, TriggeredAbility)
-        ]
-        if not 0 <= ability_index < len(triggered):
-            path["trace"] = trace
-            _record_trigger_path_evidence(
-                path, game_state, fixture, before_state, before_fidelity,
-                f"{path_id} rediscovery gap")
-            path["reason"] = (
-                "triggered ability was not rediscovered after event setup")
-            return path, issues
-        desired = triggered[ability_index]
+        if desired is None:
+            triggered = [
+                ability for ability in game_state.ability_handler.
+                registered_abilities.get(target_id, [])
+                if isinstance(ability, TriggeredAbility)
+            ]
+            if not 0 <= ability_index < len(triggered):
+                path["trace"] = trace
+                _record_trigger_path_evidence(
+                    path, game_state, fixture, before_state, before_fidelity,
+                    f"{path_id} rediscovery gap")
+                path["reason"] = (
+                    "triggered ability was not rediscovered after event setup")
+                return path, issues
+            desired = triggered[ability_index]
         active = list(game_state.ability_handler.active_triggers)
         active_target_count = sum(row[0] is desired for row in active)
         stacked_target_count = sum(
@@ -2908,6 +3518,7 @@ def _probe_triggered(
         path["event_fixture"] = {
             **{key: value for key, value in spec.items()
                if key not in {"target_zone", "phase"}},
+            **event_evidence,
             "event_card_id": event_card_id,
             "event_dispatched": True,
             "dispatch_returned": bool(event_result),
@@ -3004,11 +3615,15 @@ def _probe_triggered_negative(
     path["negative_case"] = spec["negative_case"]
     path["negative_arm"] = spec.get("negative_arm", "default")
 
+    source_zone = str(spec.get(
+        "target_zone", spec.get("trigger_zone", "battlefield"))
+    ).lower()
     game_state, handler, fixture = _build_probe_state(
-        entry, target_zone="battlefield", include_mana_lands=True)
+        entry, target_zone=source_zone, include_mana_lands=True)
     target_id = fixture["target_id"]
     before_fidelity = _fidelity_snapshot(game_state)
     trace: list[dict] = []
+    event_evidence: dict = {}
     before_state = None
     try:
         _assert_fidelity_clean(
@@ -3038,7 +3653,10 @@ def _probe_triggered_negative(
             event_card_id = fixture_ids[int(spec["event_fixture_index"])]
             _configure_trigger_event_fixture(
                 game_state, event_card_id, event_player, spec)
-            if spec["kind"] == "other_etb":
+            if (spec["kind"] == "other_etb"
+                    or (spec.get("matching_event_while_source_locked")
+                        and spec.get("event_type") ==
+                        "ENTERS_BATTLEFIELD")):
                 _relocate_fixture_to_hand(
                     game_state, event_card_id, event_player)
 
@@ -3064,11 +3682,95 @@ def _probe_triggered_negative(
                         "runtime non-controller trigger criterion")
                     return path, issues
 
-        if spec["kind"] == "opponent_phase":
-            game_state.turn = 2
+        kind = spec["kind"]
+        provenance_door = spec.get("room_door_number")
+        if (kind != "room_door_unlock"
+                and provenance_door in (1, 2)
+                and getattr(game_state._safe_get_card(target_id),
+                            "is_room", False)):
+            if spec.get("source_room_face_locked"):
+                _stage_source_room_face_locked(
+                    game_state, target_id, int(provenance_door))
+                event_evidence["source_room_face_locked"] = True
+            else:
+                _stage_source_room_face_active(
+                    game_state, target_id, int(provenance_door))
+            event_evidence["source_room_door_number"] = int(
+                provenance_door)
+        if kind in {"exhaust_activation", "non_exhaust_activation"}:
+            event_player = (game_state.p1
+                            if spec.get("fixture_owner") == "own"
+                            else game_state.p2)
+            if kind == "exhaust_activation":
+                event_card_id, activation_index = \
+                    _stage_exhaust_activation_fixture(
+                        game_state, fixture, event_player)
+            else:
+                event_card_id, activation_index = \
+                    _stage_non_exhaust_activation_fixture(
+                        game_state, fixture, event_player)
+            event_evidence["event_ability_index"] = activation_index
+            event_evidence["event_ability_is_exhaust"] = (
+                kind == "exhaust_activation")
+            if event_player is game_state.p2:
+                game_state.turn = 2
+                game_state.priority_player = game_state.p2
+                game_state.agent_is_p1 = False
+            event_evidence["fixture_owner"] = (
+                "own" if event_player is game_state.p1 else "opponent")
+        elif kind == "room_door_unlock":
+            door_number = spec.get("room_door_number")
+            if door_number not in (1, 2):
+                path["reason"] = (
+                    "registered Room-door trigger lacks exact door provenance")
+                return path, issues
+            event_player = game_state.p1
+            if spec.get("matching_door_other_room"):
+                _stage_source_room_face_active(
+                    game_state, target_id, int(door_number))
+                event_evidence["source_room_id"] = target_id
+                event_card_id, unlock_number = \
+                    _stage_synthetic_room_fixture(
+                        game_state, fixture, fully_unlock=True,
+                        player=event_player,
+                        unlock_door_number=int(door_number))
+            else:
+                event_card_id = target_id
+                unlock_number = _stage_source_room_unlock(
+                    game_state, target_id, int(door_number),
+                    nonmatching=bool(spec.get("nonmatching_room_door")))
+            event_evidence.update({
+                "room_id": event_card_id,
+                "door_number": unlock_number,
+                "expected_trigger_door_number": int(door_number),
+            })
+        elif kind == "room_full_unlock":
+            event_player = (game_state.p1
+                            if spec.get("fixture_owner") == "own"
+                            else game_state.p2)
+            event_card_id, unlock_number = _stage_synthetic_room_fixture(
+                game_state, fixture,
+                fully_unlock=not bool(spec.get("partial_room_unlock")),
+                player=event_player)
+            if event_player is game_state.p2:
+                game_state.turn = 2
+                game_state.priority_player = game_state.p2
+                game_state.agent_is_p1 = False
+            event_evidence.update({
+                "room_id": event_card_id,
+                "door_number": unlock_number,
+                "fully_unlocked_before": False,
+                "fixture_owner": (
+                    "own" if event_player is game_state.p1 else "opponent"),
+            })
+
+        phase_attr = spec.get("phase")
+        if phase_attr:
             game_state.phase = getattr(game_state, spec["phase"])
             game_state._last_turn_phase = game_state.phase
             game_state.previous_priority_phase = game_state.phase
+        if kind == "opponent_phase":
+            game_state.turn = 2
             game_state.priority_player = game_state.p2
         if spec.get("setup_life_gain"):
             game_state.gain_life(
@@ -3076,18 +3778,76 @@ def _probe_triggered_negative(
                 source_id=target_id)
         before_state = _state_payload(game_state)
 
-        if spec["kind"] == "other_etb":
+        if kind in {"exhaust_activation", "non_exhaust_activation"}:
+            dispatch = _find_activated_dispatch(
+                handler, target_id=event_card_id,
+                ability_index=int(event_evidence["event_ability_index"]),
+                player=event_player)
+            if dispatch is None:
+                path["reason"] = (
+                    "the synthetic activated ability was not exposed by the "
+                    "public activation mask")
+                path["trace"] = trace
+                return path, issues
+            event_evidence["dispatch"] = dispatch
+            trace.extend(_apply_activated_dispatch(handler, dispatch))
+            event_result = True
+        elif kind in {"room_door_unlock", "room_full_unlock"}:
+            dispatch = _find_room_unlock_dispatch(
+                handler, room_id=event_card_id,
+                door_number=int(event_evidence["door_number"]),
+                player=event_player)
+            if dispatch is None:
+                path["reason"] = (
+                    "the staged Room door was not exposed by the pinned "
+                    "public unlock mask")
+                path["trace"] = trace
+                return path, issues
+            event_evidence["dispatch"] = dispatch
+            trace.append(_apply_public_action(handler, dispatch["action"]))
+            room = game_state._safe_get_card(event_card_id)
+            event_evidence["fully_unlocked_after"] = bool(
+                room.door1.get("unlocked") and room.door2.get("unlocked"))
+            event_result = True
+        elif spec.get("matching_event_while_source_locked"):
+            if kind == "phase_begin":
+                event_result = game_state.ability_handler.check_abilities(
+                    None, spec["event_type"],
+                    {"controller": game_state.p1})
+            elif kind == "controlled_creature_dies":
+                event_result = game_state.move_card(
+                    event_card_id, game_state.p1, "battlefield",
+                    game_state.p1, "graveyard", cause="dies")
+            elif kind == "self_tapped":
+                event_result = game_state.tap_permanent(
+                    target_id, game_state.p1)
+            elif kind == "self_dies":
+                event_result = game_state.move_card(
+                    target_id, game_state.p1, "battlefield",
+                    game_state.p1, "graveyard", cause="dies")
+            elif (spec.get("event_type") == "ENTERS_BATTLEFIELD"
+                  and event_card_id is not None):
+                event_result = game_state.move_card(
+                    event_card_id, event_player, "hand", event_player,
+                    "battlefield", cause="card_probe_room_locked_negative")
+            else:
+                path["reason"] = (
+                    "the matching locked-Room event fixture is not "
+                    "implemented for this trigger shape")
+                path["trace"] = trace
+                return path, issues
+        elif kind == "other_etb":
             event_result = game_state.move_card(
                 event_card_id, event_player, "hand", event_player,
                 "battlefield", cause="card_probe_trigger_negative")
-        elif spec["kind"] == "other_tapped":
+        elif kind == "other_tapped":
             event_result = game_state.tap_permanent(
                 event_card_id, event_player)
-        elif spec["kind"] == "other_dies":
+        elif kind == "other_dies":
             event_result = game_state.move_card(
                 event_card_id, event_player, "battlefield", event_player,
                 "graveyard", cause="dies")
-        elif spec["kind"] == "other_attacks":
+        elif kind == "other_attacks":
             game_state.phase = game_state.PHASE_DECLARE_ATTACKERS
             game_state._last_turn_phase = game_state.phase
             game_state.previous_priority_phase = game_state.phase
@@ -3113,7 +3873,11 @@ def _probe_triggered_negative(
             event_result = game_state.ability_handler.check_abilities(
                 None, spec["event_type"], {"controller": game_state.p2})
 
-        if spec["kind"] != "opponent_phase" and not event_result:
+        event_may_legitimately_return_false = (
+            kind == "opponent_phase"
+            or (spec.get("matching_event_while_source_locked")
+                and kind == "phase_begin"))
+        if not event_may_legitimately_return_false and not event_result:
             raise AssertionError(
                 f"real negative trigger event failed for {spec['kind']}")
 
@@ -3138,6 +3902,7 @@ def _probe_triggered_negative(
         path["event_fixture"] = {
             **{key: value for key, value in spec.items()
                if key not in {"phase"}},
+            **event_evidence,
             "event_card_id": event_card_id,
             "event_dispatched": True,
             "dispatch_returned": bool(event_result),
@@ -3214,11 +3979,19 @@ def _probe_activated(
         path["cost"] = getattr(ability, "cost", None)
         path["effect"] = getattr(
             ability, "effect", getattr(ability, "effect_text", None))
+        path["timing_fixture"] = _stage_activated_timing_fixture(
+            game_state, ability, game_state.p1)
+        timing_mask = _generate_mask(handler)
+        path["timing_fixture"]["pass_priority_exposed"] = bool(
+            timing_mask[11])
         dispatch, trace, mana_setup_land_ids = _fund_until_activated(
             handler, fixture["land_ids"], target_id=target_id,
             ability_index=ability_index, max_decisions=max_decisions,
             choice_plan=choice_plan, decision_state=decision_state)
         path["mana_setup_land_ids"] = mana_setup_land_ids
+        path["ability_legal_after_mana_setup"] = bool(
+            game_state.ability_handler.can_activate_ability(
+                target_id, ability_index, game_state.p1))
         if dispatch is None:
             _assert_fidelity_clean(
                 before_fidelity, game_state, f"{path_id} mask setup")
@@ -3226,6 +3999,7 @@ def _probe_activated(
                 "ability was registered but not exposed by the public mask "
                 "after deterministic real-mana setup")
             path["mana_setup_actions"] = len(trace)
+            path["trace"] = trace
             return path, issues
         path["dispatch"] = dispatch
         trace.extend(_apply_activated_dispatch(handler, dispatch))
@@ -3287,12 +4061,21 @@ def _probe_activated_negative(entry: dict, ability_index: int, *,
             path["reason"] = (
                 "registered activated ability was not rediscovered in fresh state")
             return path, issues
+        ability = abilities[ability_index]
+        path["timing_fixture"] = _stage_activated_timing_fixture(
+            game_state, ability, game_state.p1)
+        timing_mask = _generate_mask(handler)
+        path["timing_fixture"]["pass_priority_exposed"] = bool(
+            timing_mask[11])
         positive_dispatch, setup_trace, setup_lands = _fund_until_activated(
             handler, fixture["land_ids"], target_id=target_id,
             ability_index=ability_index, max_decisions=max_decisions)
         path["positive_control_dispatch"] = positive_dispatch
         path["mana_setup_land_ids"] = setup_lands
         path["setup_trace"] = setup_trace
+        path["ability_legal_after_mana_setup"] = bool(
+            game_state.ability_handler.can_activate_ability(
+                target_id, ability_index, game_state.p1))
         if positive_dispatch is None:
             _assert_fidelity_clean(
                 before_fidelity, game_state,
@@ -3383,11 +4166,12 @@ def _probe_card_seeded(entry: dict, *, input_identity: dict,
                     continue
                 ability_index = int(obligation["id"].split(":", 1)[1])
                 if surface_kind == "triggered":
-                    trigger_condition = str(discovered_by_id.get(
-                        obligation["id"], {}).get(
-                            "trigger_condition", "") or "")
+                    trigger_surface = discovered_by_id.get(
+                        obligation["id"], {})
+                    trigger_condition = str(trigger_surface.get(
+                        "trigger_condition", "") or "")
                     variants = _trigger_fixture_variants(
-                        entry, trigger_condition)
+                        entry, trigger_condition, trigger_surface)
                     variant_paths = []
                     for variant_index, fixture_spec in enumerate(variants):
                         arm = re.sub(
@@ -3457,7 +4241,7 @@ def _probe_card_seeded(entry: dict, *, input_identity: dict,
                     completed_paths[obligation["id"]] = aggregate
                     negative_id = f"{obligation['id']}:negative_event"
                     negative_specs = _trigger_negative_fixture_specs(
-                        entry, trigger_condition)
+                        entry, trigger_condition, trigger_surface)
                     if not negative_specs:
                         negative_specs = [None]
                     negative_paths = []

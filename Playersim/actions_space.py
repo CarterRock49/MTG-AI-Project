@@ -574,18 +574,28 @@ class ActionSpaceMixin:
                 is_sorcery_speed_type = 'land' not in card.type_line.lower() and not ('instant' in card.card_types or self._has_flash(card_id))
 
                 if is_sorcery_speed_type:
+                    play_context = {
+                        'hand_idx': i,
+                        'card_id': card_id,
+                        'controller_id': (
+                            'p1' if player is gs.p1 else 'p2'),
+                        'source_zone': 'hand',
+                    }
+                    if getattr(card, 'is_room', False):
+                        # PLAY_SPELL is the compatibility alias for a Room's
+                        # front face.  Pin that announcement before probing so
+                        # the mask cannot price the combined card and execute a
+                        # different door.
+                        play_context = self._room_cast_contexts(
+                            card, play_context)[0]
                     # Check base cost affordability FIRST for the standard PLAY_SPELL action
                     if (self._spell_cast_supported(card)
-                            and self._can_afford_card(player, card, context={})):
-                        if self._targets_available(card, player, opponent):
+                            and self._can_afford_card(
+                                player, card, context=play_context)):
+                        if (getattr(card, 'is_room', False)
+                                or self._targets_available(
+                                    card, player, opponent)):
                             # --- STANDARD PLAY_SPELL ACTION ---
-                            # Provide context: hand_idx
-                            play_context = {
-                                'hand_idx': i,
-                                'card_id': card_id,
-                                'controller_id': (
-                                    'p1' if player is gs.p1 else 'p2'),
-                            }
                             action_index = 20 + i if i < 8 else 396 + (i - 8)
                             set_valid_action(action_index, f"PLAY_SPELL {card.name}", context=play_context)
                             # Offer Kicker / Additional Cost Payment (If applicable) - Should check affordability
@@ -2314,6 +2324,49 @@ class ActionSpaceMixin:
                             if can_afford_adventure:
                                 set_valid_action(196 + hand_idx, f"PLAY_ADVENTURE for {adventure_data.get('name', 'Unknown')}")
 
+    @staticmethod
+    def _room_face_colors_from_cost(mana_cost):
+        """Return the WUBRG vector of one announced Room face."""
+        symbols = re.findall(r"\{([^}]+)\}", str(mana_cost or "").upper())
+        colored_parts = {
+            part
+            for symbol in symbols
+            for part in symbol.split("/")
+            if part in set("WUBRG")
+        }
+        return [int(symbol in colored_parts) for symbol in "WUBRG"]
+
+    @staticmethod
+    def _room_cast_contexts(card, base_context):
+        """Return canonical announced-face contexts for one castable Room."""
+        base = dict(base_context or {})
+        if (not getattr(card, 'is_room', False)
+                or len(getattr(card, 'faces', []) or []) < 2):
+            return [base]
+        base.setdefault('card_id', getattr(card, 'card_id', None))
+        contexts = []
+        for face_index in (0, 1):
+            candidate = dict(base)
+            face = card.faces[face_index] or {}
+            face_cost = (card.get_face_cost(face_index)
+                         if hasattr(card, 'get_face_cost')
+                         else face.get('mana_cost', ''))
+            candidate.update({
+                'room_cast_face_index': face_index,
+                'room_cast_door_number': face_index + 1,
+                'room_cast_face_name': face.get(
+                    'name', f'Door {face_index + 1}'),
+                'room_cast_face_mana_cost': face_cost or '',
+                'room_cast_face_colors':
+                    ActionSpaceMixin._room_face_colors_from_cost(face_cost),
+            })
+            if face_index == 1:
+                candidate['cast_as_back_face'] = True
+            else:
+                candidate.pop('cast_as_back_face', None)
+            contexts.append(candidate)
+        return contexts
+
     def _can_afford_card(self, player, card_or_data, is_back_face=False, context=None):
         """Check affordability using ManaSystem, handling dict or Card object."""
         gs = self.game_state
@@ -2328,6 +2381,14 @@ class ActionSpaceMixin:
         elif isinstance(card_or_data, Card):
             cost_str = getattr(card_or_data, 'mana_cost', '')
             card_id = getattr(card_or_data, 'card_id', None)
+            room_face_index = context.get('room_cast_face_index')
+            if (getattr(card_or_data, 'is_room', False)
+                    and room_face_index in (0, 1)
+                    and hasattr(card_or_data, 'get_face_cost')):
+                cost_str = card_or_data.get_face_cost(room_face_index)
+                context['room_cast_door_number'] = room_face_index + 1
+                if room_face_index == 1:
+                    context['cast_as_back_face'] = True
             # Conditional mana restrictions inspect the spell object. The
             # live cast installs it before payment; the mask probe must carry
             # the same context or it hides casts payable with restricted mana.
@@ -2364,7 +2425,16 @@ class ActionSpaceMixin:
             return False
 
         try:
-            parsed_cost = gs.mana_system.parse_mana_cost(cost_str)
+            alt_cost_type = context.get('use_alt_cost')
+            if alt_cost_type == 'plot':
+                parsed_cost = gs.mana_system.parse_mana_cost('')
+            elif alt_cost_type:
+                parsed_cost = gs.mana_system.calculate_alternative_cost(
+                    card_id, player, alt_cost_type, context)
+                if parsed_cost is None:
+                    return False
+            else:
+                parsed_cost = gs.mana_system.parse_mana_cost(cost_str)
             if context.get('pay_offspring'):
                 # Price the printed mana cost and Offspring's optional
                 # additional cost as one CR 601.2f cost.  Probing them
@@ -2637,6 +2707,11 @@ class ActionSpaceMixin:
                 card = gs._safe_get_card(card_id)
                 if not card:
                     continue
+                # Rooms have two global split-action slots.  The split helper
+                # visits the entire hand and lets set_valid_action route any
+                # collisions into this same catalog with pinned face context.
+                if getattr(card, "is_room", False):
+                    continue
                 controller_id = "p1" if player is gs.p1 else "p2"
                 action_context = {
                     "hand_idx": hand_idx, "card_id": card_id,
@@ -2829,6 +2904,28 @@ class ActionSpaceMixin:
                         context["controlled_permanent_land_play"] = True
                     else:
                         context["emblem_graveyard_cast"] = True
+                    context.update({
+                        "card_id": card_id,
+                        "controller_id": (
+                            "p1" if player is gs.p1 else "p2"),
+                    })
+                    if (not is_land
+                            and getattr(card, "is_room", False)):
+                        for room_context in self._room_cast_contexts(
+                                card, context):
+                            # A Room is an enchantment spell.  Targets printed
+                            # in either door belong to its abilities, not to
+                            # the Room spell being announced.
+                            if self._can_afford_card(
+                                    player, card, context=room_context):
+                                options.append({
+                                    "label": (
+                                        "Cast from graveyard: "
+                                        f"{room_context['room_cast_face_name']}"),
+                                    "handler": "play_from_graveyard",
+                                    "action_context": room_context,
+                                })
+                        continue
                     if (not is_land
                             and (not self._can_afford_card(
                                 player, card, context=context)
@@ -2872,32 +2969,53 @@ class ActionSpaceMixin:
             is_land = bool(
                 "land" in getattr(card, "card_types", [])
                 or "land" in str(getattr(card, "type_line", "")).lower())
+            permission = option.get("permission", "ordinary")
+            base_context = {
+                "exile_option_index": i,
+                "source_zone": "exile",
+                "source_idx": option.get("source_idx"),
+                "card_id": option["card_id"],
+                "controller_id": "p1" if player is gs.p1 else "p2",
+                "exile_permission": permission,
+            }
             if is_land:
                 can_afford = bool(
-                    option.get("permission") == "ordinary"
+                    permission == "ordinary"
                     and gs.can_play_land_this_turn(player)
                     and gs._can_act_at_sorcery_speed(player)
                     and (gs.priority_player is None
                          or gs.priority_player is player))
             elif not gs.can_player_cast_spells(player):
                 continue
-            elif option.get("permission") == "plot":
-                can_afford = True
-            elif option.get("alternative_cost") and hasattr(gs, 'mana_system'):
-                can_afford = gs.mana_system.can_pay_mana_cost(
-                    player, option["alternative_cost"])
-            elif hasattr(gs, 'mana_system'):
-                can_afford = gs.mana_system.can_pay_mana_cost(
-                    player, getattr(card, "mana_cost", ""))
+            if is_land:
+                cast_contexts = [base_context]
             else:
-                can_afford = sum(player["mana_pool"].values()) > 0
-            if can_afford:
-                permission = option.get("permission", "exile")
+                cast_contexts = self._room_cast_contexts(card, base_context)
+            for cast_context in cast_contexts:
+                if not is_land:
+                    probe_context = dict(cast_context)
+                    if permission == "plot":
+                        probe_context.update({
+                            "use_alt_cost": "plot", "plot_cast": True})
+                    elif permission == "airbend":
+                        probe_context.update({
+                            "use_alt_cost": "exile_permission",
+                            "alternative_cost": option.get(
+                                "alternative_cost", "{2}"),
+                            "airbend_cast": True,
+                        })
+                    can_afford = self._can_afford_card(
+                        player, card, context=probe_context)
+                if not can_afford:
+                    continue
+                face_label = (
+                    f" [{cast_context['room_cast_face_name']}]"
+                    if getattr(card, "is_room", False) else "")
                 set_valid_action(
                     230 + i,
                     f"{'PLAY' if is_land else 'CAST'}_FROM_EXILE "
-                    f"{card.name} ({permission})",
-                    context={"exile_option_index": i})
+                    f"{card.name}{face_label} ({permission})",
+                    context=cast_context)
 
     def _add_plot_actions(self, player, valid_actions, set_valid_action):
         """Expose Plot as one hand-indexed sorcery-speed special action."""
@@ -3632,12 +3750,25 @@ class ActionSpaceMixin:
             cast_context = {
                 "source_zone": "graveyard",
                 "source_idx": graveyard_index,
+                "card_id": card_id,
+                "controller_id": "p1" if player is gs.p1 else "p2",
             }
             if is_land and has_land_permission:
                 cast_context["controlled_permanent_land_play"] = True
             else:
                 cast_context["emblem_graveyard_cast"] = True
             if not is_land:
+                if getattr(card, "is_room", False):
+                    for room_context in self._room_cast_contexts(
+                            card, cast_context):
+                        if self._can_afford_card(
+                                player, card, context=room_context):
+                            set_valid_action(
+                                472 + graveyard_index,
+                                "CAST_FROM_GRAVEYARD "
+                                f"{room_context['room_cast_face_name']}",
+                                context=room_context)
+                    continue
                 if not self._can_afford_card(player, card, context=cast_context):
                     continue
                 if not self._targets_available(card, player, opponent):
@@ -3748,17 +3879,42 @@ class ActionSpaceMixin:
         if not gs.can_player_cast_spells(player):
             return
         
-        for idx, card_id in enumerate(player["hand"][:8]):  # Limit to first 8
+        for idx, card_id in enumerate(player["hand"]):
             card = gs._safe_get_card(card_id)
             
             # Check if it's a split card
             is_split = False
-            if card and hasattr(card, 'layout'):
+            if card and getattr(card, 'is_room', False):
+                is_split = True
+            elif card and hasattr(card, 'layout'):
                 is_split = card.layout == "split"
             elif card and hasattr(card, 'oracle_text') and "//" in card.oracle_text:
                 is_split = True
             
             if is_split:
+                if (getattr(card, 'is_room', False)
+                        and len(getattr(card, 'faces', []) or []) >= 2):
+                    controller_id = 'p1' if player is gs.p1 else 'p2'
+                    base_context = {
+                        'hand_idx': idx, 'card_id': card_id,
+                        'controller_id': controller_id,
+                        'source_zone': 'hand',
+                    }
+                    for face_index, face_context in enumerate(
+                            self._room_cast_contexts(card, base_context)):
+                        action_index = 445 + face_index
+                        if self._can_afford_card(
+                                player, card, context=face_context):
+                            label = (
+                                'CAST_LEFT_HALF' if face_index == 0
+                                else 'CAST_RIGHT_HALF')
+                            set_valid_action(
+                                action_index,
+                                f"{label} of "
+                                f"{face_context['room_cast_face_name']}",
+                                context=face_context)
+                    continue
+
                 # Extract information about both halves
                 has_left_half = hasattr(card, 'left_half')
                 has_right_half = hasattr(card, 'right_half')

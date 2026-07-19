@@ -75,6 +75,8 @@ class CardProbeTest(unittest.TestCase):
                 "Emeritus of Ideation // Ancestral Recall",
                 "Great Hall of the Biblioplex", "Manifold Mouse",
                 "Lumbering Worldwagon", "Optimistic Scavenger",
+                "Roaring Furnace // Steaming Sauna",
+                "Pit Automaton",
                 "Meltstrider's Resolve", "Overlord of the Hauntwoods",
                 "North Wind Avatar", "Sunderflock",
                 "Restless Cottage",
@@ -822,8 +824,8 @@ class CardProbeTest(unittest.TestCase):
             row for row in scavenger["obligations"]
             if row.get("id") == "triggered:0")
         self.assertEqual(scavenger_trigger["event_arm_count"], 2)
-        self.assertEqual(scavenger_trigger["exercised_event_arm_count"], 1)
-        self.assertEqual(scavenger_trigger["status"], "coverage_gap")
+        self.assertEqual(scavenger_trigger["exercised_event_arm_count"], 2)
+        self.assertEqual(scavenger_trigger["status"], "exercised")
         scavenger_paths = {
             path["event_arm"]: path for path in scavenger["paths"]
             if path.get("id", "").startswith("triggered:0:event:")}
@@ -832,13 +834,36 @@ class CardProbeTest(unittest.TestCase):
             "exercised")
         self.assertEqual(
             scavenger_paths["fully_unlock_room"]["status"],
-            "coverage_gap")
-        scavenger_negative = next(
-            path for path in scavenger["paths"]
-            if path.get("id") == "triggered:0:negative_event")
-        self.assertEqual(scavenger_negative["status"], "exercised")
+            "exercised")
+        room_path = scavenger_paths["fully_unlock_room"]
+        self.assertEqual(room_path["event_fixture"]["kind"],
+                         "room_full_unlock")
+        self.assertTrue(room_path["event_fixture"]["fully_unlocked_after"])
         self.assertEqual(
-            scavenger_negative["event_fixture"]["desired_delivery_count"], 0)
+            room_path["event_fixture"]["desired_delivery_count"], 1)
+        self.assertIn(
+            "UNLOCK_DOOR",
+            [step["action_type"] for step in room_path["trace"]])
+
+        scavenger_negatives = [
+            path for path in scavenger["paths"]
+            if path.get("id", "").startswith(
+                "triggered:0:negative_event")]
+        self.assertEqual(len(scavenger_negatives), 3)
+        self.assertTrue(all(
+            path["status"] == "exercised"
+            for path in scavenger_negatives))
+        partial_room = next(
+            path for path in scavenger_negatives
+            if path.get("negative_arm") ==
+            "room_remains_partially_locked")
+        self.assertFalse(
+            partial_room["event_fixture"]["fully_unlocked_after"])
+        self.assertEqual(
+            partial_room["event_fixture"]["desired_delivery_count"], 0)
+        self.assertIn(
+            "UNLOCK_DOOR",
+            [step["action_type"] for step in partial_room["trace"]])
 
         worldwagon = probe_card(
             self.entries["Lumbering Worldwagon"],
@@ -850,6 +875,225 @@ class CardProbeTest(unittest.TestCase):
         self.assertEqual(worldwagon_trigger["event_arm_count"], 2)
         self.assertEqual(worldwagon_trigger["status"], "coverage_gap")
         self.assertIn("animation or crew", worldwagon_trigger["reason"])
+
+    def test_exhaust_trigger_uses_public_positive_and_controller_negative(self):
+        result = probe_card(
+            self.entries["Afterburner Expert"],
+            input_identity=self.identity,
+            max_decisions=48, max_branches=12)
+        surface = next(
+            row for row in result["discovered"]
+            if row.get("class") == "TriggeredAbility"
+            and "activate an exhaust ability" in str(
+                row.get("trigger_condition", "")).lower())
+        self.assertEqual(surface["trigger_zone"], "graveyard")
+
+        positive = next(
+            path for path in result["paths"]
+            if path.get("id") == surface["id"])
+        self.assertEqual(positive["status"], "exercised")
+        self.assertEqual(
+            positive["event_fixture"]["kind"], "exhaust_activation")
+        self.assertEqual(positive["event_fixture"]["fixture_owner"], "own")
+        self.assertEqual(
+            positive["event_fixture"]["desired_delivery_count"], 1)
+        self.assertIn(
+            "ACTIVATE_ABILITY",
+            [step["action_type"] for step in positive["trace"]])
+        self.assertIn(
+            positive["source_id"],
+            positive["state_delta"]["zones"]["p1"]["graveyard"]["removed"])
+        self.assertIn(
+            positive["source_id"],
+            positive["state_delta"]["zones"]["p1"]["battlefield"]["added"])
+
+        negative = next(
+            path for path in result["paths"]
+            if path.get("id") == f"{surface['id']}:negative_event")
+        self.assertEqual(negative["status"], "exercised")
+        self.assertEqual(
+            negative["event_fixture"]["fixture_owner"], "opponent")
+        self.assertEqual(
+            negative["event_fixture"]["desired_delivery_count"], 0)
+        self.assertIn(
+            "ACTIVATE_ABILITY",
+            [step["action_type"] for step in negative["trace"]])
+
+    def test_exhaust_trigger_rejects_own_non_exhaust_public_activation(self):
+        result = probe_card(
+            self.entries["Afterburner Expert"],
+            input_identity=self.identity,
+            max_decisions=48, max_branches=12)
+        negative = next(
+            path for path in result["paths"]
+            if path.get("negative_arm") == "own_non_exhaust_activation")
+
+        self.assertEqual(negative["status"], "exercised")
+        self.assertEqual(
+            negative["event_fixture"]["kind"],
+            "non_exhaust_activation")
+        self.assertEqual(
+            negative["event_fixture"]["fixture_owner"], "own")
+        self.assertFalse(
+            negative["event_fixture"]["event_ability_is_exhaust"])
+        self.assertEqual(
+            negative["event_fixture"]["desired_delivery_count"], 0)
+        self.assertIn(
+            "ACTIVATE_ABILITY",
+            [step["action_type"] for step in negative["trace"]])
+
+    def test_room_trigger_paths_preserve_face_and_exact_door_provenance(self):
+        result = probe_card(
+            self.entries["Roaring Furnace // Steaming Sauna"],
+            input_identity=self.identity,
+            max_decisions=48, max_branches=12)
+        trigger_surfaces = [
+            row for row in result["discovered"]
+            if row.get("class") == "TriggeredAbility"]
+        door_surface = next(
+            row for row in trigger_surfaces
+            if "unlock this door" in str(
+                row.get("trigger_condition", "")).lower())
+        end_step_surface = next(
+            row for row in trigger_surfaces
+            if "beginning of your end step" in str(
+                row.get("trigger_condition", "")).lower())
+        self.assertEqual(
+            (door_surface["room_face_index"],
+             door_surface["room_door_number"]), (0, 1))
+        self.assertEqual(
+            (end_step_surface["room_face_index"],
+             end_step_surface["room_door_number"]), (1, 2))
+
+        positive = next(
+            path for path in result["paths"]
+            if path.get("id") == door_surface["id"])
+        self.assertEqual(positive["status"], "exercised")
+        self.assertEqual(
+            positive["event_fixture"]["kind"], "room_door_unlock")
+        self.assertEqual(positive["event_fixture"]["door_number"], 1)
+        self.assertEqual(
+            positive["event_fixture"]["expected_trigger_door_number"], 1)
+        self.assertEqual(
+            positive["event_fixture"]["desired_delivery_count"], 1)
+        self.assertIn(
+            "UNLOCK_DOOR",
+            [step["action_type"] for step in positive["trace"]])
+
+        negative = next(
+            path for path in result["paths"]
+            if path.get("id") == f"{door_surface['id']}:negative_event")
+        self.assertEqual(negative["status"], "exercised")
+        self.assertEqual(negative["event_fixture"]["door_number"], 2)
+        self.assertEqual(
+            negative["event_fixture"]["expected_trigger_door_number"], 1)
+        self.assertEqual(
+            negative["event_fixture"]["desired_delivery_count"], 0)
+        self.assertIn(
+            "UNLOCK_DOOR",
+            [step["action_type"] for step in negative["trace"]])
+
+        end_step = next(
+            path for path in result["paths"]
+            if path.get("id") == end_step_surface["id"])
+        self.assertEqual(end_step["status"], "exercised")
+        self.assertEqual(
+            end_step["event_fixture"]["source_room_door_number"], 2)
+
+    def test_room_door_trigger_rejects_matching_door_on_another_room(self):
+        result = probe_card(
+            self.entries["Roaring Furnace // Steaming Sauna"],
+            input_identity=self.identity,
+            max_decisions=48, max_branches=12)
+        negative = next(
+            path for path in result["paths"]
+            if path.get("negative_arm") ==
+            "matching_door_on_another_room")
+
+        self.assertEqual(negative["status"], "exercised")
+        fixture = negative["event_fixture"]
+        self.assertNotEqual(fixture["source_room_id"], fixture["room_id"])
+        self.assertEqual(
+            fixture["door_number"],
+            fixture["expected_trigger_door_number"])
+        self.assertEqual(fixture["desired_delivery_count"], 0)
+        self.assertIn(
+            "UNLOCK_DOOR",
+            [step["action_type"] for step in negative["trace"]])
+
+    def test_room_nonunlock_trigger_rejects_matching_event_while_locked(self):
+        result = probe_card(
+            self.entries["Roaring Furnace // Steaming Sauna"],
+            input_identity=self.identity,
+            max_decisions=48, max_branches=12)
+        negative = next(
+            path for path in result["paths"]
+            if path.get("negative_arm") ==
+            "source_room_face_locked_phase_begin")
+
+        self.assertEqual(negative["status"], "exercised")
+        fixture = negative["event_fixture"]
+        self.assertEqual(fixture["event_type"], "BEGINNING_OF_END_STEP")
+        self.assertTrue(fixture["source_room_face_locked"])
+        self.assertEqual(fixture["source_room_door_number"], 2)
+        self.assertEqual(fixture["desired_delivery_count"], 0)
+
+    def test_full_room_trigger_rejects_opponent_full_unlock(self):
+        result = probe_card(
+            self.entries["Optimistic Scavenger"],
+            input_identity=self.identity,
+            max_decisions=48, max_branches=12)
+        negative = next(
+            path for path in result["paths"]
+            if path.get("negative_arm") == "opponent_fully_unlocks_room")
+
+        self.assertEqual(negative["status"], "exercised")
+        fixture = negative["event_fixture"]
+        self.assertEqual(fixture["fixture_owner"], "opponent")
+        self.assertTrue(fixture["fully_unlocked_after"])
+        self.assertEqual(fixture["desired_delivery_count"], 0)
+        self.assertIn(
+            "UNLOCK_DOOR",
+            [step["action_type"] for step in negative["trace"]])
+
+    def test_room_trigger_provenance_reconciliation_fails_closed(self):
+        result = probe_card(
+            self.entries["Roaring Furnace // Steaming Sauna"],
+            input_identity=self.identity,
+            max_decisions=48, max_branches=12)
+        provenance = [
+            row for row in result["obligations"]
+            if row.get("kind") == "room_face_provenance"]
+
+        self.assertEqual(len(provenance), 2)
+        self.assertTrue(all(
+            row["status"] == "exercised" for row in provenance))
+        self.assertEqual(
+            result["discovery_fidelity"]["room_face_provenance"],
+            [{
+                "matched_surface": "triggered:0",
+                "status": "exercised",
+                "room_face_index": 0,
+                "room_door_number": 1,
+                "expected_room_door_number": 1,
+            }, {
+                "matched_surface": "triggered:1",
+                "status": "exercised",
+                "room_face_index": 1,
+                "room_door_number": 2,
+                "expected_room_door_number": 2,
+            }])
+
+        mismatch = card_probe_module._room_trigger_provenance_obligation({
+            "id": "triggered:synthetic",
+            "room_face_index": 0,
+            "room_door_number": 2,
+        })
+        self.assertEqual(mismatch["status"], "failed")
+        self.assertIn("door_number must equal face_index + 1",
+                      mismatch["reason"])
+        self.assertEqual(
+            card_probe_module._result_status([mismatch], []), "failed")
 
     def test_compound_trigger_exercises_all_supported_arms_fresh(self):
         overlord = probe_card(
@@ -987,8 +1231,14 @@ class CardProbeTest(unittest.TestCase):
         self.assertEqual(emeritus["runtime_status"], "coverage_gap")
 
     def test_printed_trigger_inventory_blocks_omissions_and_accepts_repair(self):
+        # Isolate printed-trigger reconciliation from the regenerated static
+        # ledger, which now independently flags Manifold Mouse's token-copy
+        # text as partial.
+        manifold_entry = copy.deepcopy(self.entries["Manifold Mouse"])
+        manifold_entry["ledger_status"] = "observed_clean"
+        manifold_entry["ledger_issues"] = []
         manifold = probe_card(
-            self.entries["Manifold Mouse"], input_identity=self.identity,
+            manifold_entry, input_identity=self.identity,
             max_decisions=32, max_branches=8)
         manifold_summary = manifold["discovery_fidelity"][
             "printed_trigger_inventory"]
@@ -1159,9 +1409,94 @@ class CardProbeTest(unittest.TestCase):
             obligations["activated:0:negative_mask"]["status"], "exercised")
         paths = {row["id"]: row for row in result["paths"]}
         self.assertEqual(len(paths["activated:0"]["mana_setup_land_ids"]), 2)
+        self.assertEqual(
+            paths["activated:0"]["timing_fixture"]["kind"],
+            "priority_speed")
+        self.assertEqual(
+            paths["activated:0"]["timing_fixture"]["phase"], "PRIORITY")
+        self.assertFalse(paths["activated:0"]["timing_fixture"][
+            "sorcery_speed_available"])
+        self.assertTrue(paths["activated:0"]["timing_fixture"][
+            "pass_priority_exposed"])
         self.assertIsNotNone(paths[
             "activated:0:negative_mask"]["positive_control_dispatch"])
+        self.assertEqual(
+            paths["activated:0:negative_mask"]["timing_fixture"]["kind"],
+            "priority_speed")
         self.assertIn("state_delta", paths["activated:0"])
+
+    def test_nested_delayed_trigger_is_attributed_without_hiding_legality_gap(self):
+        result = probe_card(
+            self.entries["Pit Automaton"], input_identity=self.identity,
+            max_decisions=48, max_branches=8)
+        summary = result["discovery_fidelity"][
+            "printed_trigger_inventory"]
+        self.assertEqual(summary["attributed_nested_lexeme_count"], 1)
+        self.assertEqual(summary["unmatched_lexeme_count"], 0)
+        self.assertFalse(any(
+            row.get("kind") == "printed_trigger_lexeme"
+            for row in result["obligations"]))
+
+        activated_surface = next(
+            row for row in result["discovered"]
+            if row.get("id") == "activated:1")
+        nested = next(
+            row for row in result["discovered"]
+            if row.get("class") == "nested_delayed_trigger_lexeme")
+        self.assertEqual(nested["matched_surface"], "activated:1")
+        self.assertEqual(
+            activated_surface["nested_trigger_lexeme_ids"],
+            [nested["printed_trigger_lexeme_id"]])
+
+        obligations = {row["id"]: row for row in result["obligations"]}
+        paths = {row["id"]: row for row in result["paths"]}
+        self.assertEqual(obligations["activated:1"]["status"], "coverage_gap")
+        self.assertEqual(paths["activated:1"]["status"], "coverage_gap")
+        self.assertEqual(
+            paths["activated:1"]["timing_fixture"]["kind"],
+            "priority_speed")
+        self.assertEqual(
+            paths["activated:1"]["timing_fixture"]["phase"], "PRIORITY")
+        self.assertFalse(paths["activated:1"]["timing_fixture"][
+            "sorcery_speed_available"])
+        self.assertTrue(paths["activated:1"]["timing_fixture"][
+            "pass_priority_exposed"])
+        self.assertFalse(paths["activated:1"][
+            "ability_legal_after_mana_setup"])
+        self.assertIn(
+            "not exposed by the public mask",
+            paths["activated:1"]["reason"])
+        self.assertEqual(result["runtime_status"], "failed")
+
+    def test_unattributed_nested_trigger_lexeme_remains_fail_visible(self):
+        entry = {
+            "name": "Synthetic Nested Lexeme",
+            "raw": {
+                "name": "Synthetic Nested Lexeme",
+                "oracle_text": (
+                    "{2}: Draw a card When a creature enters the battlefield."),
+            },
+        }
+        obligations = []
+        discovered = [{
+            "id": "activated:0",
+            "class": "ActivatedAbility",
+            "effect": "Draw a card",
+            "effect_text": "{2}: Draw a card",
+        }]
+
+        summary = card_probe_module._reconcile_printed_triggers(
+            entry, obligations, discovered)
+
+        self.assertEqual(summary["attributed_nested_lexeme_count"], 0)
+        self.assertEqual(summary["unmatched_lexeme_count"], 1)
+        gap = next(
+            row for row in obligations
+            if row.get("kind") == "printed_trigger_lexeme")
+        self.assertEqual(gap["status"], "coverage_gap")
+        self.assertTrue(any(
+            row.get("class") == "unmatched_trigger_lexeme"
+            for row in discovered))
 
     def test_formerly_trusted_cards_emit_no_runtime_diagnostics(self):
         for name in self.TRUSTED_DIAGNOSTIC_REGRESSIONS:

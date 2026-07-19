@@ -105,6 +105,39 @@ class CanaryEffectBindingTest(unittest.TestCase):
         self.assertIn(1, game_state.p1["hand"])
         self.assertIn(2, game_state.p2["hand"])
 
+    def test_up_to_two_counter_instruction_accepts_zero_one_or_two_targets(self):
+        clause = (
+            "Put a +1/+1 counter on each of up to two target creatures.")
+        game_state = self._state({
+            0: card("Elegant Rotunda", "Enchantment - Room"),
+            1: card("First Counter Target", "Creature - Scout",
+                    power=1, toughness=1),
+            2: card("Second Counter Target", "Creature - Scout",
+                    power=2, toughness=2),
+        })
+        game_state.p1["battlefield"] = [0, 1, 2]
+        effect = EffectFactory.create_effects(clause)[0]
+
+        self.assertEqual(type(effect).__name__, "AddCountersEffect")
+        self.assertTrue(effect.requires_target)
+        self.assertEqual((effect.min_targets, effect.max_targets), (0, 2))
+        self.assertTrue(effect.apply(game_state, 0, game_state.p1, {}))
+        self.assertNotIn("+1/+1", game_state._safe_get_card(1).counters)
+        self.assertNotIn("+1/+1", game_state._safe_get_card(2).counters)
+
+        self.assertTrue(effect.apply(
+            game_state, 0, game_state.p1, {"creatures": [1]}))
+        self.assertEqual(
+            game_state._safe_get_card(1).counters["+1/+1"], 1)
+        self.assertNotIn("+1/+1", game_state._safe_get_card(2).counters)
+
+        self.assertTrue(effect.apply(
+            game_state, 0, game_state.p1, {"creatures": [1, 2]}))
+        self.assertEqual(
+            game_state._safe_get_card(1).counters["+1/+1"], 2)
+        self.assertEqual(
+            game_state._safe_get_card(2).counters["+1/+1"], 1)
+
     def test_revelation_binds_spell_bounce_and_damage_separately(self):
         oracle_text = (
             "Return target spell or permanent to its owner's hand. Jeskai "

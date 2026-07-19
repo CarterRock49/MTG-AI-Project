@@ -554,6 +554,14 @@ class LayerSystem:
 
     def _parse_layer7_effect(self, effect_lower):
         """Parse P/T effects for Layer 7."""
+        if re.search(
+                r"\bbase power and toughness (?:are )?each equal to "
+                r"the number of creatures you control\b", effect_lower):
+            return {
+                'sublayer': 'a',
+                'effect_type': 'set_pt_cda',
+                'effect_value': 'creature_count_self',
+            }
         # Layer 7a: Set Base P/T (e.g., from copy effects or abilities setting base)
         match = re.search(r"(?:base power and toughness|base power|base toughness)\s+(?:is|are)\s+(\d+)/(\d+)", effect_lower)
         if match:
@@ -719,7 +727,16 @@ class LayerSystem:
                       elif cda_type == 'creature_count_self':
                            controller = chars.get('_controller')
                            if controller:
-                                count = sum(1 for cid in controller.get("battlefield", []) if 'creature' in getattr(self.game_state._safe_get_card(cid),'card_types',[]))
+                                count = sum(
+                                    1 for card_id in controller.get(
+                                        "battlefield", [])
+                                    if 'creature' in (
+                                        calculated_characteristics.get(
+                                            card_id, {}).get('card_types', [])
+                                        or getattr(
+                                            self.game_state._safe_get_card(
+                                                card_id),
+                                            'card_types', [])))
                                 # These set both _base_ and current P/T
                                 chars['_base_power'] = count; chars['_base_toughness'] = count
                                 chars['power'] = count; chars['toughness'] = count

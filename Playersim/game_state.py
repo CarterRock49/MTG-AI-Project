@@ -78,7 +78,8 @@ class GameState(
                  "foretold_cards", "blitz_cards", "dash_cards", "unearthed_cards",
                  "jump_start_cards", "buyback_cards", "flashback_cards",
                  "life_gained_this_turn", "damage_this_turn", "exile_at_end_of_combat",
-                 "haste_until_eot", "has_haste_until_eot", "progress_was_forced",
+                 "haste_until_eot", "has_haste_until_eot",
+                 "defender_attack_permissions", "progress_was_forced",
                  "_turn_limit_checked", "miracle_card", "miracle_cost", "miracle_player",
                  "miracle_active", "miracle_card_id", "miracle_cost_parsed",
                  # New tracking variables
@@ -609,6 +610,12 @@ class GameState(
                     for _card in self.card_db.values():
                         if getattr(_card, 'counters', None):
                             _card.counters = {}
+                        if getattr(_card, 'is_room', False):
+                            for _door_number in (1, 2):
+                                _door = getattr(
+                                    _card, f'door{_door_number}', None)
+                                if _door:
+                                    _door['unlocked'] = False
                         if (getattr(_card, 'faces', None)
                                 and getattr(_card, 'current_face', 0) != 0
                                 and hasattr(_card, 'set_current_face')):
@@ -659,6 +666,9 @@ class GameState(
             self.adventure_cards = set()
             self.exile_at_end_of_combat = []
             self.haste_until_eot = set() # Use only this one for consistency
+            # card_id -> zone-change generation for source-bound effects that
+            # let that exact creature attack through defender this turn.
+            self.defender_attack_permissions = {}
             self.crewed_vehicles = set()
             self.morphed_cards = {}
             self.manifested_cards = {}
@@ -1213,6 +1223,7 @@ class GameState(
             "exile_alternative_costs", "impulse_until_next_turn",
             "flashback_permissions", "earthbent_lands",
             "face_down_exile_counts",
+            "defender_attack_permissions",
             "planeswalker_attack_targets", "battle_attack_targets", "planeswalker_protectors",
             "mulligan_count", "mulligan_data" # Dicts need deepcopy
             # Contexts will be handled separately due to player references
@@ -2044,7 +2055,8 @@ class GameState(
 
         Shared by variable draw/life/pump effects (July 2026 parser expansion).
         expr is a lowercased noun phrase such as "creatures you control",
-        "lands you control", "cards in your graveyard", "mountains you control".
+        "lands you control", "cards in your graveyard", "cards in your hand",
+        or "mountains you control".
         Returns an int, including 0 when a supported predicate has no matches.
         When ``strict`` is true, an unsupported expression returns ``None`` so
         callers can distinguish an unknown quantity from a known zero. The
@@ -2096,6 +2108,8 @@ class GameState(
         # this way" require frozen event evidence and therefore return None.
         if strict:
             graveyard = p.get("graveyard", [])
+            if re.fullmatch(r"cards? in your hand", expr):
+                return len(p.get("hand", []))
             if re.fullmatch(r"cards? in your graveyard", expr):
                 return len(graveyard)
             if re.fullmatch(
