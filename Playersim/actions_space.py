@@ -591,6 +591,35 @@ class ActionSpaceMixin:
                             # Offer Kicker / Additional Cost Payment (If applicable) - Should check affordability
                             # ... Add checks for PAY_KICKER (405/406), PAY_ADDITIONAL_COST (407/408) based on card text ...
 
+                    # Offspring is an optional additional cost announced as
+                    # the spell is cast.  Keep the ordinary unpaid cast above
+                    # and expose the paid transaction as its own public action.
+                    # Action 295 has only one fixed slot, so set_valid_action
+                    # automatically routes additional eligible hand cards
+                    # through the shared overflow catalog.
+                    offspring_cost = getattr(card, 'offspring_cost', None)
+                    if (getattr(card, 'is_offspring', False)
+                            and offspring_cost
+                            and self._spell_cast_supported(card)):
+                        offspring_context = {
+                            'hand_idx': i,
+                            'card_id': card_id,
+                            'controller_id': (
+                                'p1' if player is gs.p1 else 'p2'),
+                            'source_zone': 'hand',
+                            'direct_offspring_cast': True,
+                            'pay_offspring': True,
+                            'offspring_cost_to_pay': offspring_cost,
+                        }
+                        if (self._can_afford_card(
+                                player, card, context=offspring_context)
+                                and self._targets_available(
+                                    card, player, opponent)):
+                            set_valid_action(
+                                295,
+                                f"CAST_WITH_OFFSPRING {card.name}",
+                                context=offspring_context)
+
                     # --- OFFER ALTERNATIVE CASTING MODES (Impending) ---
                     if getattr(card, 'is_impending', False) and getattr(card, 'impending_cost', None):
                          if gs.mana_system.can_pay_replacing_cost_with_lands(
@@ -690,6 +719,31 @@ class ActionSpaceMixin:
                     set_valid_action(
                         action_index, f"PLAY_SPELL (Instant) {card.name}",
                         context=play_context)
+
+                offspring_cost = getattr(card, 'offspring_cost', None)
+                if (is_instant_speed
+                        and 'land' not in card.type_line.lower()
+                        and getattr(card, 'is_offspring', False)
+                        and offspring_cost
+                        and self._spell_cast_supported(card)):
+                    offspring_context = {
+                        'hand_idx': i,
+                        'card_id': card_id,
+                        'controller_id': (
+                            'p1' if player is gs.p1 else 'p2'),
+                        'source_zone': 'hand',
+                        'direct_offspring_cast': True,
+                        'pay_offspring': True,
+                        'offspring_cost_to_pay': offspring_cost,
+                    }
+                    if (self._can_afford_card(
+                            player, card, context=offspring_context)
+                            and self._targets_available(
+                                card, player, opponent)):
+                        set_valid_action(
+                            295,
+                            f"CAST_WITH_OFFSPRING {card.name}",
+                            context=offspring_context)
 
                 # The front of an MDFC/Adventure is commonly a sorcery-speed
                 # permanent. Its instant back/adventure half is nevertheless
@@ -2297,7 +2351,9 @@ class ActionSpaceMixin:
                 for mode_index in range(len(
                     getattr(card_or_data, 'tiered_modes', []) or [])))
 
-        if not cost_str and not context.get('use_alt_cost'): return True # Free spell (unless alt cost used)
+        if (not cost_str and not context.get('use_alt_cost')
+                and not context.get('pay_offspring')):
+            return True # Free spell with no announced additional mana cost
 
         oracle_text = getattr(card_or_data, 'oracle_text', '') \
             if isinstance(card_or_data, Card) else card_or_data.get('oracle_text', '')
@@ -2309,6 +2365,20 @@ class ActionSpaceMixin:
 
         try:
             parsed_cost = gs.mana_system.parse_mana_cost(cost_str)
+            if context.get('pay_offspring'):
+                # Price the printed mana cost and Offspring's optional
+                # additional cost as one CR 601.2f cost.  Probing them
+                # independently can reuse the same mana twice, and applying
+                # taxes/reductions to each half does not match cast_spell.
+                if (not isinstance(card_or_data, Card)
+                        or not getattr(card_or_data, 'is_offspring', False)
+                        or not getattr(card_or_data, 'offspring_cost', None)
+                        or context.get('use_alt_cost') not in (None, 'plot')):
+                    return False
+                offspring_cost = gs.mana_system.parse_mana_cost(
+                    card_or_data.offspring_cost)
+                parsed_cost = gs._combine_cost_dicts(
+                    parsed_cost, offspring_cost)
             # Apply cost modifiers based on context (Kicker, Additional, Alternative)
             final_cost = gs.mana_system.apply_cost_modifiers(player, parsed_cost, card_id, context)
             if requires_return:

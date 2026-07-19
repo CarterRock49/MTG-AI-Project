@@ -992,6 +992,49 @@ class AbilityHandler:
                                     new_activated_count += 1
                             activated_ability_counter += new_activated_count # Update main counter
 
+                # Offspring's enters trigger lives only in reminder text on
+                # current printed cards. Reminder removal leaves the keyword
+                # declaration but no trigger clause, so synthesize the real
+                # rules event and bind it to the paid-cost context recorded by
+                # the battlefield-entry transaction.
+                if (getattr(card, 'is_offspring', False)
+                        and not any(
+                            getattr(ab, '_is_offspring_etb_trigger', False)
+                            for ab in abilities_list)):
+                    def offspring_cost_was_paid(
+                            ctx, _cid=card_id):
+                        gs = (ctx or {}).get('game_state')
+                        entering_card_id = (ctx or {}).get(
+                            'card_id', (ctx or {}).get('event_card_id'))
+                        paid_context = getattr(
+                            gs, '_offspring_cost_paid_context', {}) if gs else {}
+                        was_paid = bool(
+                            gs and entering_card_id == _cid
+                            and paid_context.get(_cid, False))
+                        if was_paid:
+                            # Freeze this immutable entry fact onto the event
+                            # context before the transient per-entry map is
+                            # cleared. Card IDs survive zone changes, so the
+                            # map must not remain live until resolution.
+                            ctx['_offspring_cost_was_paid'] = True
+                        return was_paid
+
+                    offspring_trigger = TriggeredAbility(
+                        card_id=card_id,
+                        trigger_condition="when this permanent enters",
+                        effect="create a 1/1 token copy of it",
+                        effect_text=(
+                            "When this permanent enters, create a 1/1 token "
+                            "copy of it."),
+                        additional_condition=offspring_cost_was_paid)
+                    offspring_trigger._is_offspring_etb_trigger = True
+                    offspring_trigger.keyword = "offspring"
+                    offspring_trigger.keyword_cost = getattr(
+                        card, 'offspring_cost', None)
+                    setattr(offspring_trigger, 'source_card', card)
+                    abilities_list.append(offspring_trigger)
+                    logging.debug(
+                        f"Synthesized Offspring ETB trigger for {card.name}")
 
                 # --- Synthesize the Impending end-step tick when its text is
                 # reminder-only (the Overlords): the remove-a-counter trigger
@@ -1231,7 +1274,8 @@ class AbilityHandler:
                         cost_paid_context = getattr(gs, '_offspring_cost_paid_context', {})
                         # Check if the cost was paid for THIS specific card entering
                         was_paid = cost_paid_context.get(entering_card_id, False)
-                        # Removed cleanup from here - handled after resolution
+                        if was_paid:
+                            trigger_context['_offspring_cost_was_paid'] = True
                         return gs and entering_card_id and was_paid
 
                     ability.additional_condition = offspring_condition # Use callable condition
@@ -2780,7 +2824,13 @@ class AbilityHandler:
         if is_offspring_trigger:
             logging.debug(f"Attempting Offspring trigger resolution for {source_name}")
             offspring_context_map = getattr(gs, '_offspring_cost_paid_context', {})
-            cost_was_paid = offspring_context_map.get(card_id, False) # Check map for THIS card ID instance
+            # The entry transaction freezes payment onto this trigger. A
+            # card_id can leave and re-enter before the trigger resolves, so a
+            # live map keyed only by card_id is not a safe antecedent. Keep the
+            # map fallback solely for older serialized stack contexts.
+            cost_was_paid = bool(context.get(
+                '_offspring_cost_was_paid',
+                offspring_context_map.get(card_id, False)))
 
             if cost_was_paid:
                 if card: # Need the source card that entered to copy

@@ -1737,6 +1737,12 @@ class GameStatePermanentsMixin:
             logging.debug(
                 f"Saga {getattr(card, 'name', card_id)} entered with lore "
                 "counter 1 (chapter I).")
+        # Offspring payment belongs to this one battlefield-entry event. Its
+        # trigger condition has copied the fact into the queued trigger
+        # context, so retaining a bool keyed by reusable card_id would let an
+        # unpaid re-entry trigger while the earlier trigger is unresolved (or
+        # forever if that trigger is countered).
+        getattr(self, '_offspring_cost_paid_context', {}).pop(card_id, None)
 
     def complete_as_enters_choice(self, option_index):
         """Commit a generic as-enters choice, then release deferred events."""

@@ -116,7 +116,9 @@ ACTION_MEANINGS = {
 
     # --- Offspring/Impending custom actions (indices 294, 295) ---
     294: ("CAST_FOR_IMPENDING", None),  # Context={'hand_idx': X}
-    295: ("PAY_OFFSPRING_COST", None),  # Context implicit via gs.pending_spell_context
+    # Context pins a direct paid-Offspring cast; the handler also accepts the
+    # older pending_spell_context contract for replay compatibility.
+    295: ("PAY_OFFSPRING_COST", None),
 
     # Plot hand slots 0-2. Remaining hand slots use 309-313.
     **{296 + i: ("PLOT_CARD", i) for i in range(3)},

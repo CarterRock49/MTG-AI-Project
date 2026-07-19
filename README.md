@@ -164,10 +164,11 @@ python tests/train_smoke_test.py
 python tests/invariant_fuzz_test.py --profile default
 ```
 
-For the current Round 7.92 working tree, those gates are green at 487 unit
-tests, 409 scenarios, 9/9 runtime smoke, 13/13 training smoke, and 8/8 default
-fuzz seeds plus the phase-boundary check. The previously recorded long-fuzz
-result remains historical until that scheduled/manual gate is rerun.
+For the current working tree, those gates are green at 720/720 discovered unit
+tests, 409/409 scenarios, 9/9 runtime smoke, 13/13 training smoke, and all 8
+default fuzz seeds x 1,000 valid actions plus the phase-boundary check. The
+previously recorded long-fuzz result remains historical until that
+scheduled/manual gate is rerun.
 
 ```bash
 python tests/smoke_test.py                    # engine end-to-end (no training stack)
@@ -326,7 +327,34 @@ discovered surface or branch was not independently exercised. Even
 `semantic_status=unverified` until permanent scenarios assert its exact rules
 outcomes across all abilities, modes, and choices.
 
-The latest full-pool schema-v3 baseline is
+The repair-affected replay is
+`probe_runs/standard-repair1-expanded5-2026-07-18-v1/card_probe_report.json`.
+It completed all 770 selected cards with 437 `failed`, 314 `coverage_gap`, and
+19 `execution_passed`. An independent artifact audit reported zero errors and
+zero warnings; an identical `--resume` pass accepted all 770 artifacts without
+changing the card manifest or report. The physical report SHA-256 is
+`f9b4d4f9a3aba6cc4eb49b4ac3802822a3551a158de68ef6f2e3d06592d28f10`
+(canonical report SHA-256
+`fa15cc8b6b8a685a67d242e458028fce739c61049d5bd72c8b7c376c3466135e`).
+All 770 cards remain `semantic_status=unverified`.
+
+The fresh full-pool repair replay is
+`probe_runs/standard-full-schema3-repair1-2026-07-18-v3/card_probe_report.json`.
+It completed all 4,702 frozen Standard cards with 1,890 `failed`, 2,764
+`coverage_gap`, and 48 `execution_passed`. Independent pre- and post-resume
+audits each reported zero errors and zero warnings; the identical resume pass
+accepted all 4,702 artifacts without changing the card manifest or report.
+The physical report SHA-256 is
+`c118a76b8601f356b9f88e868378fe3bcc6055b38207559b18dafdefd9f83dfa`
+(canonical report SHA-256
+`e9dc842ad77dbbb7a92ee1a139b6633861d948b45ff650536340098040cbda38`;
+canonical card-manifest SHA-256
+`4b0dc370c570f877a3c72e3273a44caa6ad6a4b6ce5d273af3d3ff83961f1c51`).
+The 159 prior `verified`/`observed_clean` ledger cards contain zero failures,
+111 explicit gaps, and 48 bounded mechanical passes. All 4,702 cards remain
+`semantic_status=unverified`.
+
+For comparison, the historical pre-repair full-pool schema-v3 baseline is
 `probe_runs/standard-full-schema3-2026-07-18-v1/card_probe_report.json`: all
 4,702 card artifacts were accepted by an identical resume pass, and independent
 recomputation validated their identities, hashes, links, schema, terminal
@@ -335,7 +363,7 @@ statuses, and aggregate summary. It reports 1,930 `failed`, 2,725
 `2165f074334614706bac9e941eb90c43a90adac16f438f4ad500131482ff8091`.
 All 4,702 cards remain semantically unverified.
 
-Schema v3 inventories 3,124 printed trigger clauses, matching 2,599 to runtime
+That v1 baseline inventories 3,124 printed trigger clauses, matching 2,599 to runtime
 triggers and retaining 525 unmatched clauses as explicit gaps. It independently
 exercised 1,462 of 2,672 positive trigger arms, 1,574 of 2,611 close non-events,
 and 3,287 of 3,480 public choice branches. The report also fails closed on

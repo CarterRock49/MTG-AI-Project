@@ -2794,8 +2794,19 @@ def _probe_triggered(
 
         before_state = _state_payload(game_state)
         kind = spec["kind"]
+        offspring_paid_fixture = False
         if kind == "self_etb":
             move_context = _trigger_entry_context(entry, ability_index)
+            source_card = game_state._safe_get_card(target_id)
+            if (getattr(source_card, "is_offspring", False)
+                    and str(trigger_condition).strip().casefold()
+                    == "when this permanent enters"):
+                # The synthesized Offspring trigger is conditional on the
+                # additional cost having been paid.  Arm its positive ETB
+                # event through the same entry-context contract used by a
+                # paid cast; the negative-event replay remains unpaid.
+                move_context["paid_offspring"] = True
+                offspring_paid_fixture = True
             attach_spec = spec.get("attach_to_fixture")
             if attach_spec:
                 fixture_ids = (fixture["own_fixture_ids"]
@@ -2911,6 +2922,8 @@ def _probe_triggered(
                 "stack" if stacked_target_count else
                 "ordering_choice" if ordering_target_count else "none"),
         }
+        if offspring_paid_fixture:
+            path["event_fixture"]["paid_offspring"] = True
         if not queued_target:
             path["trace"] = trace
             _record_trigger_path_evidence(

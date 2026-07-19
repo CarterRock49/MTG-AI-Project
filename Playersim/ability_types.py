@@ -1400,6 +1400,19 @@ class ActivatedAbility(Ability):
     def can_pay_cost(self, game_state, controller, context=None):
         """Preflight every supported activation-cost component without mutation."""
         context = context or {}
+        source_card = game_state._safe_get_card(self.card_id)
+        source_name = getattr(source_card, "name", None)
+        activation_text = " ".join(
+            value for value in (
+                str(self.effect_text or ""),
+                str(getattr(self, "effect", "") or ""))
+            if value)
+        if EffectFactory.is_unsupported_source_coupled_copy(
+                source_name, activation_text):
+            return False
+        if EffectFactory.is_unsupported_variable_token_instruction(
+                source_name, activation_text):
+            return False
         timing_text = str(self.effect_text or "").lower()
         if ("activate only during your turn" in timing_text
                 and game_state._get_active_player() is not controller):
@@ -2060,7 +2073,18 @@ class TriggeredAbility(Ability):
         parent_effect = re.split(
             r"\bwhen (?:you do|that player does)\b", self.effect,
             maxsplit=1, flags=re.IGNORECASE)[0]
-        self.requires_target = "target" in parent_effect.lower()
+        # Choosing new targets for a spell copy is an optional property of
+        # the copy instruction, not a target of this triggered ability.  In
+        # particular, Leyline of Resonance copies the spell that caused the
+        # trigger; treating the word "targets" in this rider as a mandatory
+        # trigger target makes the stack-target chooser discard the trigger.
+        # Remove only that bounded copy-retargeting phrase so genuinely
+        # targeted trigger instructions retain their normal contract.
+        targeting_surface = re.sub(
+            r"\byou may choose new targets? for "
+            r"(?:the|that|this|those) cop(?:y|ies)\b",
+            "", parent_effect, flags=re.IGNORECASE)
+        self.requires_target = "target" in targeting_surface.lower()
 
         # Store original text if not provided
         if not effect_text:
@@ -2379,6 +2403,31 @@ class TriggeredAbility(Ability):
                         self.trigger_condition, re.IGNORECASE)))
                 if names_source and source_card_id != event_card_id:
                     return False
+                # On an Aura or Equipment, "enchanted/equipped creature"
+                # means the permanent that this exact source is attached to.
+                # A loose DEALS_DAMAGE match otherwise lets an attachment
+                # hear combat damage from every creature (notably Sword of
+                # Wealth and Power creating Treasure for an unequipped
+                # attacker). The article-bearing watcher form ("an equipped
+                # creature") is intentionally outside this source-bound
+                # grammar.
+                attachment_damage = re.search(
+                    r"^\s*when(?:ever)?\s+"
+                    r"(?P<kind>equipped|enchanted)\s+creature\s+"
+                    r"deals(?:\s+combat)?\s+damage\b",
+                    self.trigger_condition, re.IGNORECASE)
+                if attachment_damage:
+                    game_state = context.get("game_state")
+                    attached_subject_id = None
+                    if game_state is not None and source_card_id is not None:
+                        for player in (game_state.p1, game_state.p2):
+                            if source_card_id in player.get(
+                                    "attachments", {}):
+                                attached_subject_id = player[
+                                    "attachments"][source_card_id]
+                                break
+                    if attached_subject_id != event_card_id:
+                        return False
                 controlled_source = re.search(
                     r"\b(creature|creatures|permanent|permanents|artifact|"
                     r"artifacts|enchantment|enchantments) you control "
@@ -4826,6 +4875,39 @@ class AbilityEffect:
          return True
 
 
+class UnsupportedEffect(AbilityEffect):
+    """A recognized instruction whose rules are not implemented faithfully.
+
+    Unlike the legacy generic AbilityEffect fallback, this effect records a
+    runtime fidelity failure before returning false. Recognizing unsupported
+    syntax must never turn it into a successful no-op or an invented object.
+    """
+
+    def __init__(self, effect_text, reason=None, severity="partial"):
+        super().__init__(effect_text)
+        self.reason = str(
+            reason or f"unsupported effect: {effect_text[:80]}")
+        self.severity = str(severity or "partial")
+        # Do not open a target-choice surface for an instruction the engine
+        # cannot execute. Resolution must reach the diagnostic path directly.
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        counters = game_state._ensure_fidelity_counters()
+        counters["unparsed_effects"] += 1
+        source = (game_state._safe_get_card(source_id)
+                  if source_id is not None else None)
+        source_name = getattr(source, "name", None)
+        if source_name:
+            counters["unparsed_cards"].add(source_name)
+        self._report_support_issue(
+            game_state, source_id, self.reason, self.severity)
+        logging.warning(
+            "Unsupported effect from %r failed closed: %s",
+            source_name or source_id, self.effect_text)
+        return False
+
+
 class RollDieEffect(AbilityEffect):
     """Roll a numeric die and execute the matching oracle result row."""
 
@@ -6061,7 +6143,7 @@ class CreateTokenEffect(AbilityEffect):
         return None
 
     @staticmethod
-    def _record_unresolved_that_many(game_state, source_id):
+    def _record_unresolved_dynamic_count(game_state, source_id):
         counters = game_state._ensure_fidelity_counters()
         counters["unparsed_effects"] += 1
         source = game_state._safe_get_card(source_id)
@@ -6077,17 +6159,17 @@ class CreateTokenEffect(AbilityEffect):
         if self.count_expr:
             if str(self.count_expr).casefold().strip() == "that many":
                 effective_count = self._resolve_that_many_count(game_state)
-                if effective_count is None:
-                    self._record_unresolved_that_many(
-                        game_state, source_id)
-                    logging.warning(
-                        "CreateTokenEffect cannot resolve 'that many' from "
-                        "the frozen event context for source %r. Failing "
-                        "closed.", source_id)
-                    return False
             else:
                 effective_count = game_state.count_dynamic_quantity(
-                    self.count_expr, controller)
+                    self.count_expr, controller, strict=True)
+            if effective_count is None:
+                self._record_unresolved_dynamic_count(
+                    game_state, source_id)
+                logging.warning(
+                    "CreateTokenEffect cannot resolve dynamic count %r from "
+                    "the available resolution context for source %r. "
+                    "Failing closed.", self.count_expr, source_id)
+                return False
             logging.debug(f"CreateTokenEffect: dynamic count '{self.count_expr}' = {effective_count}.")
             if effective_count <= 0:
                 return True  # Zero tokens is a successful resolution.
@@ -10464,8 +10546,9 @@ class CreateTreasureEffect(AbilityEffect):
 
     TREASURE_ORACLE_TEXT = "{T}, Sacrifice this token: Add one mana of any color."
 
-    def __init__(self, count=1, condition=None):
+    def __init__(self, count=1, condition=None, enters_tapped=False):
         self.count = max(1, int(count))
+        self.enters_tapped = bool(enters_tapped)
         super().__init__(f"Create {self.count} Treasure token(s)", condition)
         self.requires_target = False
 
@@ -10492,7 +10575,10 @@ class CreateTreasureEffect(AbilityEffect):
         return created
 
     def _apply_effect(self, game_state, source_id, controller, targets):
-        return bool(self.create_for(game_state, controller, self.count))
+        created = self.create_for(game_state, controller, self.count)
+        if self.enters_tapped:
+            controller.setdefault("tapped_permanents", set()).update(created)
+        return bool(created)
 
 
 class BezaEffect(AbilityEffect):

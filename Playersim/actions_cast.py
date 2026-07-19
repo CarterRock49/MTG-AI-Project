@@ -15,7 +15,60 @@ class CastingHandlersMixin:
 
     def _handle_pay_offspring_cost(self, param, context=None, **kwargs):
         gs = self.game_state
+        context = dict(context or {})
         player = self._get_policy_player(context)
+
+        # The public mask now uses action 295 as a complete paid-Offspring
+        # casting transaction.  Pin the exact runtime card and hand slot that
+        # the mask exposed; a stale action must never rebound onto a different
+        # card.  The actual cast still goes through _handle_play_spell and
+        # GameState.cast_spell, so timing, targets, payment, zone movement, and
+        # cast triggers retain the normal spell-casting contract.
+        if context.get('direct_offspring_cast'):
+            hand_idx = context.get('hand_idx')
+            expected_card_id = context.get('card_id')
+            hand = player.get('hand', [])
+            if (not isinstance(hand_idx, int)
+                    or not 0 <= hand_idx < len(hand)
+                    or expected_card_id is None
+                    or hand[hand_idx] != expected_card_id):
+                self.last_handler_error = (
+                    "PAY_OFFSPRING_COST received a stale direct-cast "
+                    f"context: hand_idx={hand_idx!r}, "
+                    f"card_id={expected_card_id!r}")
+                logging.warning(self.last_handler_error)
+                return -0.2, False
+
+            card = gs._safe_get_card(expected_card_id)
+            printed_cost = getattr(card, 'offspring_cost', None) if card else None
+            if (not card
+                    or not getattr(card, 'is_offspring', False)
+                    or not printed_cost
+                    or context.get('pay_offspring') is not True
+                    or context.get('source_zone', 'hand') != 'hand'
+                    or context.get('offspring_cost_to_pay') != printed_cost):
+                self.last_handler_error = (
+                    "PAY_OFFSPRING_COST direct-cast context no longer "
+                    f"matches card {expected_card_id}")
+                logging.warning(self.last_handler_error)
+                return -0.2, False
+
+            cast_context = dict(context)
+            cast_context['card'] = card
+            if (not self._spell_cast_supported(card)
+                    or not self._can_afford_card(
+                        player, card, context=cast_context)):
+                self.last_handler_error = (
+                    f"Cannot afford the combined printed and Offspring cost "
+                    f"for {card.name}")
+                logging.debug(self.last_handler_error)
+                return -0.1, False
+
+            return self._handle_play_spell(
+                hand_idx, context=cast_context)
+
+        # Compatibility for an older multi-step casting flow whose pending
+        # context pauses specifically for the optional Offspring payment.
         pending_context = getattr(gs, 'pending_spell_context', None)
 
         if not pending_context or 'card_id' not in pending_context:

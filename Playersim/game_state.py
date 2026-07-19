@@ -9,7 +9,11 @@ from .ability_utils import EffectFactory
 # (Keep existing imports)
 from .card import Card
 import re
-from .ability_types import StaticAbility, TriggeredAbility
+from .ability_types import (
+    StaticAbility,
+    TriggeredAbility,
+    _permanent_matches_criteria,
+)
 from collections import defaultdict
 
 
@@ -2035,15 +2039,19 @@ class GameState(
             return cloned_effect
         return copy.deepcopy(entry)
  
-    def count_dynamic_quantity(self, expr, controller):
+    def count_dynamic_quantity(self, expr, controller, strict=False):
         """Count a "number of X you control / in your graveyard" style quantity.
 
         Shared by variable draw/life/pump effects (July 2026 parser expansion).
         expr is a lowercased noun phrase such as "creatures you control",
         "lands you control", "cards in your graveyard", "mountains you control".
-        Returns an int (0 if nothing matches).
+        Returns an int, including 0 when a supported predicate has no matches.
+        When ``strict`` is true, an unsupported expression returns ``None`` so
+        callers can distinguish an unknown quantity from a known zero. The
+        legacy default remains zero for callers that have not opted into
+        fail-closed resolution.
         """
-        expr = (expr or "").lower().strip()
+        expr = (expr or "").lower().strip(" .,;")
         p = controller
         opp = self.p2 if controller == self.p1 else self.p1
 
@@ -2080,6 +2088,86 @@ class GameState(
             c = self._safe_get_card(cid)
             return [t.lower() for t in getattr(c, 'subtypes', [])] if c else []
 
+        # Token creation opts into strict counting because an unrecognized
+        # qualifier must not be treated as a known zero (or, worse, be
+        # discarded by one of the broad legacy substring branches below).
+        # Keep this grammar deliberately finite. Event-derived phrases such
+        # as "creature that crewed it this turn" and "permanent returned ...
+        # this way" require frozen event evidence and therefore return None.
+        if strict:
+            graveyard = p.get("graveyard", [])
+            if re.fullmatch(r"cards? in your graveyard", expr):
+                return len(graveyard)
+            if re.fullmatch(
+                    r"(?:creatures?|creature cards?) in your graveyard",
+                    expr):
+                return sum(
+                    1 for card_id in graveyard
+                    if "creature" in _types(card_id))
+            if re.fullmatch(r"artifact cards? in your graveyard", expr):
+                return sum(
+                    1 for card_id in graveyard
+                    if "artifact" in _types(card_id))
+            if re.fullmatch(r"land cards? in your graveyard", expr):
+                return sum(
+                    1 for card_id in graveyard
+                    if "land" in _types(card_id))
+            if re.fullmatch(
+                    r"artifact and/or creature cards? in your graveyard",
+                    expr):
+                return sum(
+                    1 for card_id in graveyard
+                    if {"artifact", "creature"}.intersection(
+                        _types(card_id)))
+
+            control_match = re.fullmatch(
+                r"(?P<criteria>.+?) (?P<control>you control|"
+                r"an opponent controls|(?:your )?opponents control)",
+                expr)
+            if control_match:
+                control_text = control_match.group("control")
+                target = (p if control_text == "you control" else opp)
+                battlefield = target.get("battlefield", [])
+                criteria = control_match.group("criteria")
+                simple_type = {
+                    "creature": "creature", "creatures": "creature",
+                    "land": "land", "lands": "land",
+                    "artifact": "artifact", "artifacts": "artifact",
+                    "enchantment": "enchantment",
+                    "enchantments": "enchantment",
+                    "permanent": None, "permanents": None,
+                }
+                if criteria in simple_type:
+                    required_type = simple_type[criteria]
+                    return (len(battlefield) if required_type is None else
+                            sum(
+                                1 for card_id in battlefield
+                                if required_type in _types(card_id)))
+                subtype = {
+                    "mountain": "mountain", "mountains": "mountain",
+                    "island": "island", "islands": "island",
+                    "forest": "forest", "forests": "forest",
+                    "swamp": "swamp", "swamps": "swamp",
+                    # Plains is already the singular Magic subtype.
+                    "plains": "plains",
+                    "elf": "elf", "elves": "elf",
+                    "goblin": "goblin", "goblins": "goblin",
+                    "zombie": "zombie", "zombies": "zombie",
+                    "soldier": "soldier", "soldiers": "soldier",
+                }.get(criteria)
+                if subtype:
+                    return sum(
+                        1 for card_id in battlefield
+                        if subtype in _subtypes(card_id))
+                if (re.fullmatch(r"multicolored permanents?", criteria)
+                        or re.fullmatch(
+                            r"nontoken [a-z][a-z' -]*?", criteria)):
+                    return sum(
+                        1 for card_id in battlefield
+                        if _permanent_matches_criteria(
+                            self, card_id, expr, controller=target))
+            return None
+
         # Graveyard counts.
         if "in your graveyard" in expr or "cards in your graveyard" in expr:
             zone = p.get("graveyard", [])
@@ -2097,6 +2185,28 @@ class GameState(
             target = opp
 
         bf = target.get("battlefield", [])
+        # Characteristic conjunctions whose modifiers must not be discarded
+        # by the simpler type/subtype branches below. For example,
+        # "nontoken Villain you control" means all three predicates at once,
+        # while "multicolored permanent" tests the object's current colors.
+        # The outer grammar is deliberately bounded to controlled-permanent
+        # quantities; event-batch phrases such as "cards put ... this way"
+        # remain unresolved without frozen event evidence.
+        controlled_characteristics = (
+            r"(?:you control|an opponent controls|"
+            r"(?:your )?opponents control)"
+        )
+        if (re.fullmatch(
+                rf"multicolored permanents? {controlled_characteristics}",
+                expr)
+                or re.fullmatch(
+                    rf"nontoken [a-z][a-z' -]*? "
+                    rf"{controlled_characteristics}", expr)):
+            return sum(
+                1 for card_id in bf
+                if _permanent_matches_criteria(
+                    self, card_id, expr, controller=target))
+
         # Specific creature/land/artifact/etc, or a subtype like Mountains/Elves.
         if "creature" in expr:
             return sum(1 for c in bf if 'creature' in _types(c))
@@ -2113,7 +2223,7 @@ class GameState(
         # Fallback: total permanents controlled.
         if "permanent" in expr:
             return len(bf)
-        return 0
+        return None if strict else 0
 
     def _is_creature(self, card_id):
         """Whether a card id currently refers to a creature.

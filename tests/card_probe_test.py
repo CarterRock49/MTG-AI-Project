@@ -87,7 +87,7 @@ class CardProbeTest(unittest.TestCase):
                 "Yarus, Roar of the Old Gods", "Meltstrider Eulogist",
                 "Host of the Hereafter", "Reluctant Role Model",
                 "Giott, King of the Dwarves", "Maralen, Fae Ascendant",
-                "Baron Bertram Graywater",
+                "Baron Bertram Graywater", "Pawpatch Recruit",
                 *cls.TRUSTED_DIAGNOSTIC_REGRESSIONS,
             })
         cls.entries = {entry["name"]: entry for entry in selected}
@@ -273,6 +273,57 @@ class CardProbeTest(unittest.TestCase):
             negative["event_fixture"]["desired_delivery_count"], 0)
         self.assertEqual(
             negative["negative_case"], "another controlled permanent enters")
+
+    def test_offspring_positive_etb_fixture_records_payment_and_copy(self):
+        for card_name in ("Manifold Mouse", "Pawpatch Recruit"):
+            with self.subTest(card=card_name):
+                result = probe_card(
+                    self.entries[card_name], input_identity=self.identity,
+                    max_decisions=48, max_branches=16)
+                surface = next(
+                    row for row in result["discovered"]
+                    if row.get("class") == "TriggeredAbility"
+                    and row.get("trigger_condition")
+                    == "when this permanent enters"
+                    and row.get("effect") == "create a 1/1 token copy of it")
+                surface_id = surface["id"]
+                obligation = next(
+                    row for row in result["obligations"]
+                    if row.get("id") == surface_id)
+                self.assertEqual(obligation["status"], "exercised")
+
+                path = next(
+                    row for row in result["paths"]
+                    if row.get("id") == surface_id)
+                self.assertEqual(path["status"], "exercised")
+                self.assertEqual(path["event_fixture"]["kind"], "self_etb")
+                self.assertTrue(path["event_fixture"]["paid_offspring"])
+                self.assertEqual(
+                    path["event_fixture"]["desired_delivery_count"], 1)
+                self.assertTrue(path["stack_identity_before_resolution"])
+                battlefield_added = path["state_delta"]["zones"]["p1"][
+                    "battlefield"]["added"]
+                self.assertIn(path["source_id"], battlefield_added)
+                token_ids = [
+                    card_id for card_id in battlefield_added
+                    if card_id != path["source_id"]]
+                self.assertEqual(len(token_ids), 1)
+                token_state = path["state_delta"][
+                    "card_characteristics"][str(token_ids[0])]["after"]
+                self.assertEqual(token_state["name"], card_name)
+                self.assertEqual(
+                    (token_state["power"], token_state["toughness"]), (1, 1))
+
+                negative = next(
+                    row for row in result["paths"]
+                    if row.get("id") == f"{surface_id}:negative_event")
+                self.assertEqual(negative["status"], "exercised")
+                self.assertEqual(
+                    negative["event_fixture"]["desired_delivery_count"], 0)
+                self.assertNotIn(
+                    "tokens",
+                    negative["state_delta"].get(
+                        "player_state", {}).get("p1", {}))
 
     def test_watched_death_trigger_reaches_targeting_through_public_actions(self):
         result = probe_card(
@@ -935,28 +986,36 @@ class CardProbeTest(unittest.TestCase):
             row.get("oracle_surface") == "face:0" for row in optionals))
         self.assertEqual(emeritus["runtime_status"], "coverage_gap")
 
-    def test_printed_trigger_inventory_blocks_parser_omission_passes(self):
-        expectations = {
-            "Manifold Mouse": 1,
-            "Great Hall of the Biblioplex": 1,
-        }
-        for name, minimum_unmatched in expectations.items():
-            with self.subTest(card=name):
-                result = probe_card(
-                    self.entries[name], input_identity=self.identity,
-                    max_decisions=32, max_branches=8)
-                summary = result["discovery_fidelity"][
-                    "printed_trigger_inventory"]
-                self.assertGreaterEqual(
-                    summary["unmatched_printed_trigger_count"],
-                    minimum_unmatched)
-                unmatched = [
-                    row for row in result["obligations"]
-                    if row.get("kind") == "printed_trigger"]
-                self.assertGreaterEqual(len(unmatched), minimum_unmatched)
-                self.assertTrue(all(
-                    row["status"] == "coverage_gap" for row in unmatched))
-                self.assertEqual(result["runtime_status"], "coverage_gap")
+    def test_printed_trigger_inventory_blocks_omissions_and_accepts_repair(self):
+        manifold = probe_card(
+            self.entries["Manifold Mouse"], input_identity=self.identity,
+            max_decisions=32, max_branches=8)
+        manifold_summary = manifold["discovery_fidelity"][
+            "printed_trigger_inventory"]
+        self.assertEqual(manifold_summary["printed_trigger_count"], 2)
+        self.assertEqual(manifold_summary["matched_printed_trigger_count"], 2)
+        self.assertEqual(
+            manifold_summary["unmatched_printed_trigger_count"], 0)
+        self.assertFalse(any(
+            row.get("kind") == "printed_trigger"
+            for row in manifold["obligations"]))
+        self.assertEqual(manifold["runtime_status"], "execution_passed")
+
+        great_hall = probe_card(
+            self.entries["Great Hall of the Biblioplex"],
+            input_identity=self.identity,
+            max_decisions=32, max_branches=8)
+        great_hall_summary = great_hall["discovery_fidelity"][
+            "printed_trigger_inventory"]
+        self.assertGreaterEqual(
+            great_hall_summary["unmatched_printed_trigger_count"], 1)
+        unmatched = [
+            row for row in great_hall["obligations"]
+            if row.get("kind") == "printed_trigger"]
+        self.assertGreaterEqual(len(unmatched), 1)
+        self.assertTrue(all(
+            row["status"] == "coverage_gap" for row in unmatched))
+        self.assertEqual(great_hall["runtime_status"], "coverage_gap")
 
         stormchaser = probe_card(
             self.entries["Stormchaser's Talent"],

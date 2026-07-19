@@ -19,6 +19,7 @@ from Playersim.ability_types import (  # noqa: E402
     CreateTokenEffect,
     DrawCardEffect,
     TriggeredAbility,
+    UnsupportedEffect,
 )
 from Playersim.ability_utils import EffectFactory  # noqa: E402
 from Playersim.card import Card  # noqa: E402
@@ -173,13 +174,6 @@ class StormchaserTalentTokenRegressionTest(unittest.TestCase):
                 ["Green", "White"], ["wolf"], ["Trample"],
             ),
             (
-                "create Primo, the Indivisible, a legendary 0/0 green and "
-                "blue Fractal creature token, then put that many +1/+1 "
-                "counters on it",
-                "Primo, the Indivisible", 0, 0,
-                ["Green", "Blue"], ["fractal"], [],
-            ),
-            (
                 "create Angelo, a legendary 1/1 green and white Dog "
                 "creature token",
                 "Angelo", 1, 1, ["Green", "White"], ["dog"], [],
@@ -201,6 +195,35 @@ class StormchaserTalentTokenRegressionTest(unittest.TestCase):
                     token_effect.token_card_types, ["creature"])
                 self.assertEqual(token_effect.token_subtypes, subtypes)
                 self.assertEqual(token_effect.keywords, keywords)
+
+    def test_primo_unresolved_counter_rider_fails_before_token_creation(self):
+        game_state = fresh(38204)
+        controller = game_state.p1
+        source_id = inject_real_card(
+            game_state, controller, "Zimone, All-Questioning",
+            "battlefield")
+        source = game_state._safe_get_card(source_id)
+        trigger = next(
+            ability for ability in self._registered_triggers(
+                game_state, source_id)
+            if "primo, the indivisible" in ability.effect.casefold())
+        effects = EffectFactory.create_effects(
+            trigger.effect, source_name=source.name)
+        self.assertEqual(len(effects), 1)
+        self.assertIsInstance(effects[0], UnsupportedEffect)
+        before = set(controller.get("tokens", []))
+        fidelity_before = game_state.fidelity_counters["unparsed_effects"]
+        with patch("Playersim.ability_types.logging.warning") as warning:
+            self.assertFalse(effects[0].apply(
+                game_state, source_id, controller, {}, context={}))
+        self.assertEqual(warning.call_count, 1)
+        self.assertEqual(set(controller.get("tokens", [])), before)
+        self.assertEqual(
+            game_state.fidelity_counters["unparsed_effects"],
+            fidelity_before + 1)
+        self.assertIn(
+            "Zimone, All-Questioning",
+            game_state.fidelity_counters["unparsed_cards"])
 
     def test_single_color_token_and_followup_action_still_split(self):
         effects = EffectFactory.create_effects(

@@ -30,18 +30,16 @@ no trained checkpoint has passed the paired-seat strength gate, matchup
 calibration has not run, format-wide card support remains incomplete, and the
 deck-builder feedback loop is not connected.
 
-### Round 7.92 verified delivery baseline
+### Current verified delivery baseline
 
-The corrected Observation v3 contract and the Round 7.92 ratchet, fidelity,
-payment, canary, and qualification changes are green at the following current
-working-tree counts:
+The current working tree is green at the following delivery gates:
 
 | Gate | Result |
 | --- | --- |
 | Golden scenarios | 409/409 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
-| Discovered unit tests | 501/501 |
+| Discovered unit tests | 720/720 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
 | Observation schema | v3 / `6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137` |
 
@@ -57,7 +55,74 @@ player-relative turns, draw-aware rates, and atomic per-file persistence.
 Evaluator caches retain only static characteristics, while live state and
 perspective are recomputed for each decision.
 
-### Standard full-pool dynamic probe — July 18, 2026 repair baseline
+### Repair-affected schema-v3 replay — July 18, 2026
+
+The repair-surface inventory selected 770 unique cards: 555 broad-parser
+matches, 90 cards across 91 fidelity surfaces, 8 token-count surfaces, and 167
+cards across 174 copy/token lines, with overlaps deduplicated. Its alphabetical
+selection SHA-256 is
+`7fb5d7f4feda734028d5196614d3638ce597137cd5be09b5e3f7b731cb41dba8`;
+its registry-order SHA-256 is
+`5e88ae9467be4fe2f33a037b0b809c19844cf5423a6f9f3a3c4874ff5fa881e2`.
+The report is
+`probe_runs/standard-repair1-expanded5-2026-07-18-v1/card_probe_report.json`.
+
+| Prior ledger status | Failed | Coverage gap | Mechanical pass |
+| --- | ---: | ---: | ---: |
+| `verified` | 0 | 23 | 9 |
+| `observed_clean` | 0 | 13 | 10 |
+| `unseen` | 101 | 278 | 0 |
+| `partial` | 161 | 0 | 0 |
+| `unparsed` | 175 | 0 | 0 |
+| **Total** | **437** | **314** | **19** |
+
+Independent pre- and post-resume audits found zero errors, zero warnings, and
+zero violations among all 22 grouped-zone-change clauses. The identical resume
+accepted all 770 artifacts without changing the report or card manifest. The
+physical report SHA-256 is
+`f9b4d4f9a3aba6cc4eb49b4ac3802822a3551a158de68ef6f2e3d06592d28f10`;
+the canonical report SHA-256 is
+`fa15cc8b6b8a685a67d242e458028fce739c61049d5bd72c8b7c376c3466135e`;
+the canonical card-manifest SHA-256 is
+`377146e758479bd26e612064a3ec0a643206af3678acf2986fea5ac4e06c2303`.
+Every selected card remains `semantic_status=unverified`.
+
+### Fresh full-pool schema-v3 repair replay — July 18, 2026
+
+The fresh replay completed all 4,702 frozen Standard cards. Its report is
+`probe_runs/standard-full-schema3-repair1-2026-07-18-v3/card_probe_report.json`.
+
+| Prior ledger status | Failed | Coverage gap | Mechanical pass |
+| --- | ---: | ---: | ---: |
+| `verified` | 0 | 72 | 24 |
+| `observed_clean` | 0 | 39 | 24 |
+| `unseen` | 695 | 2,653 | 0 |
+| `partial` | 745 | 0 | 0 |
+| `unparsed` | 450 | 0 | 0 |
+| **Total** | **1,890** | **2,764** | **48** |
+
+Independent pre- and post-resume audits each found zero errors and zero
+warnings, 4,704 of 4,704 expected files, all 4,702 cards loaded and reported,
+and zero violations among all 22 grouped-zone-change clauses. The identical
+resume accepted all 4,702 artifacts without recomputation or hash drift. The
+physical report SHA-256 is
+`c118a76b8601f356b9f88e868378fe3bcc6055b38207559b18dafdefd9f83dfa`;
+the canonical report SHA-256 is
+`e9dc842ad77dbbb7a92ee1a139b6633861d948b45ff650536340098040cbda38`;
+the canonical card-manifest SHA-256 is
+`4b0dc370c570f877a3c72e3273a44caa6ad6a4b6ce5d273af3d3ff83961f1c51`.
+
+Relative to the historical schema-v3 run, 81 cards moved from `failed` to
+`coverage_gap`, 41 previously unseen cards moved from `coverage_gap` to an
+explicit fail-closed `failed`, and Manifold Mouse moved from `coverage_gap` to
+`execution_passed`. The 159 prior `verified`/`observed_clean` cards have zero
+failures, 111 gaps, and 48 bounded mechanical passes. Their largest remaining
+gap-obligation families are printed conditionals (66), static surfaces (44),
+modes (22), triggers (22), and optional branches (18). Diagnostics occur on
+1,531 cards and support-manifest reports on 818. Every card remains
+`semantic_status=unverified`; no probe result is rules certification.
+
+### Historical full-pool dynamic-probe repair baseline — July 18, 2026
 
 The fail-closed production-pipeline reconnaissance completed all 4,702 frozen
 Standard cards with hash-valid terminal artifacts: 1,774 `failed`, 2,910
@@ -142,7 +207,7 @@ and rules repairs. No card failed, emitted diagnostics, or reported degraded
 support. Every card remains `semantic_status=unverified`; lower pass counts here
 represent more honest discovery, not reduced runtime correctness.
 
-### Full-pool schema-v3 trigger and printed-surface baseline — July 18, 2026
+### Historical full-pool schema-v3 trigger and printed-surface baseline — July 18, 2026
 
 The strengthened probe completed all 4,702 frozen Standard cards and then
 accepted all 4,702 artifacts on an identical `--resume` pass without
@@ -181,7 +246,7 @@ trigger negative fixtures, optional branches, and unmatched printed triggers.
 All 4,702 cards remain `semantic_status=unverified`; the 47 mechanical passes
 are not rules certification.
 
-Repair in evidence order: first regress the Cerebral Download `Surveil x` hard
+The repair order recorded at that baseline was: first regress the Cerebral Download `Surveil x` hard
 crash; then eliminate the 140 close-non-event false trigger deliveries through
 shared source-identity and controller/type scoping. Next repair continuation
 integrity (36 continuation failures, 17 identical-state loops, Jadelight
@@ -1055,6 +1120,9 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
   `execution_failed`. When such a probe exercises a mechanic with no
   existing scenario coverage, promote it to a permanent scenario even if
   it found nothing.
+- Treat every probe result, including `execution_passed`, as bounded mechanical
+  evidence; semantic status remains unverified until exact-state scenarios cover
+  every distinct rules path.
 - Treat any warning, degraded observation, swallowed exception, or fidelity
   counter as a correctness failure until classified.
 - Keep masks and handlers on shared legality predicates and pin paged choices

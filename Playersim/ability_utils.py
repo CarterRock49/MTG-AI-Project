@@ -284,6 +284,70 @@ class EffectFactory:
     complex conditions, targets, and variations not captured here.
     """
     _CARD_OVERRIDES = {}
+    _SOURCE_COUPLED_COPY_CARDS = frozenset({
+        "cursed recording",
+        "double down",
+        "ether",
+        "fin fang foom",
+        "fire lord azula",
+        "jeong jeong, the deserter",
+        "kaervek, the punisher",
+        "kaya, spirits' justice",
+        "kitsa, otterball elite",
+        "loki laufeyson",
+        "pyromancer's goggles",
+        "ral, crackling wit",
+        "rimefire torque",
+        "return the favor",
+        "roving actuator",
+        "shiko, paragon of the way",
+        "silverquill, the disputant",
+        "slick imitator",
+        "taigam, master opportunist",
+        "choreographed sparks",
+    })
+    _SOURCE_UNSUPPORTED_VARIABLE_TOKEN_PATTERNS = {
+        "bat colony": (
+            r"\bcreate a 1/1 black bat creature token with flying "
+            r"for each mana from a cave spent to cast it\b"),
+        "twitching doll": (
+            r"\bcreate a 2/2 green spider creature token with reach "
+            r"for each counter on this creature\b"),
+        "glen elendra's answer": (
+            r"\bcreate a 1/1 blue and black faerie creature token "
+            r"with flying for each spell and ability countered this way\b"),
+        "avengers: under siege": (
+            r"\bcreate a treasure token for each villain you control\b"),
+        "the astonishing ant-man": (
+            r"\bcreate that many 1/1 green insect creature tokens\b"),
+    }
+
+    @classmethod
+    def is_unsupported_source_coupled_copy(
+            cls, source_name, effect_text):
+        """Whether an audited source's copy instruction is atomic/unsupported.
+
+        This predicate is shared with activation-cost preflight so delayed
+        copy setters and conditional copy activations are hidden before they
+        can tap, sacrifice, exile, remove counters, or spend mana.
+        """
+        source_key = str(source_name or "").strip().casefold()
+        if source_key not in cls._SOURCE_COUPLED_COPY_CARDS:
+            return False
+        return bool(re.search(
+            r"\b(?:cop(?:y|ies)|casualty|storm)\b",
+            str(effect_text or ""), re.IGNORECASE))
+
+    @classmethod
+    def is_unsupported_variable_token_instruction(
+            cls, source_name, effect_text):
+        """Match one audited variable-token surface that must fail closed."""
+        source_key = str(source_name or "").strip().casefold()
+        pattern = cls._SOURCE_UNSUPPORTED_VARIABLE_TOKEN_PATTERNS.get(
+            source_key)
+        return bool(pattern and re.search(
+            pattern, str(effect_text or ""),
+            re.IGNORECASE | re.DOTALL))
 
     @classmethod
     def register_card_override(cls, card_name, factory):
@@ -486,6 +550,114 @@ class EffectFactory:
         sequence_surface = re.sub(
             r"\([^()]*\)", " ", effect_text, flags=re.DOTALL)
         sequence_surface = re.sub(r"\s+", " ", sequence_surface).strip()
+
+        # These current Standard cards express variable token quantities that
+        # the generic parser cannot derive from live state. Some never capture
+        # a count expression at all (silently becoming one token), and Glen
+        # Elendra's Answer can split at "spell and ability" after already
+        # creating one Faerie. Classify each bounded printed shape before any
+        # clause split so resolution is atomic and diagnostic.
+        if EffectFactory.is_unsupported_variable_token_instruction(
+                source_name, sequence_surface):
+            from .ability_types import UnsupportedEffect
+            reason = (
+                "unsupported variable token instruction: "
+                f"{source_key}")
+            if source_name:
+                from .card_support import report_unsupported
+                report_unsupported(
+                    source_name, reason, severity="partial")
+            return [UnsupportedEffect(
+                effect_text, reason=reason, severity="partial")]
+
+        # Sword's combat trigger has one faithful immediate instruction and
+        # one unsupported delayed watcher. Preserve the real Treasure, then
+        # surface the missing watcher as a failed/diagnosed effect instead of
+        # attempting an immediate CopySpellEffect with no referenced spell.
+        if (source_key == "sword of wealth and power"
+                and re.search(
+                    r"\bcreate a treasure token\b",
+                    sequence_surface, re.IGNORECASE)
+                and re.search(
+                    r"\bwhen you next cast an instant or sorcery spell "
+                    r"this turn\s*,?\s*copy that spell\b",
+                    sequence_surface, re.IGNORECASE)):
+            from .ability_types import (
+                CreateTreasureEffect, UnsupportedEffect)
+            reason = "unsupported delayed spell-copy watcher"
+            if source_name:
+                from .card_support import report_unsupported
+                report_unsupported(
+                    source_name, reason, severity="partial")
+            return [
+                CreateTreasureEffect(),
+                UnsupportedEffect(
+                    effect_text, reason=reason, severity="partial"),
+            ]
+
+        # These audited cards couple copying to a source-specific trigger,
+        # delayed watcher, cast permission, exception, or follow-up mutation
+        # that the generic effect sequence cannot represent atomically.  A
+        # source-aware guard is required because TriggeredAbility stores the
+        # qualifier separately from its effect (for example, Double Down's
+        # "outlaw spell" gate and Azula's "while ... attacking" gate).  The
+        # casualty/storm markers cover Silverquill and Ral even when reminder
+        # text is stripped before the executable surface is parsed.
+        source_copy_marker = re.search(
+            r"\b(?:cop(?:y|ies)|casualty|storm)\b",
+            lowered, re.IGNORECASE)
+        if (EffectFactory.is_unsupported_source_coupled_copy(
+                source_name, effect_text)
+                and source_copy_marker):
+            from .ability_types import UnsupportedEffect
+            reason = (
+                "unsupported source-coupled copy instruction: "
+                f"{source_key}: {source_copy_marker.group(0)}")
+            if source_name:
+                from .card_support import report_unsupported
+                report_unsupported(
+                    source_name, reason, severity="partial")
+            return [UnsupportedEffect(
+                effect_text, reason=reason, severity="partial")]
+
+        # A spell copy that depends on an optional precursor, a coin-flip
+        # branch, or a copy-changing exception is atomic.  If its surrounding
+        # rules are split into clauses, a failed generic precursor can be
+        # followed by a successful CopySpellEffect, silently copying a spell
+        # whose cost/condition was never satisfied (Aziza, Alania, Breeches,
+        # Mica, and Jackal).  Fail the complete instruction before splitting.
+        # Plain outer triggers such as Leyline's "copy that spell" and Sage's
+        # supported "copy this spell" have none of these coupled markers.
+        spell_copy = re.search(
+            r"\bcopy\s+(?:that|this)\s+spell\b",
+            sequence_surface, re.IGNORECASE)
+        unsupported_spell_copy_context = None
+        if spell_copy:
+            spell_copy_guard_patterns = (
+                r"\byou may\b.{0,420}\bcopy\s+(?:that|this)\s+spell\b",
+                r"\bif you do\b.{0,420}\bcopy\s+(?:that|this)\s+spell\b",
+                r"\bflip a coin\b.{0,420}\bcopy\s+(?:that|this)\s+spell\b",
+                r"\bcopy\s+(?:that|this)\s+spell\b"
+                r"[^.\n]{0,180}\bexcept\b",
+            )
+            unsupported_spell_copy_context = next((
+                match for pattern in spell_copy_guard_patterns
+                if (match := re.search(
+                    pattern, sequence_surface,
+                    re.IGNORECASE | re.DOTALL))
+            ), None)
+        if unsupported_spell_copy_context:
+            from .ability_types import UnsupportedEffect
+            reason = (
+                "unsupported coupled spell-copy instruction: "
+                f"{unsupported_spell_copy_context.group(0)[:100]}")
+            if source_name:
+                from .card_support import report_unsupported
+                report_unsupported(
+                    source_name, reason, severity="partial")
+            return [UnsupportedEffect(
+                effect_text, reason=reason, severity="partial")]
+
         scry_draw = re.fullmatch(
             r"scry\s+(\d+|x)\s*\.\s*draw\s+"
             r"(a|an|one|two|three|four|five|\d+)\s+cards?\s*\.?",
@@ -518,6 +690,130 @@ class EffectFactory:
                            duration="end_of_turn"),
                 ManaSpentConditionalEffect(
                     5, CreateTokenCopyOfSourceEffect()),
+            ]
+
+        # Coupled token-copy instructions must be classified before any
+        # sentence/clause splitting. Replacement text can otherwise parse its
+        # "would create ... tokens" preamble as an ordinary CreateTokenEffect
+        # and mutate state before a later copy fragment fails (Mirrormind
+        # Crown and Moonlit Meditation). The exact Three Steps Ahead template
+        # is the sole generic target-copy instruction implemented here;
+        # Colorstorm's dedicated whole-effect route has already returned
+        # above, and real Offspring uses its flagged trigger resolver.
+        coupled_token_copy = re.search(
+            r"\bcreate(?:s)?\b[^.;\n]*?\btokens?\b\s+"
+            r"(?:that(?:['\u2019]s|\s+is)\s+an?\s+copy\s+of|"
+            r"that\s+are\s+(?:an?\s+copy|(?:each\s+)?copies)\s+of|"
+            r"(?:an?\s+)?cop(?:y|ies)\s+of)\b",
+            lowered)
+        # Spree owns a modal container and recursively parses each selected
+        # mode. Let the container reach that parser; the copy mode itself will
+        # return through the exact supported branch on its recursive call.
+        if (coupled_token_copy
+                and not re.match(r"\s*spree\b", lowered)):
+            exact_target_copy = re.fullmatch(
+                r"\s*create(?:s)?\s+a\s+token\s+"
+                r"that(?:['\u2019]s|\s+is)\s+a\s+copy\s+of\s+"
+                r"target\s+artifact\s+or\s+creature\s+you\s+control"
+                r"\s*\.?\s*",
+                lowered)
+            if exact_target_copy and "except" not in lowered:
+                from .ability_types import CreateTokenCopyOfTargetEffect
+                return [CreateTokenCopyOfTargetEffect(
+                    allowed_types={"artifact", "creature"},
+                    controller_only=True)]
+
+            from .ability_types import UnsupportedEffect
+            reason = (
+                "unsupported token-copy instruction: "
+                f"{coupled_token_copy.group(0)[:80]}")
+            if source_name:
+                from .card_support import report_unsupported
+                report_unsupported(
+                    source_name, reason, severity="partial")
+            return [UnsupportedEffect(
+                effect_text, reason=reason, severity="partial")]
+
+        # Rules-bearing token riders that are not represented by token_data
+        # must fail before clause splitting. Otherwise an approximate token
+        # can be created before the unsupported rider is discarded.
+        # Reminder text may describe a separate casting transaction (Gift,
+        # Offspring, and similar mechanics). Descriptor/rider guards inspect
+        # the executable surface only so they do not reject a supported main
+        # instruction because of reminder-only token wording.
+        token_surface = sequence_surface.lower()
+        token_creation = re.search(
+            r"\bcreate(?:s)?\b.{0,320}?\btokens?\b",
+            token_surface, re.DOTALL)
+        unsupported_token_rider = None
+        if token_creation:
+            rider_patterns = (
+                r"\btokens?\b[^;\n]{0,260}\b"
+                r"(?:that(?:['\u2019]s|\s+is)|they enter)\s+"
+                r"tapped and attacking\b",
+                r"\btokens?\b[^;\n]{0,220}"
+                r"[\x22]this token can block only\b",
+                r"\btokens?\b[^;\n]{0,220}"
+                r"[\x22]this token gets \+[^\x22]+?\bfor each\b",
+                r"\btokens?\b[^\n.]{0,180}\bwith\b"
+                r"[^\n.]{0,120}\band haste\b",
+                r"\btokens?\b[^\n.]{0,180}\.\s*it gains haste\b",
+                r"\btokens?\b.{0,320}\band attach\b.{0,100}\bto it\b",
+                r"\btokens?\b.{0,320}\bexile those tokens\b",
+                r"\btokens?\b.{0,360}\bput\b.{0,120}\b"
+                r"counters?\s+on\s+(?:it|that token|those tokens)\b",
+                r"\btokens?\b.{0,320}\bsacrifice\s+"
+                r"(?:it|that token|those tokens)\b",
+                r"\bif you do\b[^.\n]{0,260}\bcreate\b",
+                r"\bif you (?:don['\u2019]?t|do not)\b"
+                r"[^.\n]{0,260}\bcreate\b",
+                r"\bfirst time\b.{0,420}\bsecond time\b.{0,320}"
+                r"\bthird time\b.{0,220}\bcreate\b",
+                r"\bsacrifice it\s+and\s+create\b",
+                r"\bdestroy that creature\s*,?\s*then\s+create\b",
+                r"\bput a \+1/\+1 counter on this creature\s*\.\s*"
+                r"create\b",
+                r"\bsurveil\s+(?:\d+|one|two|three)\s*\.\s*create\b",
+                r"\btokens?\b.{0,160}\.\s*surveil\s+"
+                r"(?:\d+|one|two|three)\b",
+                r"\btokens?\b.{0,300}\bchosen player loses x life\b"
+                r".{0,180}\byou gain x life\b",
+                r"\btokens?\b.{0,300}\bcreatures you control\b"
+                r".{0,140}\bgain haste\b",
+            )
+            unsupported_token_rider = next((
+                match for pattern in rider_patterns
+                if (match := re.search(
+                    pattern, token_surface, re.IGNORECASE | re.DOTALL))
+            ), None)
+        if unsupported_token_rider:
+            from .ability_types import UnsupportedEffect
+            reason = (
+                "unsupported token rider: "
+                f"{unsupported_token_rider.group(0)[:100]}")
+            if source_name:
+                from .card_support import report_unsupported
+                report_unsupported(
+                    source_name, reason, severity="partial")
+            return [UnsupportedEffect(
+                effect_text, reason=reason, severity="partial")]
+
+        # A simple literal draw followed by a simple token instruction is an
+        # ordered pair, not a draw-only effect. Parse each sentence through
+        # the normal implementations after recognizing the whole sequence.
+        draw_then_create = re.fullmatch(
+            r"\s*(?P<draw>draw\s+"
+            r"(?:a|an|one|two|three|four|five|\d+)\s+cards?)\s*\.\s*"
+            r"(?P<create>create\b.+?\btokens?)\s*\.?\s*",
+            sequence_surface, re.IGNORECASE | re.DOTALL)
+        if draw_then_create:
+            return [
+                effect
+                for instruction in (
+                    draw_then_create.group("draw"),
+                    draw_then_create.group("create"))
+                for effect in EffectFactory.create_effects(
+                    instruction, targets, source_name=source_name)
             ]
 
         quest_reward = re.fullmatch(
@@ -1732,6 +2028,41 @@ class EffectFactory:
                      optional=bool(optional_match),
                      max_targets=optional_count)
 
+            # Explicit token-copy grammar must never fall through to ordinary
+            # CreateTokenEffect, which would invent a vanilla 1/1. The exact
+            # supported target-copy template remains faithful only when the
+            # full instruction has no copy exception. Inspecting effect_text
+            # is essential because the clause splitter can sever ", except
+            # ..." from the copy prefix (Molten Duplication).
+            elif re.search(
+                    r"\bcreate(?:s)?\b[^.;\n]*?\btokens?\s+"
+                    r"(?:that(?:['\u2019]s|\s+is)\s+an?\s+copy\s+of|"
+                    r"that\s+are\s+(?:an?\s+copy|(?:each\s+)?copies)\s+of)\b",
+                    clause_lower):
+                 exact_target_copy = re.search(
+                     r"\bcreate(?:s)?\s+a\s+token\s+"
+                     r"that(?:['\u2019]s|\s+is)\s+a\s+copy\s+of\s+"
+                     r"target\s+artifact\s+or\s+creature\s+you\s+control\b",
+                     clause_lower)
+                 if (exact_target_copy
+                         and not re.search(
+                             r"\bexcept\b", effect_text, re.IGNORECASE)):
+                     from .ability_types import CreateTokenCopyOfTargetEffect
+                     created_effect = CreateTokenCopyOfTargetEffect(
+                         allowed_types={"artifact", "creature"},
+                         controller_only=True)
+                 else:
+                     from .ability_types import UnsupportedEffect
+                     reason = (
+                         "unsupported token-copy instruction: "
+                         f"{clause_clean[:80]}")
+                     if source_name:
+                         from .card_support import report_unsupported
+                         report_unsupported(
+                             source_name, reason, severity="partial")
+                     created_effect = UnsupportedEffect(
+                         clause_clean, reason=reason, severity="partial")
+
             # Printed-value token copy of a chosen permanent.  This must
             # precede the generic token branch, which otherwise invents a
             # vanilla 1/1 for Three Steps Ahead.
@@ -1743,6 +2074,27 @@ class EffectFactory:
                  created_effect = CreateTokenCopyOfTargetEffect(
                      allowed_types={"artifact", "creature"},
                      controller_only=True)
+
+            # Treasure is a predefined noncreature artifact with a mana
+            # ability. Keep it off the generic 1/1 creature-token path.
+            elif (re.search(
+                    r"\bcreate(?:s)?\s+"
+                    r"(?:a|an|one|two|three|four|five|\d+)\s+"
+                    r"(?:tapped\s+)?treasure tokens?\b",
+                    clause_lower)
+                  and "for each" not in clause_lower
+                  and "that many" not in clause_lower):
+                 treasure_match = re.search(
+                     r"\bcreate(?:s)?\s+"
+                     r"(a|an|one|two|three|four|five|\d+)\s+"
+                     r"(?:tapped\s+)?treasure tokens?\b",
+                     clause_lower)
+                 from .ability_types import CreateTreasureEffect
+                 created_effect = CreateTreasureEffect(
+                     count=text_to_number(treasure_match.group(1)),
+                     enters_tapped=bool(re.search(
+                         r"\bcreate(?:s)?\b.*\btapped\s+treasure\b",
+                         clause_lower)))
 
             # Role tokens are Aura enchantments created already attached to a
             # creature, not generic 1/1 creature tokens.
