@@ -847,6 +847,7 @@ class GameStateTurnMixin:
                 player["activated_this_turn"] = set()
                 player["targeted_permanents_this_turn"] = set()
                 player["lost_life_this_turn"] = False
+                player["gained_life_this_turn"] = False
                 player["pw_activations"] = {} # Reset PW activations per turn
         logging.debug(f"Turn {self.turn}: Reset turn tracking variables.")
 

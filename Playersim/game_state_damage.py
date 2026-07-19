@@ -621,6 +621,14 @@ class GameStateDamageMixin:
 
         if final_life_gain > 0:
              player_gaining_life['life'] += final_life_gain
+             player_gaining_life['gained_life_this_turn'] = True
+             player_key = (
+                 'p1' if player_gaining_life is self.p1 else
+                 'p2' if player_gaining_life is self.p2 else None)
+             if player_key:
+                 self.life_gained_this_turn[player_key] = (
+                     self.life_gained_this_turn.get(player_key, 0)
+                     + final_life_gain)
              source_name = getattr(self._safe_get_card(source_id), 'name', source_id)
              logging.debug(f"Lifelink: {player_gaining_life['name']} gained {final_life_gain} life from {source_name}.")
              # Trigger GAIN_LIFE event
@@ -662,6 +670,12 @@ class GameStateDamageMixin:
             return 0
         player['life'] = player.get('life', 0) + final_gain
         player['gained_life_this_turn'] = True
+        player_key = (
+            'p1' if player is self.p1 else
+            'p2' if player is self.p2 else None)
+        if player_key:
+            self.life_gained_this_turn[player_key] = (
+                self.life_gained_this_turn.get(player_key, 0) + final_gain)
         self.trigger_ability(source_id, "GAIN_LIFE",
                              {"player": player, "amount": final_gain, "source_id": source_id})
         logging.debug(f"gain_life: {player.get('name', '?')} gained {final_gain} life (now {player['life']}).")
@@ -675,15 +689,26 @@ class GameStateDamageMixin:
             return 0 # Indicate no damage applied
         source_card = self._safe_get_card(source_id)
         source_controller = self.get_card_controller(source_id)
+        damage_context = {
+            "source_id": source_id, "target_id": target_id,
+            "target_obj": target_card, "target_is_player": False,
+            "damage_amount": amount,
+            "is_combat_damage": is_combat_damage,
+        }
+        damage_is_unpreventable = bool(
+            getattr(self, 'replacement_effects', None)
+            and self.replacement_effects.damage_cannot_be_prevented(
+                damage_context))
         if source_card and source_controller and hasattr(self, 'targeting_system') and self.targeting_system:
-            if self.targeting_system._has_protection_from(
-                    target_card, source_card, target_owner, source_controller):
+            if (not damage_is_unpreventable
+                    and self.targeting_system._has_protection_from(
+                        target_card, source_card, target_owner,
+                        source_controller)):
                 logging.debug(f"Damage from {getattr(source_card, 'name', source_id)} to "
                               f"{getattr(target_card, 'name', target_id)} prevented by protection.")
                 return 0
 
         # Apply damage replacement effects targeting this creature
-        damage_context = { "source_id": source_id, "target_id": target_id, "target_obj": target_card, "target_is_player": False, "damage_amount": amount, "is_combat_damage": is_combat_damage }
         actual_damage = amount
         if hasattr(self, 'replacement_effects'):
             modified_context, was_replaced = self.replacement_effects.apply_replacements("DAMAGE", damage_context)

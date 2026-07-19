@@ -67,6 +67,28 @@ class ReplacementEffectSystem:
         # Remove from main list
         self.active_effects = [effect for effect in self.active_effects 
                             if effect.get('effect_id') != effect_id]
+
+    def damage_cannot_be_prevented(self, event_context=None):
+        """Whether an active continuous rule forbids damage prevention."""
+        context = dict(event_context or {})
+        for effect in self.active_effects:
+            if not effect.get('stops_damage_prevention'):
+                continue
+            if self._is_effect_expired(
+                    effect, self.game_state.turn, self.game_state.phase):
+                continue
+            condition = effect.get('condition')
+            if callable(condition):
+                try:
+                    if not condition(dict(context)):
+                        continue
+                except Exception as exc:
+                    logging.error(
+                        "Error evaluating unpreventable-damage rule %s: %s",
+                        effect.get('effect_id'), exc)
+                    continue
+            return True
+        return False
     
     def handle_enter_battlefield_replacements(self, card_id, controller):
         """
@@ -184,8 +206,10 @@ class ReplacementEffectSystem:
             if effect_id:
                 registered_effects.append(effect_id)
 
-        # Scan for damage prevention effects
-        if "prevent" in oracle_text.lower() and "damage" in oracle_text.lower():
+        # Scan only affirmative prevention instructions. "Damage can't be
+        # prevented" is the opposite rule and must never become a shield.
+        from .ability_utils import has_damage_prevention_instruction
+        if has_damage_prevention_instruction(oracle_text):
             effect_id = self._register_damage_prevention(card_id, player, oracle_text)
             if effect_id:
                 registered_effects.append(effect_id)
@@ -522,6 +546,9 @@ class ReplacementEffectSystem:
                     effect for effect in applicable_effects
                     if bool(effect.get('draw_batch_modifier', False))
                     == is_batch]
+            damage_is_unpreventable = (
+                event_type == 'DAMAGE'
+                and self.damage_cannot_be_prevented(event_context))
 
             # --- Madness Check (Specific logic before standard replacements) ---
             # If discard event, card exists, and has Madness:
@@ -694,13 +721,36 @@ class ReplacementEffectSystem:
                             # copied. A shallow snapshot is sufficient to
                             # detect routing-field changes made by a replacement.
                             original_context_before_apply = dict(modified_context)
+                            prevention_must_prevent_zero = (
+                                damage_is_unpreventable
+                                and effect_to_apply.get(
+                                    'is_damage_prevention', False))
                             result = effect_to_apply['replacement'](modified_context)
                             if result is not None: modified_context = result
 
+                            if prevention_must_prevent_zero:
+                                # CR 615.12: the prevention effect is still
+                                # applied, so shields/state and additional
+                                # effects are consumed or performed. It simply
+                                # prevents none of the incoming damage.
+                                modified_context['damage_amount'] = (
+                                    original_context_before_apply.get(
+                                        'damage_amount', 0))
+                                for prevention_key in (
+                                        'prevented', 'damage_prevented'):
+                                    if prevention_key in original_context_before_apply:
+                                        modified_context[prevention_key] = (
+                                            original_context_before_apply[
+                                                prevention_key])
+                                    else:
+                                        modified_context.pop(
+                                            prevention_key, None)
+
                             # Only mark as replaced if the event wasn't just generating a side effect
                             # Madness replacement technically *replaces* GY destination with Exile, so it counts.
-                            if modified_context != original_context_before_apply:
-                                was_replaced = True # Set if context actually changed
+                            if (modified_context != original_context_before_apply
+                                    or prevention_must_prevent_zero):
+                                was_replaced = True
                                 active_effect_applied_in_loop = True
                                 applied_ids.add(effect_id_applying)
 
@@ -1101,9 +1151,15 @@ class ReplacementEffectSystem:
 
             duration = self._determine_duration(normalized_text)
 
+            is_damage_prevention = (
+                event_type == 'DAMAGE'
+                and bool(re.search(
+                    r"\bprevent(?:s|ed|ing)?\b",
+                    clause_data.get('replacement', ''), re.IGNORECASE)))
             effect_id = self.register_effect({
                 'source_id': card_id, 'event_type': event_type, 'condition': condition_func,
                 'replacement': replacement_func, 'duration': duration, 'controller_id': player,
+                'is_damage_prevention': is_damage_prevention,
                 'description': f"{source_name}: {clause_data['clause']}"
             })
             registered_effects.append(effect_id)
@@ -2151,6 +2207,9 @@ class ReplacementEffectSystem:
 
     def _register_damage_prevention(self, card_id, player, oracle_text, x_value=None):
         """Register static damage prevention effects."""
+        from .ability_utils import has_damage_prevention_instruction
+        if not has_damage_prevention_instruction(oracle_text):
+            return None
         source_card = self.game_state._safe_get_card(card_id)
         source_name = source_card.name if source_card and hasattr(source_card, 'name') else f"Card {card_id}"
 
@@ -2246,6 +2305,7 @@ class ReplacementEffectSystem:
             'source_id': card_id, 'event_type': 'DAMAGE',
             'condition': condition, 'replacement': replacement,
             'duration': duration, 'controller_id': player,
+            'is_damage_prevention': True,
             'description': f"{source_name} damage prevention"
         })
         logging.debug(f"Registered damage prevention effect for {source_name}")

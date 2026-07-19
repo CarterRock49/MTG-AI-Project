@@ -1623,9 +1623,11 @@ def s_death_trigger_respects_source_zone():
     }
     gs.ability_handler.active_triggers = []
 
-    gs.trigger_ability(dying, "DIES", {
-        "controller": player, "from_zone": "battlefield", "to_zone": "graveyard",
-    })
+    # Exercise the real zone transaction so the DIES event carries the
+    # battlefield object's last-known identity.  Subject-scoped death
+    # watchers deliberately fail closed without that information.
+    assert gs.move_card(
+        dying, player, "battlefield", player, "graveyard", cause="destroy")
     queued_sources = [entry[0].card_id for entry in gs.ability_handler.active_triggers]
     assert queued_sources == [battlefield_source], \
         f"DIES event queued triggers from the wrong zones: {queued_sources}"
@@ -2101,7 +2103,13 @@ def s_trigger_parse():
     assert ta.trigger_condition == "when this creature enters the battlefield", \
         f"mangled trigger condition: '{ta.trigger_condition}'"
     assert ta.effect == "draw a card", f"mangled effect: '{ta.effect}'"
-    ctx = {'game_state': gs, 'controller': owner}
+    event_card = gs._safe_get_card(cid)
+    ctx = {
+        'game_state': gs, 'controller': owner, 'event_controller': owner,
+        'event_card_id': cid, 'event_card': event_card,
+        'source_card_id': cid, 'source_card': event_card,
+        'from_zone': 'stack', 'to_zone': 'battlefield',
+    }
     assert ta.can_trigger('ENTERS_BATTLEFIELD', ctx), "ETB trigger did not fire on its event"
     assert not ta.can_trigger('DIES', ctx), "ETB trigger fired on the wrong event"
     hand_before = len(owner["hand"])
@@ -2120,7 +2128,13 @@ def s_intervening_if_trigger_time():
                                       "if you have 30 or more life, draw a card.")
     assert ta.effect == "draw a card", \
         f"intervening 'if' was not separated from the effect: '{ta.effect}'"
-    ctx = {'game_state': gs, 'controller': owner}
+    event_card = gs._safe_get_card(cid)
+    ctx = {
+        'game_state': gs, 'controller': owner, 'event_controller': owner,
+        'event_card_id': cid, 'event_card': event_card,
+        'source_card_id': cid, 'source_card': event_card,
+        'from_zone': 'stack', 'to_zone': 'battlefield',
+    }
     owner["life"] = 20
     assert not ta.can_trigger('ENTERS_BATTLEFIELD', ctx), \
         "ability triggered although the intervening 'if' was false (CR 603.4)"
@@ -2138,7 +2152,13 @@ def s_intervening_if_resolution_time():
     ta = TriggeredAbility(card_id=cid,
                           effect_text="When this creature enters the battlefield, "
                                       "if you have 30 or more life, draw a card.")
-    ctx = {'game_state': gs, 'controller': owner}
+    event_card = gs._safe_get_card(cid)
+    ctx = {
+        'game_state': gs, 'controller': owner, 'event_controller': owner,
+        'event_card_id': cid, 'event_card': event_card,
+        'source_card_id': cid, 'source_card': event_card,
+        'from_zone': 'stack', 'to_zone': 'battlefield',
+    }
     owner["life"] = 30
     assert ta.can_trigger('ENTERS_BATTLEFIELD', ctx)
     # Condition becomes false while the ability is on the stack.
@@ -13481,11 +13501,8 @@ def scenario_three_steps_ahead_copy_mode_end_to_end():
         "name": "Spree Copy Relic", "mana_cost": "{2}",
         "type_line": "Artifact", "oracle_text": "",
     }, "battlefield")
-    own_creature = inject_into_zone(gs, player, {
-        "name": "Spree Copy Bear", "mana_cost": "{2}{G}",
-        "type_line": "Creature - Bear", "oracle_text": "",
-        "power": 2, "toughness": 3,
-    }, "battlefield")
+    own_creature = inject_real_card(
+        gs, player, "Pawpatch Recruit", "battlefield")
     own_land = inject_into_zone(gs, player, {
         "name": "Spree Copy Land", "type_line": "Land", "oracle_text": "",
     }, "battlefield")
@@ -13514,9 +13531,13 @@ def scenario_three_steps_ahead_copy_mode_end_to_end():
         if card_id not in battlefield_before]
     assert len(created_ids) == 1, f"copy mode created {created_ids}"
     token = gs._safe_get_card(created_ids[0])
-    assert getattr(token, "is_token", False) and token.name == "Spree Copy Bear"
-    assert (int(token.printed("power")), int(token.printed("toughness"))) == (2, 3), \
+    assert getattr(token, "is_token", False) and token.name == "Pawpatch Recruit"
+    assert (int(token.printed("power")), int(token.printed("toughness"))) == (2, 1), \
         f"copy mode copied live {token.power}/{token.toughness} instead of printed values"
+    assert original.printed("colors") == [0, 0, 0, 0, 1], \
+        f"real Pawpatch Recruit had unexpected colors {original.printed('colors')}"
+    assert token.colors == original.printed("colors"), \
+        f"copy mode lost Pawpatch Recruit's green color: {token.colors}"
     assert player["graveyard"].count(spree_id) == 1
 
 
@@ -14871,6 +14892,7 @@ def scenario_cosmogrand_second_spell_modal_trigger():
     context["cast_card_id"] = second
     assert trigger.can_trigger("CAST_SPELL", context)
     before = len(controller["battlefield"])
+    tokens_before = set(controller.get("tokens", []))
     assert gs.ability_handler._push_trigger_to_stack(
         trigger, controller, context)
     assert gs.stack and gs.choice_context.get("type") == "trigger_mode", \
@@ -14883,6 +14905,18 @@ def scenario_cosmogrand_second_spell_modal_trigger():
     assert gs.resolve_top_of_stack(), "Cosmogrand's chosen trigger failed"
     assert len(controller["battlefield"]) == before + 2, \
         "Cosmogrand's token mode did not create two Soldiers"
+    created = [
+        token_id for token_id in controller.get("tokens", [])
+        if token_id not in tokens_before]
+    assert len(created) == 2, \
+        f"Cosmogrand created the wrong token identities: {created}"
+    for token_id in created:
+        token = gs._safe_get_card(token_id)
+        assert token.name == "Human Soldier Token", token.name
+        assert (token.power, token.toughness) == (1, 1)
+        assert token.card_types == ["creature"], token.card_types
+        assert token.subtypes == ["human", "soldier"], token.subtypes
+        assert token.colors == [1, 0, 0, 0, 0], token.colors
 
 
 @scenario("701.19 (Search)", "Gearhulk and Shepherd expose exact restricted library choices")

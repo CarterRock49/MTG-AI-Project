@@ -305,8 +305,9 @@ full-pool coverage counts are in the ROADMAP status snapshot.
 
 The static ledger is not rules proof. Run every frozen-pool card through the
 public action pipeline with deterministic fixtures, real mask-valid payment,
-resolution, paired priority-negative checks, warning/fidelity gates, and
-per-card atomic evidence:
+resolution, paired priority and trigger non-event checks, independent compound
+trigger arms, lexical printed-trigger reconciliation, warning/fidelity gates,
+and per-card atomic evidence:
 
 ```bash
 python -m Playersim.card_probe \
@@ -325,12 +326,43 @@ discovered surface or branch was not independently exercised. Even
 `semantic_status=unverified` until permanent scenarios assert its exact rules
 outcomes across all abilities, modes, and choices.
 
-The latest repaired Standard baseline is
-`probe_runs/standard-full-2026-07-18-v2/card_probe_report.json`: all 4,702 card
-artifacts and their report/run hashes validate, with 1,774 `failed`, 2,910
-`coverage_gap`, and 18 `execution_passed`. Previously trusted ledger classes
-now contain zero runtime failures, but they remain semantically unverified until
-their outstanding branches have exact-state scenario coverage.
+The latest full-pool schema-v3 baseline is
+`probe_runs/standard-full-schema3-2026-07-18-v1/card_probe_report.json`: all
+4,702 card artifacts were accepted by an identical resume pass, and independent
+recomputation validated their identities, hashes, links, schema, terminal
+statuses, and aggregate summary. It reports 1,930 `failed`, 2,725
+`coverage_gap`, and 47 `execution_passed`; the physical report SHA-256 is
+`2165f074334614706bac9e941eb90c43a90adac16f438f4ad500131482ff8091`.
+All 4,702 cards remain semantically unverified.
+
+Schema v3 inventories 3,124 printed trigger clauses, matching 2,599 to runtime
+triggers and retaining 525 unmatched clauses as explicit gaps. It independently
+exercised 1,462 of 2,672 positive trigger arms, 1,574 of 2,611 close non-events,
+and 3,287 of 3,480 public choice branches. The report also fails closed on
+diagnostics and degraded support: 1,587 cards emitted diagnostics and 897
+reported through the support manifest, and every affected card is `failed`.
+The previously trusted ledger classes still contain zero runtime failures, but
+only 47 of those 159 cards mechanically pass this stricter evidence contract.
+
+The follow-up trusted-card replay is
+`probe_runs/standard-trusted-branch-replay-2026-07-18-v3/card_probe_report.json`.
+Across all 159 `verified`/`observed_clean` ledger cards it reports 0 `failed`,
+98 `coverage_gap`, and 61 bounded mechanical passes. Public choice alternatives
+are replayed as independent edges from fresh fixtures: all 133 discovered
+choice-branch obligations were exercised without Cartesian path expansion.
+Every one of these cards still has `semantic_status=unverified`; the mechanical
+result never restores the old notion that a card is "clean."
+
+The stricter trigger/printed-surface replay is
+`probe_runs/standard-trusted-trigger-replay-2026-07-18-v1/card_probe_report.json`.
+Across the same 159 cards it reports 0 `failed`, 112 `coverage_gap`, and 47
+bounded mechanical passes. It independently exercised 55 of 77 trigger event
+arms, 55 of 71 matched trigger non-events, and all 161 discovered public choice
+branches. Its independent lexical inventory matched 68 of 81 printed triggers
+to runtime registrations and retained the other 13 as explicit gaps; 66 of 72
+printed conditional outcomes likewise remain gaps. The lower pass count is a
+deliberate fail-closed reclassification, not a semantic regression, and all 159
+cards remain `semantic_status=unverified`.
 
 ---
 

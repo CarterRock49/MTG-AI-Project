@@ -13,6 +13,32 @@ from .card import Card
 from .ability_utils import EffectFactory
 # *** CHANGED: Import TargetingSystem from its new file ***
 
+
+_GENERIC_ABILITY_WORD_TRIGGER_PREFIX = re.compile(
+    r'^\s*(?P<label>[A-Za-z0-9][^"“”\n\r{}:\u2022\u25cf'
+    r'\u2013\u2014\ufffd]{0,79}?)\s*'
+    r'[\u2013\u2014\ufffd]\s*'
+    r'(?P<trigger>When(?:ever)?|At)\b',
+    re.IGNORECASE)
+_SAGA_CHAPTER_LABEL = re.compile(
+    r'^[ivxlcdm]+(?:\s*,\s*[ivxlcdm]+)*$', re.IGNORECASE)
+_UNMODELED_ABILITY_WORD_STATE_GATES = {'max speed', 'solved'}
+
+
+def _split_generic_ability_word_trigger_prefix(text):
+    """Return ``(ability_word, trigger_text)`` for a safe leading label."""
+    clause = str(text or '').strip()
+    match = _GENERIC_ABILITY_WORD_TRIGGER_PREFIX.match(clause)
+    if match is None:
+        return None
+    label = ' '.join(match.group('label').split())
+    normalized = label.casefold()
+    if (_SAGA_CHAPTER_LABEL.fullmatch(label)
+            or normalized in _UNMODELED_ABILITY_WORD_STATE_GATES
+            or re.match(r'^(?:choose|mode|chapter)\b', normalized)):
+        return None
+    return normalized, clause[match.start('trigger'):]
+
 class AbilityHandler:
     """Handles card abilities and special effects"""
 
@@ -749,9 +775,11 @@ class AbilityHandler:
                     if current_level_data:
                         # Class abilities are cumulative, get all abilities for the current level
                         oracle_text_sources.extend(current_level_data.get('all_abilities', []))
-                        # Mark the original full oracle text as potentially processed by class logic
-                        # Avoids re-parsing level indicators like "Level 2 -" as static abilities
-                        processed_special_text_markers = getattr(card, 'oracle_text', '')
+                        # These sources are already the exact unlocked Class
+                        # ability rows; no level declaration text reaches the
+                        # generic parser.  Processed markers are reserved for
+                        # casting-owned blocks that remain in their original
+                        # source text (Spree and Tiered).
                     if hasattr(card, 'keywords'): keywords_from_card_data = card.keywords
                 else: # Normal card or other layout type
                     oracle_text_sources.append(getattr(card, 'oracle_text', ''))
@@ -987,11 +1015,10 @@ class AbilityHandler:
                     abilities_list.append(tick)
                     logging.debug(f"Synthesized Impending end-step tick for {card.name}")
 
-                # An ability whose instruction returns "this card from your
-                # graveyard" functions in that graveyard unless its trigger
-                # condition is itself the zone-change event. Without this CR
-                # 113.6 exception, Afterburner Expert watched exhaust from the
-                # battlefield and could never trigger while actually buried.
+                # An ability that explicitly watches an event "while this card
+                # is in your graveyard" functions only from that graveyard.
+                # Return-from-graveyard instructions have the same CR 113.6
+                # exception unless their trigger is the source's zone change.
                 for ability in abilities_list:
                     if (not isinstance(ability, TriggeredAbility)
                             or getattr(ability, 'zone', None)):
@@ -999,6 +1026,9 @@ class AbilityHandler:
                     effect_text = str(getattr(ability, 'effect', '')).lower()
                     trigger_text = str(
                         getattr(ability, 'trigger_condition', '')).lower()
+                    watches_while_in_graveyard = bool(re.search(
+                        r"\bwhile\s+this\s+card\s+is\s+in\s+your\s+graveyard\b",
+                        trigger_text))
                     returns_self_from_graveyard = bool(re.search(
                         r"return\s+this\s+card\s+from\s+your\s+graveyard\s+to\s+the\s+battlefield",
                         effect_text))
@@ -1006,9 +1036,15 @@ class AbilityHandler:
                         r"\b(?:dies|is discarded|is put into (?:a|your) graveyard|"
                         r"put into (?:a|your) graveyard from)\b",
                         trigger_text))
-                    if (returns_self_from_graveyard
-                            and not source_moves_in_trigger):
+                    if (watches_while_in_graveyard
+                            or (returns_self_from_graveyard
+                                and not source_moves_in_trigger)):
                         ability.zone = 'graveyard'
+                    if watches_while_in_graveyard:
+                        # The event that first moved this object into its
+                        # graveyard happened before this zone-only ability
+                        # began functioning there.
+                        ability._requires_preexisting_source_zone = True
 
                 # --- Apply Static Abilities and Finalize ---
                 logging.debug(f"Parsed {len(abilities_list)} total functional abilities for {card.name} ({card_id})")
@@ -1271,7 +1307,12 @@ class AbilityHandler:
         ]
         keyword_trigger_match = re.match(rf"^\s*({'|'.join(triggering_keywords_at_start)})\s*[—\u2014-]?\s*(?:When|Whenever|At)\b", clause_text.strip(), re.IGNORECASE)
 
-        if trigger_match or etb_match or keyword_trigger_match:
+        generic_ability_word_trigger = (
+            None if keyword_trigger_match else
+            _split_generic_ability_word_trigger_prefix(clause_text))
+
+        if (trigger_match or etb_match or keyword_trigger_match
+                or generic_ability_word_trigger):
              is_likely_triggered = True
 
         if is_likely_triggered:
@@ -1283,6 +1324,8 @@ class AbilityHandler:
                      trigger_text = re.sub(
                          rf"^\s*{re.escape(keyword_trigger_match.group(1))}\s*[—\u2014-]?\s*",
                          "", trigger_text, count=1, flags=re.IGNORECASE)
+                 elif generic_ability_word_trigger:
+                     ability_word, trigger_text = generic_ability_word_trigger
                  ability = TriggeredAbility(card_id=card_id, effect_text=trigger_text)
                  if ability.trigger_condition != "Unknown" and ability.effect != "Unknown":
                      if ability_word:
@@ -2031,7 +2074,11 @@ class AbilityHandler:
         # Add game state and event type to context for condition checks
         context['game_state'] = gs
         context['event_type'] = event_type
-        context.setdefault('event_controller', context.get('controller'))
+        event_controller = context.get('controller')
+        if (event_type == 'ENTER_EXILE'
+                and context.get('from_zone') == 'battlefield'):
+            event_controller = context.get('from_player') or event_controller
+        context.setdefault('event_controller', event_controller)
 
         event_card = gs._safe_get_card(event_origin_card_id)
         context['event_card_id'] = event_origin_card_id
@@ -2046,7 +2093,7 @@ class AbilityHandler:
         player_refs = {'p1': gs.p1, 'p2': gs.p2}
         # Iterate through players and their owned cards that *might* have abilities functioning in certain zones
         # Battlefield is primary, Graveyard is common, Hand/Library/Exile are rare but possible
-        potential_zones = ["battlefield", "graveyard", "hand"] # Add others if needed
+        potential_zones = ["battlefield", "graveyard", "hand"]
         for player_id, player_obj in player_refs.items():
              if player_obj:
                  for zone_name in potential_zones:
@@ -2065,6 +2112,21 @@ class AbilityHandler:
                 abilities_to_check.extend(
                     (cast_id, ab, caster, 'stack')
                     for ab in self.registered_abilities[cast_id])
+
+        # ENTER_EXILE is emitted after the moved card reaches exile. Include
+        # only that event object so its own battlefield LKI trigger can be
+        # checked; unrelated cards in exile remain outside the live scan.
+        if (event_type == "ENTER_EXILE"
+                and event_origin_card_id in self.registered_abilities):
+            exile_owner, event_zone = gs.find_card_location(
+                event_origin_card_id)
+            if event_zone == 'exile' and exile_owner is not None:
+                trigger_controller = (
+                    context.get('event_controller') or exile_owner)
+                abilities_to_check.extend(
+                    (event_origin_card_id, ab, trigger_controller, 'exile')
+                    for ab in self.registered_abilities[
+                        event_origin_card_id])
 
         # Iterate through collected potential triggers
         queued_trigger_count = 0
@@ -2092,7 +2154,12 @@ class AbilityHandler:
 
              # 1. Standard Zone Match: If ability trigger zone matches current card zone
              if triggering_zone == zone_name:
-                 can_trigger_from_current_zone = True
+                 entered_required_zone_during_event = (
+                     getattr(
+                         ability, '_requires_preexisting_source_zone', False)
+                     and card_id == event_origin_card_id
+                     and context.get('from_zone') != zone_name)
+                 can_trigger_from_current_zone = not entered_required_zone_during_event
 
              # 2. Zone Change Triggers: Check if event involves a zone change relevant to the ability.
              #    Uses LTB rule: Ability triggers based on game state *before* the event.
@@ -2109,6 +2176,17 @@ class AbilityHandler:
              elif event_type == "LEAVE_BATTLEFIELD": # Moving from Battlefield to somewhere else
                  if triggering_zone == 'battlefield' and ("leaves the battlefield" in trigger_text):
                      can_trigger_from_current_zone = True
+             elif event_type == "ENTER_EXILE":
+                  # A permanent's own exile trigger looks back to the object
+                  # immediately before it left the battlefield. The move hook
+                  # supplies that LKI after placing the physical card in exile.
+                  if (card_id == event_origin_card_id
+                          and zone_name == 'exile'
+                          and triggering_zone == 'battlefield'
+                          and context.get('from_zone') == 'battlefield'
+                          and ("is put into exile" in trigger_text
+                               or "is exiled" in trigger_text)):
+                       can_trigger_from_current_zone = True
              elif event_type == "CAST_SPELL":
                   # The spell being cast triggers its own "when you cast this
                   # spell" ability from the stack.
@@ -2139,6 +2217,13 @@ class AbilityHandler:
 
              # --- Prepare Context for this Specific Trigger Check ---
              trigger_check_context = context.copy()
+             # ``source_zone`` in an incoming event can describe the object
+             # that caused the event (notably a permanent cast from exile).
+             # Preserve that provenance before replacing it with the trigger
+             # source's current zone below.
+             if "source_zone" in context:
+                  trigger_check_context.setdefault(
+                      "event_source_zone", context.get("source_zone"))
              trigger_check_context['source_card_id'] = card_id
              trigger_check_context['source_card'] = source_card
              trigger_check_context['controller'] = controller # Player controlling the source

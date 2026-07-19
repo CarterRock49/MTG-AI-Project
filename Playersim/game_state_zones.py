@@ -37,11 +37,25 @@ class GameStateZonesMixin:
         owner = self._find_card_owner_fallback(card_id) or controller
         owner_key = "p1" if owner is self.p1 else ("p2" if owner is self.p2 else None)
         card_types = list(getattr(card, "card_types", []) or []) if card else []
+        subtypes = list(getattr(card, "subtypes", []) or []) if card else []
+        supertypes = list(getattr(card, "supertypes", []) or []) if card else []
         power = getattr(card, "power", 0) if card else 0
         toughness = getattr(card, "toughness", 0) if card else 0
         layer_system = getattr(self, "layer_system", None)
         if card and layer_system:
             try:
+                layered_types = layer_system.get_characteristic(
+                    card_id, "card_types")
+                layered_subtypes = layer_system.get_characteristic(
+                    card_id, "subtypes")
+                layered_supertypes = layer_system.get_characteristic(
+                    card_id, "supertypes")
+                if layered_types is not None:
+                    card_types = list(layered_types)
+                if layered_subtypes is not None:
+                    subtypes = list(layered_subtypes)
+                if layered_supertypes is not None:
+                    supertypes = list(layered_supertypes)
                 power = layer_system.get_characteristic(card_id, "power")
                 toughness = layer_system.get_characteristic(
                     card_id, "toughness")
@@ -50,16 +64,48 @@ class GameStateZonesMixin:
                 # malformed layer is being diagnosed; raw characteristics are
                 # the conservative fallback.
                 pass
+        attachment_source_ids = []
+        for player in (self.p1, self.p2):
+            if not player:
+                continue
+            attachment_source_ids.extend(
+                attachment_id for attachment_id, target_id in
+                (player.get("attachments", {}) or {}).items()
+                if target_id == card_id)
+        keyword_names = list(getattr(card, "ALL_KEYWORDS", []) or []) \
+            if card else []
+        raw_keyword_values = getattr(card, "keywords", None) if card else None
+        keyword_values = (
+            list(raw_keyword_values) if raw_keyword_values is not None else [])
+        active_keywords = {
+            str(keyword).casefold() for keyword, active in
+            zip(keyword_names, keyword_values) if active}
+        for counter_name, amount in (
+                getattr(card, "counters", {}) or {}).items() if card else ():
+            if (int(amount or 0) > 0
+                    and str(counter_name).casefold() in {
+                        str(value).casefold() for value in keyword_names}):
+                active_keywords.add(str(counter_name).casefold())
         return {
             "card_id": card_id,
             "controller_key": "p1" if controller is self.p1 else "p2",
             "owner_key": owner_key,
             "card_types": card_types,
-            "subtypes": list(getattr(card, "subtypes", []) or []) if card else [],
+            "subtypes": subtypes,
+            "supertypes": supertypes,
+            "counters": copy.deepcopy(
+                getattr(card, "counters", {}) or {}) if card else {},
+            "attachment_source_ids": sorted(set(attachment_source_ids)),
             "power": power,
             "toughness": toughness,
+            "mana_value": getattr(card, "cmc", 0) if card else 0,
+            "keywords": sorted(active_keywords),
             "was_creature": "creature" in card_types,
             "was_token": bool(getattr(card, "is_token", False)) if card else False,
+            "was_attacking": card_id in getattr(
+                self, "current_attackers", []),
+            "was_face_down": bool(
+                getattr(card, "face_down", False)) if card else False,
             "lost_all_abilities": bool(
                 getattr(self, "layer_system", None)
                 and self.layer_system.source_has_lost_all_abilities(card_id)),
@@ -69,8 +115,8 @@ class GameStateZonesMixin:
         """Return whether a permanent's own text makes it enter tapped.
 
         Scryfall's current wording uses both "enters tapped" and the older
-        "enters the battlefield tapped" template. Fast lands also need the
-        number of *other* lands after the entering card has been appended.
+        "enters the battlefield tapped" template. Conditional lands inspect
+        the preexisting battlefield after the entering card has been appended.
         """
         if not card or not controller:
             return False
@@ -80,8 +126,11 @@ class GameStateZonesMixin:
             oracle_text = card.back_face.get("oracle_text", oracle_text) or ""
         normalized = oracle_text.lower().replace("the battlefield ", "")
 
-        fast_land_clause = "enters tapped unless you control two or fewer other lands"
-        if fast_land_clause in normalized:
+        fast_land_clause = (
+            "enters tapped unless you control two or fewer other lands")
+        slow_land_clause = (
+            "enters tapped unless you control two or more other lands")
+        if fast_land_clause in normalized or slow_land_clause in normalized:
             land_count = 0
             for permanent_id in controller.get("battlefield", []):
                 permanent = self._safe_get_card(permanent_id)
@@ -91,12 +140,52 @@ class GameStateZonesMixin:
             # one occurrence, rather than filtering by ID, because deck copies
             # intentionally share card IDs in the current zone model.
             other_lands = max(0, land_count - 1)
-            return other_lands > 2
+            if fast_land_clause in normalized:
+                return other_lands > 2
+            return other_lands < 2
+
+        if re.search(
+                r"enters tapped unless it(?:'|\u2019| i)s your first, second, "
+                r"or third turn of the game", normalized):
+            try:
+                global_turn = int(self.turn)
+            except (TypeError, ValueError):
+                global_turn = 0
+            player_turn = (
+                (global_turn + 1) // 2
+                if controller is self.p1 else global_turn // 2)
+            return not (
+                self._get_active_player() is controller
+                and player_turn in (1, 2, 3))
 
         if re.search(
                 r"enters tapped if it(?:'|\u2019| i)s not your turn",
                 normalized):
             return self._get_active_player() is not controller
+
+        if "enters tapped unless you control a basic land" in normalized:
+            skipped_entering_occurrence = False
+            for permanent_id in controller.get("battlefield", []):
+                if (card_id is not None and permanent_id == card_id
+                        and not skipped_entering_occurrence):
+                    skipped_entering_occurrence = True
+                    continue
+                permanent = self._safe_get_card(permanent_id)
+                if not permanent:
+                    continue
+                supertypes = {
+                    str(supertype).lower()
+                    for supertype in (
+                        getattr(permanent, "supertypes", []) or [])
+                }
+                card_types = {
+                    str(card_type).lower()
+                    for card_type in (
+                        getattr(permanent, "card_types", []) or [])
+                }
+                if "basic" in supertypes and "land" in card_types:
+                    return False
+            return True
 
         # These lands check for basic land *types*, not basic supertypes.
         # move_card asks after appending the entering object, so skip exactly

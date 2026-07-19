@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import sys
 import unittest
 from pathlib import Path
@@ -24,6 +25,7 @@ from Playersim.ability_types import (  # noqa: E402
 )
 from Playersim.ability_utils import EffectFactory  # noqa: E402
 from scenario_test import (  # noqa: E402
+    _activate_named_ability,
     fresh,
     get_env,
     inject_into_zone,
@@ -138,6 +140,114 @@ class TargetLifecycleRegressionTest(unittest.TestCase):
                 game_state, source, player, context["targets"],
                 context=context))
         warning.assert_not_called()
+
+    def test_restless_cottage_attack_can_choose_zero_targets_silently(self):
+        game_state, handler = self._state(203911)
+        player, opponent = game_state.p1, game_state.p2
+        for owner in (player, opponent):
+            self._clear_hand(game_state, owner)
+            for permanent_id in list(owner.get("battlefield", [])):
+                self.assertTrue(game_state.move_card(
+                    permanent_id, owner, "battlefield", owner, "library"))
+
+        cottage = inject_real_card(
+            game_state, player, "Restless Cottage", "battlefield")
+        grave_card = inject_into_zone(
+            game_state, opponent,
+            spell("Cottage Optional Exile Candidate", "Draw a card."),
+            "graveyard")
+        game_state.untap_permanent(cottage, player)
+        player["entered_battlefield_this_turn"].discard(cottage)
+        player["mana_pool"] = {
+            "W": 0, "U": 0, "B": 1, "R": 0, "G": 1, "C": 2,
+        }
+        game_state.ability_handler.active_triggers = []
+        _activate_named_ability(game_state, player, cottage, "becomes")
+
+        game_state.phase = game_state.PHASE_DECLARE_ATTACKERS
+        game_state.previous_priority_phase = None
+        game_state.priority_player = player
+        game_state.priority_pass_count = 0
+        game_state.current_attackers = []
+        game_state.current_block_assignments = {}
+        game_state.attackers_this_turn = set()
+        handler.current_valid_actions = None
+        fidelity_before = copy.deepcopy(game_state.fidelity_counters)
+
+        def public(action, label):
+            priority = game_state.priority_player or player
+            game_state.agent_is_p1 = priority is game_state.p1
+            mask = handler.generate_valid_actions()
+            self.assertTrue(
+                mask[action],
+                f"{label}: action {action} absent; valid="
+                f"{[index for index, allowed in enumerate(mask) if allowed]}")
+            handler.current_valid_actions = mask
+            _, done, truncated, info = handler.apply_action(action)
+            self.assertFalse(done, (label, info))
+            self.assertFalse(truncated, (label, info))
+            self.assertFalse(info.get("execution_failed"), (label, info))
+            self.assertFalse(info.get("invalid_action"), (label, info))
+
+        attack_action = 28 + player["battlefield"].index(cottage)
+        public(attack_action, "declare Restless Cottage as an attacker")
+
+        queued = []
+        process_triggers = game_state.ability_handler.process_triggered_abilities
+
+        def record_then_stack_triggers():
+            queued.extend(game_state.ability_handler.active_triggers)
+            return process_triggers()
+
+        with patch.object(
+                game_state.ability_handler, "process_triggered_abilities",
+                side_effect=record_then_stack_triggers):
+            public(438, "finish declaring attackers")
+
+        cottage_triggers = [
+            entry for entry in queued
+            if entry[0].card_id == cottage
+            and "create a food token" in entry[0].effect
+        ]
+        self.assertEqual(len(cottage_triggers), 1)
+        self.assertEqual(len(game_state.stack), 1)
+        self.assertEqual(game_state.stack[-1][0:2], ("TRIGGER", cottage))
+        self.assertIsNotNone(game_state.targeting_context)
+        self.assertEqual(
+            (game_state.targeting_context["min_targets"],
+             game_state.targeting_context["max_targets"]),
+            (0, 1))
+        self.assertIn(
+            grave_card,
+            handler._get_target_selection_candidates(
+                player, game_state.targeting_context))
+
+        foods_before = {
+            permanent_id for permanent_id in player["battlefield"]
+            if "food" in {
+                subtype.lower() for subtype in getattr(
+                    game_state._safe_get_card(permanent_id), "subtypes", [])
+            }
+        }
+        with patch("Playersim.ability_types.logging.warning") as warning:
+            public(11, "finish Cottage targeting with zero selections")
+            self.assertEqual(game_state.stack[-1][3].get("targets"), {})
+            public(11, "Cottage controller passes priority")
+            public(11, "Cottage opponent passes priority")
+        warning.assert_not_called()
+
+        foods_after = {
+            permanent_id for permanent_id in player["battlefield"]
+            if "food" in {
+                subtype.lower() for subtype in getattr(
+                    game_state._safe_get_card(permanent_id), "subtypes", [])
+            }
+        }
+        self.assertEqual(len(foods_after - foods_before), 1)
+        self.assertIn(grave_card, opponent["graveyard"])
+        self.assertNotIn(grave_card, opponent["exile"])
+        self.assertEqual(game_state.stack, [])
+        self.assertEqual(game_state.fidelity_counters, fidelity_before)
 
     def test_committed_target_that_leaves_causes_silent_stack_fizzle(self):
         game_state, _ = self._state(203903)

@@ -87,6 +87,112 @@ branches (1,207). These counts are the repair/coverage baseline; no ledger
 promotion follows without scenario-backed exact-state assertions for every
 distinct path.
 
+### Trusted-card independent-branch replay — July 18, 2026
+
+The follow-up run exercised all 159 cards in the prior `verified` and
+`observed_clean` ledger classes using fresh-fixture replay for each public
+choice edge. The final report is
+`probe_runs/standard-trusted-branch-replay-2026-07-18-v3/card_probe_report.json`
+with SHA-256
+`0d219ad2ea8da7085e030ac81d00664e21cdba8c87ab244c4fdc957c11c75cfe`.
+
+| Prior ledger status | Failed | Coverage gap | Mechanical pass |
+| --- | ---: | ---: | ---: |
+| `verified` | 0 | 71 | 25 |
+| `observed_clean` | 0 | 27 | 36 |
+| **Total** | **0** | **98** | **61** |
+
+Relative to the repaired full-pool baseline's trusted slice (141 gaps and 18
+mechanical passes), 43 cards moved from `coverage_gap` to
+`execution_passed`. All 133 discovered `choice_branch` obligations were
+exercised as independent edges; the remaining largest explicit gaps are 71
+triggered, 44 static, 22 mode, 16 optional-branch, and 10 layout obligations.
+Every card remains `semantic_status=unverified`: this run is runtime
+reconnaissance, not permission to call the old trusted classes clean.
+
+### Trusted trigger and printed-surface replay — July 18, 2026
+
+The schema-v3 replay re-audited the same 159 prior `verified` and
+`observed_clean` cards with independent printed-trigger discovery, fresh
+fixtures for every recognized compound trigger arm, exact queue/stack identity,
+and matched non-event proofs. The resume-validated report is
+`probe_runs/standard-trusted-trigger-replay-2026-07-18-v1/card_probe_report.json`
+with file SHA-256
+`d46b8427b0af0b0a3be6a919eac4998b014a92977a86f49b61409626de47b1de`.
+
+| Prior ledger status | Failed | Coverage gap | Mechanical pass |
+| --- | ---: | ---: | ---: |
+| `verified` | 0 | 73 | 23 |
+| `observed_clean` | 0 | 39 | 24 |
+| **Total** | **0** | **112** | **47** |
+
+All 71 registered trigger obligations were split into 77 independently replayed
+event arms: 55 arms completed and 22 remain explicit gaps. Matched close
+non-events exercised 55 of 71 triggers with zero false deliveries; all 161
+discovered public choice branches completed. An independent lexical inventory
+found 81 printed trigger clauses, matched 68 to registered runtime abilities,
+and kept 13 unmatched clauses as gaps instead of allowing parser omissions to
+disappear. Printed conditions add 72 obligations, of which 6 are exercised and
+66 remain gaps.
+
+The stricter evidence contract deliberately moved 26 former mechanical passes
+back to gaps (principally unexercised conditional outcomes and unmatched printed
+triggers), while 12 prior gaps became passes after authentic trigger fixtures
+and rules repairs. No card failed, emitted diagnostics, or reported degraded
+support. Every card remains `semantic_status=unverified`; lower pass counts here
+represent more honest discovery, not reduced runtime correctness.
+
+### Full-pool schema-v3 trigger and printed-surface baseline — July 18, 2026
+
+The strengthened probe completed all 4,702 frozen Standard cards and then
+accepted all 4,702 artifacts on an identical `--resume` pass without
+recomputation. Independent audit found no missing or extra artifacts, identity
+or hash mismatches, duplicate obligations, bad report links, schema drift, or
+summary discrepancies. The report is
+`probe_runs/standard-full-schema3-2026-07-18-v1/card_probe_report.json` with
+physical file SHA-256
+`2165f074334614706bac9e941eb90c43a90adac16f438f4ad500131482ff8091`
+and embedded canonical SHA-256
+`e44b4fc2d860fbaa8559a5dc4e295613198531f38b5475a689195c2e6437153e`.
+
+| Prior ledger status | Failed | Coverage gap | Mechanical pass |
+| --- | ---: | ---: | ---: |
+| `verified` | 0 | 73 | 23 |
+| `observed_clean` | 0 | 39 | 24 |
+| `unseen` | 735 | 2,613 | 0 |
+| `partial` | 745 | 0 | 0 |
+| `unparsed` | 450 | 0 | 0 |
+| **Total** | **1,930** | **2,725** | **47** |
+
+Independent printed-text discovery found 3,124 trigger clauses: 2,599 matched a
+runtime trigger and 525 remain unmatched gaps. Of 2,672 positive trigger arms,
+1,462 were exercised, 1,064 remain gaps, and 146 failed. Matched close
+non-events exercised 1,574 of 2,611 triggers, with 848 gaps and 189 failures.
+Public choice discovery exercised 3,287 of 3,480 branches; 1,220 of 1,231
+printed conditional branches, 575 of 586 optional branches, 474 modes, 98 mode
+combinations, and 95 variable choices remain explicit gaps.
+
+This is a deliberately noisy repair baseline. Diagnostics appeared on 1,587
+cards and the support manifest reported 897 cards; their union is 1,596 cards,
+and all are failed. The largest diagnostic families are Phyrexian `{P}` mana
+tokens, Start Your Engines layering, and Station layering. Coverage work is led
+by static/runtime surfaces, conditional fixtures, unsupported trigger fixtures,
+trigger negative fixtures, optional branches, and unmatched printed triggers.
+All 4,702 cards remain `semantic_status=unverified`; the 47 mechanical passes
+are not rules certification.
+
+Repair in evidence order: first regress the Cerebral Download `Surveil x` hard
+crash; then eliminate the 140 close-non-event false trigger deliveries through
+shared source-identity and controller/type scoping. Next repair continuation
+integrity (36 continuation failures, 17 identical-state loops, Jadelight
+Spelunker's zone loss, and five mask-valid execution failures). After those
+high-confidence defects, work down the shared parser families, reconcile the
+525 unmatched printed triggers, add authentic fixtures for the 977 unsupported
+trigger events, and finally expand conditional, optional, modal, variable,
+replacement, static, layout, and alternate-face branch coverage. Re-run the
+complete schema-v3 pool after each coherent repair batch; promote ledger status
+only from independent exact-state scenarios.
+
 ### Non-negotiable lineage rules
 
 - **Start every new policy from the Round 7.89 Observation v3 boundary, using

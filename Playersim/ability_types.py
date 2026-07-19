@@ -6,6 +6,63 @@ from .card import Card
 from .ability_utils import text_to_number, safe_int, resolve_simple_targeting, EffectFactory
 
 
+_MANA_COLOR_WORD_TO_SYMBOL = {
+    "white": "W", "blue": "U", "black": "B", "red": "R",
+    "green": "G", "colorless": "C",
+}
+
+
+def _mana_symbol_antecedent_color(text):
+    """Return the color named by a ``mana symbols in its cost`` phrase."""
+    match = re.search(
+        r"\b(white|blue|black|red|green|colorless)\s+mana\s+symbols?\s+"
+        r"in\s+(?:its|that (?:spell|card)(?:['\u2019]s)?)\s+mana cost\b",
+        str(text or ""), re.IGNORECASE)
+    return match.group(1).casefold() if match else None
+
+
+def _triggering_spell_mana_cost(game_state, context):
+    """Read the triggering spell's frozen face cost, or a safe legacy copy."""
+    context = context or {}
+    prepared_face = context.get("prepared_face")
+    if isinstance(prepared_face, dict) and "mana_cost" in prepared_face:
+        return str(prepared_face.get("mana_cost") or "")
+    if "cast_mana_cost" in context:
+        return str(context.get("cast_mana_cost") or "")
+    cast_card_id = context.get(
+        "cast_card_id", context.get("event_card_id"))
+    card_db = getattr(game_state, "card_db", None)
+    card_is_present = (
+        cast_card_id is not None
+        and (not isinstance(card_db, dict) or cast_card_id in card_db))
+    cast_card = (game_state._safe_get_card(cast_card_id)
+                 if game_state is not None and card_is_present else None)
+    if cast_card is None:
+        event_card = context.get("event_card")
+        if (event_card is not None
+                and getattr(event_card, "card_id", cast_card_id)
+                == cast_card_id):
+            cast_card = event_card
+    if cast_card is None or not hasattr(cast_card, "mana_cost"):
+        return None
+    return str(getattr(cast_card, "mana_cost", "") or "")
+
+
+def _count_colored_mana_symbols(mana_cost, color_word):
+    """Count mana symbols containing one requested W/U/B/R/G/C component."""
+    symbol = _MANA_COLOR_WORD_TO_SYMBOL.get(str(color_word).casefold())
+    if symbol is None or mana_cost is None:
+        return None
+    count = 0
+    for raw_symbol in re.findall(r"\{([^{}]+)\}", str(mana_cost)):
+        components = {
+            component.strip().upper()
+            for component in raw_symbol.split("/")}
+        if symbol in components:
+            count += 1
+    return count
+
+
 def _permanent_matches_criteria(game_state, card_id, criteria,
                                 controller=None, source_id=None):
     """Match common Oracle permanent characteristics, failing closed."""
@@ -19,6 +76,12 @@ def _permanent_matches_criteria(game_state, card_id, criteria,
     supertypes = {str(value).lower() for value in getattr(card, "supertypes", [])}
     controller = controller or game_state.get_card_controller(card_id)
     if "another" in words and card_id == source_id:
+        return False
+    excluded_subtypes = {
+        match.group(1).rstrip("s")
+        for match in re.finditer(r"\bnon[- ]([a-z]+)\b", text)}
+    if excluded_subtypes.intersection(
+            value.rstrip("s") for value in subtypes):
         return False
     if "nonland" in words and "land" in types:
         return False
@@ -55,11 +118,27 @@ def _permanent_matches_criteria(game_state, card_id, criteria,
         for blocker in values}
     if "blocking" in words and card_id not in blockers:
         return False
+    face_down = bool(getattr(card, "face_down", False))
+    if {"face", "down"}.issubset(words) and not face_down:
+        return False
+    if {"face", "up"}.issubset(words) and face_down:
+        return False
 
     name_match = re.search(r"\bnamed\s+(.+?)(?:\s+with\b|$)", text)
     if name_match and str(getattr(card, "name", "")).lower() \
             != name_match.group(1).strip():
         return False
+
+    for left, right in re.findall(
+            r"\b(power|toughness)\s+(?:is\s+)?greater than\s+"
+            r"(?:its\s+)?(power|toughness)\b", text):
+        try:
+            left_value = int(getattr(card, left, 0) or 0)
+            right_value = int(getattr(card, right, 0) or 0)
+        except (TypeError, ValueError):
+            return False
+        if left_value <= right_value:
+            return False
 
     for comparison in re.finditer(
             r"(mana value|power|toughness)\s+(?:is\s+)?(\d+)"
@@ -159,12 +238,14 @@ def _permanent_matches_criteria(game_state, card_id, criteria,
         "tokens", "nontoken", "nonland", "noncreature", "nonartifact",
         "tapped", "untapped", "you", "control", "controls", "with",
         "without", "no", "counter", "counters", "mana", "value", "is",
-        "power", "toughness", "less", "greater", "odd", "even", "named",
+        "power", "toughness", "less", "greater", "than", "odd", "even",
+        "named",
         "white", "blue", "black", "red", "green", "colorless",
         "multicolored", "monocolored", "legendary", "nonlegendary",
         "basic", "nonbasic", "attacking", "blocking", "greatest", "least",
-        "among", "creatures", "one", "more",
-    } | required_types | matched_keywords
+        "among", "creatures", "one", "more", "non", "face", "down",
+        "up", "on",
+    } | required_types | matched_keywords | excluded_subtypes
     if name_match:
         grammar.update(re.findall(r"[a-z]+", name_match.group(1)))
     if counter_match:
@@ -183,6 +264,629 @@ def _permanent_matches_criteria(game_state, card_id, criteria,
         word.rstrip("s") for word in words
         if word.rstrip("s") in subtypes}
     return not subtype_terms or subtype_terms.issubset(subtypes)
+
+
+def _source_reference_names(card):
+    """Return the printed names that may refer to one source object."""
+    raw_name = str(getattr(card, "name", "") or "").strip().casefold()
+    if not raw_name:
+        return ()
+    names = {raw_name}
+    for face_name in re.split(r"\s*//\s*", raw_name):
+        face_name = face_name.strip()
+        if not face_name:
+            continue
+        names.add(face_name)
+        names.add(face_name.split(",", 1)[0].strip())
+        # A small set of printed names with descriptive tails use only the
+        # leading proper name in their own rules text (for example Ka-Zar of
+        # the Savage Land).  Keep the full name too; the shorter alias is used
+        # only by anchored trigger-subject matching.
+        if " of " in face_name:
+            names.add(face_name.split(" of ", 1)[0].strip())
+    names.discard("")
+    return tuple(sorted(names, key=lambda value: (-len(value), value)))
+
+
+def _entry_origin_matches(clause, context):
+    """Validate an explicit ``enters from`` zone against event provenance."""
+    origin = re.search(
+        r"\benter(?:s)?\s+from\s+(?:a|the|your)?\s*"
+        r"(?P<zone>graveyard|exile)\b", clause, re.IGNORECASE)
+    if origin is None:
+        return True
+    actual = str((context or {}).get("from_zone", "") or "").casefold()
+    return actual == origin.group("zone").casefold()
+
+
+def _chosen_type_matches_entry(game_state, controller, source_id, event_id):
+    if game_state is None or controller is None or event_id is None:
+        return False
+    chosen = None
+    for store_name in (
+            "chosen_creature_types", "chosen_card_types",
+            "chosen_basic_land_types"):
+        chosen = (controller.get(store_name, {}) or {}).get(source_id)
+        if chosen:
+            break
+    if not chosen:
+        return False
+    card = game_state._safe_get_card(event_id)
+    if card is None:
+        return False
+    vocabulary = set()
+    for group in ("card_types", "subtypes", "supertypes"):
+        vocabulary.update(
+            str(value).casefold()
+            for value in getattr(card, group, []) or [])
+    return str(chosen).casefold() in vocabulary
+
+
+def _source_while_entry_gate(clause, source_card):
+    """Evaluate supported source-state ``enters while`` clauses fail-closed."""
+    if " while " not in str(clause or "").casefold():
+        return True
+    counter = re.search(
+        r"\bwhile\s+(?:this\s+\w+|[\w' -]+)\s+has\s+"
+        r"(?:a|an|one or more)\s+([+\-/\w]+)\s+counters?\b",
+        clause, re.IGNORECASE)
+    if counter is None or source_card is None:
+        return False
+    counters = getattr(source_card, "counters", {}) or {}
+    return int(counters.get(counter.group(1).casefold(), 0) or 0) > 0
+
+
+def _entry_clause_matches(
+        clause, context, source_card_id, event_card_id, source_card):
+    """Match one independent ETB trigger clause without cross-clause capture."""
+    context = context or {}
+    game_state = context.get("game_state")
+    controller = context.get("controller")
+    event_controller = context.get("event_controller", controller)
+    if game_state is None or event_card_id is None:
+        return False
+    if not _entry_origin_matches(clause, context):
+        return False
+    if not _source_while_entry_gate(clause, source_card):
+        return False
+
+    source_names = _source_reference_names(source_card)
+    self_entry = bool(re.search(
+        r"^\s*when(?:ever)?\s+this\b.*?\benter(?:s)?\b",
+        clause, re.IGNORECASE))
+    self_entry = self_entry or any(re.search(
+        rf"^\s*when(?:ever)?\s+{re.escape(name)}\b.*?"
+        r"\benter(?:s)?\b", clause, re.IGNORECASE)
+        for name in source_names)
+    if self_entry and source_card_id == event_card_id:
+        return True
+
+    controlled_pattern = re.compile(
+        r"\b(?P<article>a|an|another|one or more)\s+"
+        r"(?P<criteria>.+?)\s+you control(?P<post>.*?)"
+        r"\s+enter(?:s)?\b", re.IGNORECASE)
+    for match in controlled_pattern.finditer(clause):
+        if event_controller is not controller:
+            continue
+        criteria = "{} {}".format(
+            match.group("article"), match.group("criteria")).strip()
+        post = (match.group("post") or "").strip()
+        if "of the chosen type" in post.casefold():
+            if not _chosen_type_matches_entry(
+                    game_state, controller, source_card_id, event_card_id):
+                continue
+            post = re.sub(
+                r"\bof the chosen type\b", "", post,
+                flags=re.IGNORECASE).strip()
+        if post:
+            if not re.match(r"^(?:with|without)\b", post, re.IGNORECASE):
+                continue
+            criteria = f"{criteria} {post}"
+        if _permanent_matches_any_criteria(
+                game_state, event_card_id, criteria,
+                controller=controller, source_id=source_card_id):
+            return True
+
+    opponent_pattern = re.compile(
+        r"\b(?P<article>a|an|another|one or more)\s+"
+        r"(?P<criteria>.+?)\s+"
+        r"(?:an opponent controls|your opponents? control)"
+        r"(?P<post>.*?)\s+enter(?:s)?\b", re.IGNORECASE)
+    for match in opponent_pattern.finditer(clause):
+        if event_controller is None or event_controller is controller:
+            continue
+        post = (match.group("post") or "").strip()
+        if post and not re.match(
+                r"^(?:with|without)\b", post, re.IGNORECASE):
+            continue
+        criteria = "{} {} {}".format(
+            match.group("article"), match.group("criteria"), post).strip()
+        if _permanent_matches_any_criteria(
+                game_state, event_card_id, criteria,
+                controller=event_controller, source_id=source_card_id):
+            return True
+
+    subject = re.search(
+        r"^\s*when(?:ever)?\s+(?P<criteria>.+?)\s+enter(?:s)?\b",
+        clause, re.IGNORECASE)
+    if subject is None:
+        return False
+    criteria = subject.group("criteria").strip()
+    lowered = criteria.casefold()
+    if ("you control" in lowered or "opponent" in lowered
+            or re.search(r"\bthis\b", lowered)
+            or any(re.match(rf"^{re.escape(name)}\b", lowered)
+                   for name in source_names)):
+        return False
+    return _permanent_matches_any_criteria(
+        game_state, event_card_id, criteria,
+        controller=event_controller, source_id=source_card_id)
+
+
+def _is_grouped_zone_change_trigger(trigger_condition, event_type):
+    """Return whether Oracle describes one grouped ETB/death event.
+
+    The leading-subject requirement is deliberate.  It distinguishes
+    ``one or more creatures die`` from a singular subject qualified by
+    ``with one or more counters on it``.
+    """
+    if event_type == "ENTERS_BATTLEFIELD":
+        event_pattern = r"enter(?:s)?(?: the battlefield)?|comes? into play"
+    elif event_type == "DIES":
+        event_pattern = (
+            r"d(?:ie|ies)|(?:is|are) put into (?:a|the) graveyard "
+            r"from the battlefield")
+    else:
+        return False
+    return bool(re.search(
+        r"\bwhen(?:ever)?\s+"
+        r"(?:[^,;\n]+?\s+(?:and/or|or)\s+)?"
+        r"one or more\s+.+?\s+(?:" + event_pattern + r")\b",
+        str(trigger_condition or ""), re.IGNORECASE))
+
+
+def _accept_complete_grouped_zone_change_batch(context, event_type):
+    """Accept only an explicit, complete, ability-filtered batch contract.
+
+    No production zone mover currently supplies this contract.  Keeping the
+    opt-in shape strict prevents source/cause or queue-order heuristics from
+    being mistaken for simultaneity.  A future atomic dispatcher must provide
+    the already-matching events and dispatch the group ability only for their
+    canonical first member.
+    """
+    if not isinstance(context, dict):
+        return False
+    batch = context.get("zone_change_batch")
+    if (not isinstance(batch, dict)
+            or batch.get("complete") is not True
+            or batch.get("id") is None
+            or batch.get("event_type") != event_type):
+        return False
+    matching_events = batch.get("matching_events")
+    if not isinstance(matching_events, (list, tuple)) or not matching_events:
+        return False
+    if any(not isinstance(event, dict) for event in matching_events):
+        return False
+    matching_ids = [event.get("event_card_id") for event in matching_events]
+    if (any(event_id is None for event_id in matching_ids)
+            or len(set(matching_ids)) != len(matching_ids)):
+        return False
+    if (event_type == "DIES"
+            and any(not isinstance(event.get("last_known"), dict)
+                    for event in matching_events)):
+        return False
+    primary_id = batch.get("primary_event_card_id")
+    if (primary_id != matching_ids[0]
+            or context.get("event_card_id") != primary_id):
+        return False
+
+    # Preserve the complete group for effects that refer to "them" or
+    # "those creatures".  AbilityHandler shallow-copies this context when it
+    # queues the trigger, so immutable tuple membership remains intact.
+    context["zone_change_batch_id"] = batch["id"]
+    context["matching_zone_change_events"] = tuple(matching_events)
+    context["matching_event_card_ids"] = tuple(matching_ids)
+    context["zone_change_event_count"] = len(matching_ids)
+    if event_type == "DIES":
+        context["matching_last_known"] = tuple(
+            event["last_known"] for event in matching_events)
+    return True
+
+
+def _permanent_matches_any_criteria(game_state, card_id, criteria,
+                                    controller=None, source_id=None):
+    """Match disjunctive Oracle subjects, including subtype/type arms."""
+    text = re.sub(
+        r"\s+and/or\s+", " or ",
+        str(criteria or "permanent").casefold()).strip()
+    # Oracle subtype lists use both bare commas and an Oxford comma before
+    # "or".  Treat every list arm as a disjunction while retaining shared
+    # modifiers such as "another" for each arm.
+    # A comma between characteristic modifiers is conjunctive, not a list
+    # separator ("a nontoken, non-Angel creature"). Preserve those while
+    # normalizing ordinary Oracle subtype/type lists.
+    text = re.sub(
+        r"\s*,(?!(?:\s)*(?:non(?:[- ]|token\b|land\b|creature\b|"
+        r"artifact\b|legendary\b|basic\b)|with\b|without\b))"
+        r"\s*(?:or\s+)?",
+        " or ", text)
+    alternatives = [
+        value.strip() for value in re.split(
+            r"\s+or\s+(?!(?:less|greater|more|fewer|equal)\b)", text)
+        if value.strip()]
+    if len(alternatives) <= 1:
+        return _permanent_matches_criteria(
+            game_state, card_id, text, controller=controller,
+            source_id=source_id)
+    words = set(re.findall(r"[a-z]+", text))
+    shared = [
+        word for word in (
+            "another", "nontoken", "nonland", "noncreature",
+            "nonartifact", "legendary", "nonlegendary", "tapped",
+            "untapped")
+        if word in words]
+    return any(_permanent_matches_criteria(
+        game_state, card_id,
+        " ".join(shared + [alternative]),
+        controller=controller, source_id=source_id)
+        for alternative in alternatives)
+
+
+def _oracle_count(value, default=1):
+    """Return a small printed number without treating unknown words as one."""
+    converted = text_to_number(str(value or "").casefold())
+    if isinstance(converted, int):
+        return converted
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _declared_attack_group(game_state, attacker_id, event_controller):
+    """Return this event controller's attackers in declaration order."""
+    declared = list(getattr(game_state, "current_attackers", []) or [])
+    group = [
+        card_id for card_id in declared
+        if game_state.get_card_controller(card_id) is event_controller]
+    if (attacker_id is not None and attacker_id not in group
+            and game_state.get_card_controller(attacker_id) is event_controller):
+        group.append(attacker_id)
+    return group
+
+
+def _attack_target_details(game_state, attacker_id, context=None):
+    """Return (kind, target, controller) for one declared attacker."""
+    planeswalker_targets = getattr(
+        game_state, "planeswalker_attack_targets", {}) or {}
+    if attacker_id in planeswalker_targets:
+        target_id = planeswalker_targets[attacker_id]
+        return (
+            "planeswalker", target_id,
+            game_state.get_card_controller(target_id))
+    battle_targets = getattr(
+        game_state, "battle_attack_targets", {}) or {}
+    if attacker_id in battle_targets:
+        target_id = battle_targets[attacker_id]
+        return ("battle", target_id, game_state.get_card_controller(target_id))
+    defending_player = (context or {}).get("defending_player")
+    if defending_player is None:
+        attacker_controller = game_state.get_card_controller(attacker_id)
+        if attacker_controller is game_state.p1:
+            defending_player = game_state.p2
+        elif attacker_controller is game_state.p2:
+            defending_player = game_state.p1
+    return ("player", defending_player, defending_player)
+
+
+def _attacks_player_or_their_planeswalker(
+        game_state, attacker_id, player, context=None):
+    """Whether one attacker is aimed at a player or their planeswalker."""
+    kind, _, target_controller = _attack_target_details(
+        game_state, attacker_id, context)
+    return kind in {"player", "planeswalker"} and target_controller is player
+
+
+def _attack_target_qualifier_matches(
+        game_state, attacker_id, controller, condition, context=None):
+    """Match the defender named in a printed attack event, if any."""
+    text = str(condition or "").casefold()
+    qualifier = re.search(
+        r"\battacks?\s+(?P<target>"
+        r"you or a planeswalker you control|"
+        r"the player with the most life or tied for most life|"
+        r"a player|an opponent|a planeswalker|a battle|you)\b",
+        text, re.IGNORECASE)
+    if not qualifier:
+        return True
+    kind, target, target_controller = _attack_target_details(
+        game_state, attacker_id, context)
+    target_text = qualifier.group("target").casefold()
+    if target_text == "you or a planeswalker you control":
+        return (kind in {"player", "planeswalker"}
+                and target_controller is controller)
+    if target_text == "you":
+        return kind == "player" and target is controller
+    if target_text == "a player":
+        return kind == "player"
+    if target_text == "an opponent":
+        return kind == "player" and target is not controller
+    if target_text == "a planeswalker":
+        return kind == "planeswalker"
+    if target_text == "a battle":
+        return kind == "battle"
+    if target_text.startswith("the player with the most life"):
+        if kind != "player" or target is None:
+            return False
+        return all(
+            int(target.get("life", 0) or 0)
+            >= int(player.get("life", 0) or 0)
+            for player in (game_state.p1, game_state.p2)
+            if player is not target)
+    return False
+
+
+def _attack_while_condition_met(
+        game_state, controller, source_id, condition):
+    """Evaluate live-state clauses embedded in an attack event definition."""
+    text = str(condition or "").casefold().replace("’", "'").strip(" .,;")
+    if not game_state or not controller or not text:
+        return False
+    if text == "saddled":
+        return source_id in controller.get("saddled_permanents", set())
+
+    no_control = re.fullmatch(
+        r"you (?:do not|don't) control another (.+)", text)
+    if no_control:
+        criteria = "another " + no_control.group(1).strip()
+        return not any(
+            _permanent_matches_any_criteria(
+                game_state, card_id, criteria, controller=controller,
+                source_id=source_id)
+            for card_id in controller.get("battlefield", []))
+
+    control = re.fullmatch(
+        r"you control (?:(\w+|\d+) or more )?(.+)", text)
+    if control:
+        needed = _oracle_count(control.group(1), default=1)
+        criteria = control.group(2).strip()
+        return sum(
+            1 for card_id in controller.get("battlefield", [])
+            if _permanent_matches_any_criteria(
+                game_state, card_id, criteria, controller=controller,
+                source_id=source_id)) >= needed
+
+    delirium = re.fullmatch(
+        r"there are (\w+|\d+) or more card types among cards in your "
+        r"graveyard", text)
+    if delirium:
+        needed = _oracle_count(delirium.group(1), default=4)
+        card_types = set()
+        for card_id in controller.get("graveyard", []):
+            card = game_state._safe_get_card(card_id)
+            card_types.update(
+                str(value).casefold()
+                for value in getattr(card, "card_types", []) if card)
+        card_types.difference_update({"token", "unknown"})
+        return len(card_types) >= needed
+
+    if text == "you have the most life or are tied for most life":
+        opponents = [
+            player for player in (game_state.p1, game_state.p2)
+            if player is not controller]
+        return all(
+            int(controller.get("life", 0) or 0)
+            >= int(player.get("life", 0) or 0)
+            for player in opponents)
+
+    # An unfamiliar printed state must suppress the trigger. Treating it as
+    # true recreates the false-positive class this gate exists to prevent.
+    return False
+
+
+def _last_known_matches_criteria(last_known, criteria, *,
+                                 source_id=None, event_id=None):
+    """Match a death watcher's subject against battlefield last-known data."""
+    raw_text = str(criteria or "permanent").casefold()
+    text = raw_text.replace("-", " ")
+    words = set(re.findall(r"[a-z]+", text))
+    card_types = {
+        str(value).casefold().rstrip("s")
+        for value in last_known.get("card_types", [])}
+    subtypes = {
+        str(value).casefold().rstrip("s")
+        for value in last_known.get("subtypes", [])}
+    supertypes = {
+        str(value).casefold().rstrip("s")
+        for value in last_known.get("supertypes", [])}
+    excluded_subtypes = {
+        match.group(1).rstrip("s")
+        for match in re.finditer(r"\bnon[- ]+([a-z]+)\b", raw_text)}
+    excluded_subtypes.difference_update({
+        "artifact", "basic", "creature", "land", "legendary", "token"})
+    if "another" in words and source_id == event_id:
+        return False
+    if excluded_subtypes.intersection(subtypes):
+        return False
+    if "nonland" in words and "land" in card_types:
+        return False
+    if "noncreature" in words and "creature" in card_types:
+        return False
+    if "nonartifact" in words and "artifact" in card_types:
+        return False
+    if "nontoken" in words and last_known.get("was_token", False):
+        return False
+    if ("token" in words and "nontoken" not in words
+            and not last_known.get("was_token", False)):
+        return False
+    if ("legendary" in words and "nonlegendary" not in words
+            and "legendary" not in supertypes):
+        return False
+    if "nonlegendary" in words and "legendary" in supertypes:
+        return False
+    if "attacking" in words and not last_known.get("was_attacking", False):
+        return False
+    if ({"face", "down"}.issubset(words)
+            and not last_known.get("was_face_down", False)):
+        return False
+
+    counters = last_known.get("counters", {}) or {}
+    positive_counters = {
+        str(kind).casefold(): int(amount or 0)
+        for kind, amount in counters.items() if int(amount or 0) > 0}
+    if "with no counters" in text and positive_counters:
+        return False
+    if "with a counter" in text and not positive_counters:
+        return False
+    if (re.search(
+            r"\bwith (?:one or more )?counters?(?: on it)?\b", text)
+            and not positive_counters):
+        return False
+    counter_match = re.search(
+        r"(?:with|and) (?:an?|one or more) ([+\-/\w]+) counters?", text)
+    if (counter_match
+            and positive_counters.get(counter_match.group(1), 0) <= 0):
+        return False
+    without_counter = re.search(
+        r"without (?:an? )?([+\-/\w]+) counters?", text)
+    if (without_counter
+            and positive_counters.get(without_counter.group(1), 0) > 0):
+        return False
+
+    active_keywords = {
+        str(value).casefold()
+        for value in last_known.get("keywords", []) or []}
+    matched_keywords = set()
+    for keyword in sorted(Card.ALL_KEYWORDS, key=len, reverse=True):
+        if re.search(
+                rf"\bwith\s+(?:[^,;]+\s+and\s+)?"
+                rf"{re.escape(keyword)}\b", text):
+            if keyword.casefold() not in active_keywords:
+                return False
+            matched_keywords.update(re.findall(r"[a-z]+", keyword))
+        if re.search(rf"\bwithout\s+{re.escape(keyword)}\b", text):
+            if keyword.casefold() in active_keywords:
+                return False
+            matched_keywords.update(re.findall(r"[a-z]+", keyword))
+
+    dual_comparison_spans = []
+    for comparison in re.finditer(
+            r"power\s+or\s+toughness\s+(?:is\s+)?(\d+)"
+            r"(?:\s+or\s+(less|greater))?", text):
+        raw_value, direction = comparison.groups()
+        bound = int(raw_value)
+        values = (
+            int(last_known.get("power", 0) or 0),
+            int(last_known.get("toughness", 0) or 0),
+        )
+        matches = lambda actual: (
+            actual <= bound if direction == "less" else
+            actual >= bound if direction == "greater" else
+            actual == bound)
+        if not any(matches(value) for value in values):
+            return False
+        dual_comparison_spans.append(comparison.span())
+    for comparison in re.finditer(
+            r"(mana value|power|toughness)\s+(?:is\s+)?(\d+)"
+            r"(?:\s+or\s+(less|greater))?", text):
+        if any(start <= comparison.start() < end
+               for start, end in dual_comparison_spans):
+            continue
+        field, raw_value, direction = comparison.groups()
+        actual = last_known.get(
+            "mana_value" if field == "mana value" else field, 0)
+        actual, bound = int(actual or 0), int(raw_value)
+        if ((direction == "less" and actual > bound)
+                or (direction == "greater" and actual < bound)
+                or (direction is None and actual != bound)):
+            return False
+
+    required_types = {
+        word.rstrip("s") for word in words
+        if word.rstrip("s") in set(Card.ALL_CARD_TYPES)}
+    if required_types:
+        type_names = "|".join(re.escape(value) for value in required_types)
+        type_disjunction = bool(re.search(
+            rf"\b(?:{type_names})s?\s+or\s+(?:{type_names})s?\b",
+            text))
+        if ((type_disjunction and not required_types.intersection(card_types))
+                or (not type_disjunction
+                    and not required_types.issubset(card_types))):
+            return False
+
+    grammar = {
+        "a", "an", "another", "one", "or", "more", "other",
+        "this", "the", "you", "control", "controls", "dies",
+        "token", "nontoken", "nonland", "noncreature", "nonartifact",
+        "legendary", "nonlegendary", "attacking", "face", "down",
+        "non", "with", "without", "no", "counter", "counters", "on",
+        "it",
+        "mana", "value", "power", "toughness", "is", "less", "greater",
+    } | required_types | excluded_subtypes | matched_keywords
+    if counter_match:
+        grammar.update(re.findall(r"[a-z]+", counter_match.group(1)))
+    if without_counter:
+        grammar.update(re.findall(r"[a-z]+", without_counter.group(1)))
+    qualifier_terms = {
+        word.rstrip("s") for word in words
+        if not word.isdigit() and word not in grammar
+        and word.rstrip("s") not in grammar}
+    return qualifier_terms.issubset(subtypes | supertypes)
+
+
+def _last_known_matches_any_criteria(last_known, criteria, *,
+                                     source_id=None, event_id=None):
+    """Match disjunctive death subjects against one LKI snapshot."""
+    text = re.sub(
+        r"\s+and/or\s+", " or ",
+        str(criteria or "permanent").casefold()).strip()
+    text = re.sub(
+        r"\s*,(?!(?:\s)*(?:non(?:[- ]|token\b|land\b|creature\b|"
+        r"artifact\b|legendary\b|basic\b)|with\b|without\b))"
+        r"\s*(?:or\s+)?",
+        " or ", text)
+    alternatives = [
+        value.strip() for value in re.split(
+            r"\s+or\s+(?!(?:less|greater|more|fewer|equal|toughness)\b)",
+            text)
+        if value.strip()]
+    if len(alternatives) <= 1:
+        return _last_known_matches_criteria(
+            last_known, text, source_id=source_id, event_id=event_id)
+    words = set(re.findall(r"[a-z]+", text))
+    shared = [
+        word for word in (
+            "another", "nontoken", "nonland", "noncreature",
+            "nonartifact", "legendary", "nonlegendary", "attacking")
+        if word in words]
+    return any(_last_known_matches_criteria(
+        last_known, " ".join(shared + [alternative]),
+        source_id=source_id, event_id=event_id)
+        for alternative in alternatives)
+
+
+def _source_last_known_while_gate(condition, last_known):
+    """Evaluate supported self-zone-change ``while`` gates fail-closed."""
+    text = str(condition or "").casefold()
+    if not re.search(r"\bwhile\b", text):
+        return True
+    comparison = re.search(
+        r"\bwhile\s+its\s+(power|toughness)\s+is\s+(\d+)"
+        r"(?:\s+or\s+(greater|less))?\b",
+        text)
+    if comparison is None:
+        return False
+    characteristic, raw_bound, direction = comparison.groups()
+    try:
+        actual = int((last_known or {}).get(characteristic, 0) or 0)
+        bound = int(raw_bound)
+    except (TypeError, ValueError):
+        return False
+    if direction == "greater":
+        return actual >= bound
+    if direction == "less":
+        return actual <= bound
+    return actual == bound
 
 
 class Ability:
@@ -1364,18 +2068,93 @@ class TriggeredAbility(Ability):
 
     def _parse_condition_effect(self, text):
         """Attempt to parse 'When/Whenever/At..., Effect.' or 'When/Whenever/At... — Effect' format. Handles em dash."""
-        # Regex includes comma, colon, en dash, em dash, unicode em dash as separators
-        # BUGFIX (July 2026): the separator between trigger and effect was fully
-        # optional, so the non-greedy trigger group matched a single character
-        # ("when t...") and every text-parsed trigger condition was mangled --
-        # can_trigger's patterns never matched and text-parsed triggers never
-        # fired. The separator (comma / colon / dash) is now mandatory.
-        match = re.match(
-            r'^\s*((?:when|whenever|at)\b[^,:\u2013\u2014]*?)\s*[,:\u2013\u2014]\s*(.+?)\s*$',
-            text.strip(), re.IGNORECASE | re.DOTALL)
-        if match:
-            trigger_part = match.group(1).strip()
-            effect_part = match.group(2).strip()
+        # A comma can be part of the trigger subject itself (Oracle subtype
+        # lists and legendary card names). Choose the first delimiter whose
+        # left side already describes an event instead of blindly choosing
+        # the first comma.
+        stripped = text.strip()
+        starts_as_trigger = re.match(
+            r'^\s*(?:when|whenever|at)\b', stripped, re.IGNORECASE)
+        event_marker = re.compile(
+            r'(?:\bat\s+(?:the\s+)?(?:beginning|end)\b|'
+            r'\b(?:enters?|attacks?|attacked|blocks?|dies?|casts?|plays?|'
+            r'discards?|draws?|gains?|loses?|deals?|becomes?|leaves?|'
+            r'taps?|untaps?|sacrifices?|exiles?|mills?|targets?|'
+            r'countered|transforms?|unlocks?|surveils?|investigates?|'
+            r'commits?|activates?|pays?|expends?|cycles?|explores?|'
+            r'saddles?|crews?|forages?|discovers?|searches?|puts?)\b|'
+            r'\b(?:water|earth|fire|air)bends?\b|'
+            r'\bcollects? evidence\b|\bgives? a gift\b|'
+            r'\bmanifests? dread\b|\bthere are\b|'
+            r'\bis\s+(?:dealt|put|discarded|countered|tapped|untapped|'
+            r'turned|returned|exiled|caused)\b|'
+            r'\bare\s+(?:dealt|put|discarded|countered|tapped|untapped|'
+            r'turned|returned|exiled|attacked|caused)\b|'
+            r"\byou(?:'re| are) dealt\b)",
+            re.IGNORECASE)
+        effect_starter = re.compile(
+            r'^\s*(?:if\b|when(?:ever)?\b|at\b|until\b|for each\b|'
+            r'for as long\b|where\b|up to\b|any (?:number|opponent)\b|'
+            r'an(?:other)?\b|you\b|each\b|target\b|that\b|this\b|'
+            r'it\b|its\b|they\b|those\b|creatures?\b|'
+            r'the (?:controller|owner|player|exiled)\b|'
+            r'(?:add|amass|attach|blight|bolster|choose|connive|copy|create|'
+            r'counter|destroy|discard|discover|draw|earthbend|exile|'
+            r'explore|fight|gain|investigate|learn|look|manifest|mill|'
+            r'pay|populate|proliferate|put|remove|return|reveal|'
+            r'sacrifice|scry|search|suspect|surveil|tap|transform|'
+            r'untap|venture)\b)',
+            re.IGNORECASE)
+        proper_name_effect = re.compile(
+            r"^\s*[A-Z][^,]{0,80}\b(?:gets?|gains?|loses?|deals?|"
+            r"becomes?|has|is)\b")
+        delimiters = []
+        for delimiter in re.finditer(r'[,\u2013\u2014:]', stripped):
+            # A comma between digits is a thousands separator, not grammar.
+            if (delimiter.group() == "," and delimiter.start() > 0
+                    and delimiter.end() < len(stripped)
+                    and stripped[delimiter.start() - 1].isdigit()
+                    and stripped[delimiter.end()].isdigit()):
+                continue
+            delimiters.append(delimiter)
+        chosen = None
+        def starts_effect(delimiter):
+            right = stripped[delimiter.end():]
+            # A bend-family list is still part of the trigger subject even
+            # though an individual mechanic name can also open an effect.
+            bend_list = re.match(
+                r'^\s*(?:or\s+)?(?:water|earth|fire|air)bend\b',
+                right, re.IGNORECASE)
+            trigger_is_bend_list = re.match(
+                r'^\s*whenever\s+you\s+(?:water|earth|fire|air)bend\b',
+                stripped, re.IGNORECASE)
+            if bend_list and trigger_is_bend_list:
+                return False
+            return bool(
+                effect_starter.match(right)
+                or proper_name_effect.match(right))
+
+        if starts_as_trigger:
+            event_delimiters = [
+                delimiter for delimiter in delimiters
+                if event_marker.search(stripped[:delimiter.start()])]
+            # Prefer the earliest clear instruction opening. This must precede
+            # the event-vocabulary fallback: with a novel event word, a verb
+            # in the instruction can otherwise make only a later comma look
+            # event-complete and spill effect text into the trigger.
+            chosen = next((
+                delimiter for delimiter in delimiters
+                if starts_effect(delimiter)), None)
+        if (chosen is None and starts_as_trigger
+                and event_delimiters):
+            chosen = event_delimiters[0]
+        if chosen is None and starts_as_trigger and delimiters:
+            # Preserve the previous fail-closed parsing surface for unusual
+            # event vocabulary while still requiring a real delimiter.
+            chosen = delimiters[0]
+        if chosen is not None:
+            trigger_part = stripped[:chosen.start()].strip()
+            effect_part = stripped[chosen.end():].strip()
             # Remove trailing period if present
             if effect_part.endswith('.'): effect_part = effect_part[:-1]
             # Simple validation: effect shouldn't contain trigger keywords unless nested
@@ -1390,15 +2169,23 @@ class TriggeredAbility(Ability):
         
     def can_trigger(self, event_type, context=None):
         """Check if the ability should trigger based on an event and additional conditions with improved pattern matching."""
+        if (_is_grouped_zone_change_trigger(
+                self.trigger_condition, event_type)
+                and not _accept_complete_grouped_zone_change_batch(
+                    context, event_type)):
+            # ``move_card`` currently broadcasts ETB/death once per object.
+            # Without a complete atomic batch, accepting any one broadcast
+            # can over-trigger or lose the other objects needed by "them".
+            return False
         # Define trigger condition patterns with more flexibility
         trigger_conditions = {
             "ENTERS_BATTLEFIELD": [
                 r"when(ever)?\s+.*enters the battlefield",
-                r"when(ever)?\s+.*enters",
+                r"when(ever)?\s+.*enter(?:s)?",
                 r"when(ever)?\s+.*comes into play"
             ],
             "ATTACKS": [
-                r"when(ever)?\s+.*attacks",
+                r"when(ever)?\s+.*attacks?",
                 r"when(ever)?\s+.*declares? attack",
                 r"when(ever)?\s+.*becomes? attacking"
             ],
@@ -1417,9 +2204,13 @@ class TriggeredAbility(Ability):
                 r"when(ever)?\s+damage is dealt"
             ],
             "DIES": [
-                r"when(ever)?\s+.*dies",
+                r"when(ever)?\s+.*d(?:ie|ies)",
                 r"when(ever)?\s+.*is put into a graveyard from the battlefield",
                 r"when(ever)?\s+.*goes to the graveyard"
+            ],
+            "ENTER_EXILE": [
+                r"when(ever)?\s+.*(?:is|are) put into exile",
+                r"when(ever)?\s+.*(?:is|are) exiled",
             ],
             "CASTS": [
                 r"when(ever)?\s+.*cast",
@@ -1491,6 +2282,10 @@ class TriggeredAbility(Ability):
                 r"when(ever)?\s+.*becomes? untapped",
                 r"when(ever)?\s+.*untaps?"
             ],
+            "TAPPED": [
+                r"when(ever)?\s+.*becomes? tapped",
+                r"when(ever)?\s+.*\bis tapped\b",
+            ],
             "BECOMES_TARGET": [
                 r"when(ever)?\s+.*becomes?\s+(?:a|the)\s+target",
                 r"when(ever)?\s+.*is\s+targeted"
@@ -1510,9 +2305,35 @@ class TriggeredAbility(Ability):
                 if re.search(pattern, text, re.IGNORECASE):
                     return True
             return False
+
+        # Some printed abilities share one effect between independent trigger
+        # events ("Whenever A and whenever B, ..."). Match each trigger arm
+        # independently so a specialized event cannot leak into its broader
+        # event family. In particular, "fully unlock a Room" is dispatched as
+        # ROOM_FULLY_UNLOCKED after the same action dispatches DOOR_UNLOCKED;
+        # accepting that arm for both events queues the same ability twice.
+        trigger_clauses = re.split(
+            r"\s+and\s+(?=(?:when|whenever)\b|"
+            r"at\s+(?:the\s+)?(?:beginning|end)\b)",
+            self.trigger_condition,
+            flags=re.IGNORECASE,
+        )
         
         # Get condition patterns for this event
         event_patterns = trigger_conditions.get(event_type, [])
+        matching_trigger_clauses = [
+            clause for clause in trigger_clauses
+            if matches_any_pattern(clause, event_patterns)
+        ]
+        if event_type == "DOOR_UNLOCKED":
+            matching_trigger_clauses = [
+                clause for clause in matching_trigger_clauses
+                if not re.search(
+                    r"\bfully\s+unlock(?:s|ed|ing)?\b.*\broom\b",
+                    clause,
+                    re.IGNORECASE,
+                )
+            ]
 
         # "a source deals damage to this creature" is a DAMAGED-class trigger
         # on the damaged object, not a source-side DEALS_DAMAGE trigger, even
@@ -1523,11 +2344,24 @@ class TriggeredAbility(Ability):
             return False
 
         # Check if our trigger condition matches any of the patterns
-        if matches_any_pattern(self.trigger_condition, event_patterns):
+        if matching_trigger_clauses:
             if (event_type == "SAGA_CHAPTER"
                     and int((context or {}).get("chapter", 0) or 0)
                     != int(getattr(self, "saga_chapter", 0) or 0)):
                 return False
+            if event_type in ("DOOR_UNLOCKED", "ROOM_FULLY_UNLOCKED"):
+                context = context or {}
+                # Second-person Room triggers belong only to events performed
+                # by the ability controller. check_abilities preserves the
+                # actor as event_controller before installing the source's
+                # controller in the per-ability context.
+                if (any(re.search(r"\byou\b.*\bunlock", clause,
+                                  re.IGNORECASE)
+                        for clause in matching_trigger_clauses)
+                        and context.get(
+                            "event_controller", context.get("controller"))
+                        is not context.get("controller")):
+                    return False
             if event_type == "DEALS_DAMAGE":
                 context = context or {}
                 source_card_id = context.get("source_card_id", self.card_id)
@@ -1594,93 +2428,243 @@ class TriggeredAbility(Ability):
                     return False
             if event_type == "DIES":
                 context = context or {}
-                controlled_creature = re.search(
-                    r"\b(a|another)\s+(?:(nonland|nontoken)\s+)?"
-                    r"creature you control dies\b",
+                source_card_id = context.get(
+                    "source_card_id", getattr(self, "card_id", None))
+                event_card_id = context.get("event_card_id")
+                source_card = context.get("source_card")
+                source_names = _source_reference_names(source_card)
+                controlled_death = re.search(
+                    r"\b(?P<article>a|an|another|one or more)\s+"
+                    r"(?P<criteria>.+?)\s+you control"
+                    r"(?P<qualifiers>(?:\s+(?:with|without)\s+.+?)?)"
+                    r"\s+d(?:ie|ies)\b",
                     self.trigger_condition, re.IGNORECASE)
-                if controlled_creature:
+                opponent_death = re.search(
+                    r"\b(?P<article>a|an|another|one or more)\s+"
+                    r"(?P<criteria>.+?)\s+"
+                    r"(?:an opponent controls|your opponents? control)"
+                    r"(?P<qualifiers>(?:\s+(?:with|without)\s+.+?)?)"
+                    r"\s+d(?:ie|ies)\b",
+                    self.trigger_condition, re.IGNORECASE)
+                attachment_death = re.search(
+                    r"^\s*when(?:ever)?\s+(?P<kind>equipped|enchanted)\s+"
+                    r"creature\s+d(?:ie|ies)\b",
+                    self.trigger_condition, re.IGNORECASE)
+                self_death = bool(re.search(
+                    r"^\s*when(?:ever)?\s+this\b"
+                    r".*(?:\bdies\b|\bis put into (?:a|the) graveyard from "
+                    r"the battlefield\b)",
+                    self.trigger_condition, re.IGNORECASE))
+                named_death = any(re.search(
+                    rf"^\s*when(?:ever)?\s+{re.escape(name)}\b"
+                    r"(?:\s+or\b.*?)?\s+"
+                    r"(?:dies\b|is put into (?:a|the) graveyard from the "
+                    r"battlefield\b)",
+                    self.trigger_condition, re.IGNORECASE)
+                    for name in source_names)
+                names_source = self_death or named_death
+
+                if names_source and source_card_id == event_card_id:
+                    if not _source_last_known_while_gate(
+                            self.trigger_condition,
+                            context.get("last_known") or {}):
+                        return False
+                elif controlled_death:
                     last_known = context.get("last_known") or {}
                     game_state = context.get("game_state")
                     controller = context.get("controller")
-                    if game_state is None or controller is None:
+                    controller_key = None
+                    if game_state is not None and controller is not None:
+                        controller_key = (
+                            "p1" if controller is game_state.p1
+                            else "p2")
+                    if (controller_key is None
+                            or last_known.get("controller_key") !=
+                            controller_key):
                         return False
-                    card_types = {
-                        str(card_type).lower()
-                        for card_type in last_known.get("card_types", [])}
-                    if (not last_known.get("was_creature", False)
-                            and "creature" not in card_types):
+                    criteria = "{} {}".format(
+                        controlled_death.group("article"),
+                        controlled_death.group("criteria"))
+                    criteria += controlled_death.group("qualifiers") or ""
+                    if not _last_known_matches_any_criteria(
+                            last_known, criteria,
+                            source_id=source_card_id,
+                            event_id=event_card_id):
                         return False
-                    if (controlled_creature.group(2) == 'nonland'
-                            and "land" in card_types):
+                elif opponent_death:
+                    last_known = context.get("last_known") or {}
+                    game_state = context.get("game_state")
+                    controller = context.get("controller")
+                    controller_key = None
+                    if game_state is not None and controller is not None:
+                        controller_key = (
+                            "p1" if controller is game_state.p1 else "p2")
+                    if (controller_key is None
+                            or last_known.get("controller_key") in {
+                                None, controller_key}):
                         return False
-                    if (controlled_creature.group(2) == 'nontoken'
-                            and last_known.get('is_token', False)):
+                    criteria = "{} {}".format(
+                        opponent_death.group("article"),
+                        opponent_death.group("criteria"))
+                    criteria += opponent_death.group("qualifiers") or ""
+                    if not _last_known_matches_any_criteria(
+                            last_known, criteria,
+                            source_id=source_card_id,
+                            event_id=event_card_id):
                         return False
+                elif attachment_death:
+                    last_known = context.get("last_known") or {}
+                    if source_card_id not in set(
+                            last_known.get("attachment_source_ids", []) or []):
+                        return False
+                elif names_source:
+                    return False
+                else:
+                    # Watchers that use the non-creature zone-change wording
+                    # ("is put into a graveyard from the battlefield") and
+                    # global death watchers have no dedicated controller
+                    # regex above.  They must still match the event object's
+                    # last-known subject; otherwise every battlefield object
+                    # moving to a graveyard can deliver the trigger.
+                    death_subject = re.search(
+                        r"^\s*when(?:ever)?\s+(?P<subject>.+?)\s+"
+                        r"(?:d(?:ie|ies)|(?:is|are) put into (?:a|the) "
+                        r"graveyard from the battlefield)\b",
+                        self.trigger_condition, re.IGNORECASE)
+                    if not death_subject:
+                        return False
+                    last_known = context.get("last_known") or {}
+                    game_state = context.get("game_state")
+                    controller = context.get("controller")
+                    controller_key = None
+                    if game_state is not None and controller is not None:
+                        controller_key = (
+                            "p1" if controller is game_state.p1 else "p2")
+                    subject = death_subject.group("subject")
+                    controlled_subject = bool(re.search(
+                        r"\byou control\b", subject, re.IGNORECASE))
+                    opponent_subject = bool(re.search(
+                        r"\b(?:an opponent controls|"
+                        r"your opponents? control)\b",
+                        subject, re.IGNORECASE))
+                    if controlled_subject and opponent_subject:
+                        return False
+                    if controlled_subject:
+                        if (controller_key is None
+                                or last_known.get("controller_key") !=
+                                controller_key):
+                            return False
+                        subject = re.sub(
+                            r"\byou control\b", "", subject,
+                            flags=re.IGNORECASE)
+                    elif opponent_subject:
+                        if (controller_key is None
+                                or last_known.get("controller_key") in {
+                                    None, controller_key}):
+                            return False
+                        subject = re.sub(
+                            r"\b(?:an opponent controls|"
+                            r"your opponents? control)\b",
+                            "", subject, flags=re.IGNORECASE)
+                    if not _last_known_matches_any_criteria(
+                            last_known, subject,
+                            source_id=source_card_id,
+                            event_id=event_card_id):
+                        return False
+            if event_type == "ENTER_EXILE":
+                context = context or {}
+                # The supported family describes battlefield permanents being
+                # put into exile. Card-zone exile semantics differ and stay
+                # fail-closed until they have a dedicated subject matcher.
+                if context.get("from_zone") != "battlefield":
+                    return False
+                source_card_id = context.get(
+                    "source_card_id", getattr(self, "card_id", None))
+                event_card_id = context.get("event_card_id")
+                source_card = context.get("source_card")
+                source_names = _source_reference_names(source_card)
+                controlled_exile = re.search(
+                    r"\b(?P<article>a|an|another|one or more)\s+"
+                    r"(?P<criteria>.+?)\s+you control"
+                    r"(?:\s+d(?:ie|ies)\s+or)?\s+"
+                    r"(?:is put into exile|is exiled)\b",
+                    self.trigger_condition, re.IGNORECASE)
+                opponent_exile = re.search(
+                    r"\b(?P<article>a|an|another|one or more)\s+"
+                    r"(?P<criteria>.+?)\s+"
+                    r"(?:an opponent controls|your opponents? control)"
+                    r"(?:\s+d(?:ie|ies)\s+or)?\s+"
+                    r"(?:is put into exile|is exiled)\b",
+                    self.trigger_condition, re.IGNORECASE)
+                self_exile = bool(re.search(
+                    r"^\s*when(?:ever)?\s+this\b.*?"
+                    r"(?:is put into exile|is exiled)\b",
+                    self.trigger_condition, re.IGNORECASE))
+                named_exile = any(re.search(
+                    rf"^\s*when(?:ever)?\s+{re.escape(name)}\b"
+                    r"(?:\s+d(?:ie|ies)\s+or)?\s+"
+                    r"(?:is put into exile|is exiled)\b",
+                    self.trigger_condition, re.IGNORECASE)
+                    for name in source_names)
+                names_source = self_exile or named_exile
+                last_known = context.get("last_known") or {}
+
+                if names_source and source_card_id == event_card_id:
+                    if not _source_last_known_while_gate(
+                            self.trigger_condition, last_known):
+                        return False
+                elif controlled_exile:
+                    game_state = context.get("game_state")
+                    controller = context.get("controller")
                     controller_key = (
-                        "p1" if controller is game_state.p1
-                        else "p2")
-                    if last_known.get("controller_key") != controller_key:
+                        "p1" if game_state is not None
+                        and controller is game_state.p1
+                        else "p2" if game_state is not None
+                        and controller is game_state.p2 else None)
+                    if (controller_key is None
+                            or last_known.get("controller_key") !=
+                            controller_key):
                         return False
-                    if (controlled_creature.group(1).lower() == "another"
-                            and context.get("source_card_id")
-                            == context.get("event_card_id")):
+                    criteria = "{} {}".format(
+                        controlled_exile.group("article"),
+                        controlled_exile.group("criteria"))
+                    if not _last_known_matches_any_criteria(
+                            last_known, criteria,
+                            source_id=source_card_id,
+                            event_id=event_card_id):
                         return False
+                elif opponent_exile:
+                    game_state = context.get("game_state")
+                    controller = context.get("controller")
+                    controller_key = (
+                        "p1" if game_state is not None
+                        and controller is game_state.p1
+                        else "p2" if game_state is not None
+                        and controller is game_state.p2 else None)
+                    if (controller_key is None
+                            or last_known.get("controller_key") in {
+                                None, controller_key}):
+                        return False
+                    criteria = "{} {}".format(
+                        opponent_exile.group("article"),
+                        opponent_exile.group("criteria"))
+                    if not _last_known_matches_any_criteria(
+                            last_known, criteria,
+                            source_id=source_card_id,
+                            event_id=event_card_id):
+                        return False
+                else:
+                    return False
             if event_type == "ENTERS_BATTLEFIELD":
                 context = context or {}
                 source_card_id = context.get("source_card_id")
                 event_card_id = context.get("event_card_id")
                 source_card = context.get("source_card")
-                full_name = str(getattr(source_card, "name", "") or "").lower()
-                source_name = re.escape(full_name)
-                # Oracle text refers to legendaries by their short name
-                # ("When Beza enters" on Beza, the Bounding Spring).
-                short_name = re.escape(full_name.split(",")[0].strip())
-                self_entry = bool(
-                    re.search(r"\bthis\s+(?:artifact|aura|battle|creature|"
-                              r"enchantment|land|permanent|vehicle|card)\b.*\benters\b",
-                              self.trigger_condition, re.IGNORECASE)
-                    or (source_name and re.search(
-                        rf"^\s*when(?:ever)?\s+{source_name}\s+enters\b",
-                        self.trigger_condition, re.IGNORECASE))
-                    or (short_name and re.search(
-                        rf"^\s*when(?:ever)?\s+{short_name}\s+enters\b",
-                        self.trigger_condition, re.IGNORECASE)))
-                if self_entry and source_card_id != event_card_id:
+                if not any(_entry_clause_matches(
+                        clause, context, source_card_id, event_card_id,
+                        source_card)
+                        for clause in matching_trigger_clauses):
                     return False
-                if "a land you control enters" in self.trigger_condition:
-                    event_card = context.get("event_card")
-                    event_types = {
-                        str(card_type).lower() for card_type in getattr(
-                            event_card, "card_types", [])}
-                    if ("land" not in event_types
-                            or context.get(
-                                "event_controller", context.get("controller"))
-                            is not context.get("controller")):
-                        return False
-                if "an enchantment you control enters" in self.trigger_condition:
-                    event_types = {str(t).lower() for t in getattr(context.get('event_card'), 'card_types', [])}
-                    if ('enchantment' not in event_types
-                            or context.get('event_controller', context.get('controller')) is not context.get('controller')):
-                        return False
-                controlled_entry = re.search(
-                    r"\b(another\s+)?(nontoken\s+)?creature you control "
-                    r"enters\b", self.trigger_condition, re.IGNORECASE)
-                if controlled_entry:
-                    event_card = context.get('event_card')
-                    event_types = {
-                        str(card_type).lower() for card_type in getattr(
-                            event_card, 'card_types', [])}
-                    if ('creature' not in event_types
-                            or context.get('event_controller',
-                                           context.get('controller')) is not
-                            context.get('controller')):
-                        return False
-                    if (controlled_entry.group(1)
-                            and source_card_id == event_card_id):
-                        return False
-                    if (controlled_entry.group(2)
-                            and bool(getattr(event_card, 'is_token', False))):
-                        return False
             if event_type == "LEAVE_GRAVEYARD":
                 context = context or {}
                 if ("your graveyard" in self.trigger_condition
@@ -1736,6 +2720,39 @@ class TriggeredAbility(Ability):
                     cast_id = context.get(
                         "cast_card_id", context.get("event_card_id"))
                     if cast_id != getattr(self, "card_id", None):
+                        return False
+                if "noncreature spell" in self.trigger_condition:
+                    game_state = context.get("game_state")
+                    cast_card = (game_state._safe_get_card(
+                        context.get("cast_card_id")) if game_state else None)
+                    cast_types = {
+                        str(card_type).casefold()
+                        for card_type in context.get(
+                            "cast_card_types", getattr(
+                                cast_card, "card_types", []))}
+                    if "creature" in cast_types:
+                        return False
+                mana_symbol_color = _mana_symbol_antecedent_color(
+                    self.trigger_condition)
+                if mana_symbol_color:
+                    game_state = context.get("game_state")
+                    mana_cost = _triggering_spell_mana_cost(
+                        game_state, context)
+                    symbol_count = _count_colored_mana_symbols(
+                        mana_cost, mana_symbol_color)
+                    if symbol_count is None:
+                        if game_state is not None:
+                            counters = game_state._ensure_fidelity_counters()
+                            counters["unparsed_effects"] += 1
+                            source = game_state._safe_get_card(self.card_id)
+                            counters["unparsed_cards"].add(getattr(
+                                source, "name", f"card_{self.card_id}"))
+                        logging.warning(
+                            "Cannot evaluate %s: triggering spell mana cost "
+                            "is unavailable. Failing closed.",
+                            self.trigger_condition)
+                        return False
+                    if symbol_count <= 0:
                         return False
                 if "your second spell each turn" in self.trigger_condition:
                     game_state = context.get("game_state")
@@ -1846,80 +2863,245 @@ class TriggeredAbility(Ability):
                 attacker_id = context.get("attacker_id", context.get("event_card_id"))
                 gs = context.get("game_state")
                 source_id = context.get("source_card_id")
+                source_card = context.get("source_card")
+                source_names = _source_reference_names(source_card)
+                condition = self.trigger_condition.casefold()
+                event_controller = (
+                    context.get("event_controller")
+                    or context.get("attacking_player")
+                    or (gs.get_card_controller(attacker_id)
+                        if gs and attacker_id is not None else None))
+                attack_group = (
+                    _declared_attack_group(gs, attacker_id, event_controller)
+                    if gs and event_controller else [])
                 attachment_subject_id = None
                 if gs and source_id is not None:
                     for player in (gs.p1, gs.p2):
                         if source_id in player.get("attachments", {}):
                             attachment_subject_id = player["attachments"][source_id]
                             break
-                # "this creature/land attacks" only triggers for the attacker
-                # itself, never for other permanents that merely hear the event.
-                if (re.search(r"\bthis\s+(?:creature|permanent|land|vehicle)\b.*\battacks\b",
-                              self.trigger_condition, re.IGNORECASE)
-                        and (attachment_subject_id
-                             if attachment_subject_id is not None else source_id)
-                        != attacker_id):
+                effective_source_id = (
+                    attachment_subject_id
+                    if attachment_subject_id is not None else source_id)
+                names_source_attack = bool(
+                    re.search(
+                        r"\bwhen(?:ever)?\s+this\b[^,;]*?\battacks?\b",
+                        condition, re.IGNORECASE)
+                    or any(re.search(
+                        rf"\bwhen(?:ever)?\s+{re.escape(name)}\b"
+                        rf"[^,;]*?\battacks?\b",
+                        condition, re.IGNORECASE)
+                        for name in source_names))
+                self_arm_event = (
+                    names_source_attack
+                    and effective_source_id == attacker_id)
+
+                # "You/a player/an opponent attacks [with ...]" describes
+                # one declaration event, not one event per attacking object.
+                # The engine broadcasts ATTACKS once per attacker, so scope
+                # the subject, evaluate the final group, and accept only the
+                # first dispatch in that group.
+                group_watcher = re.search(
+                    r"\bwhen(?:ever)?\s+"
+                    r"(?P<subject>you|a player|an opponent)\s+attacks?\b"
+                    r"(?:\s+(?P<target>a player|an opponent))?"
+                    r"(?:\s+with\s+(?P<criteria>.+))?\s*$",
+                    condition, re.IGNORECASE)
+                if group_watcher:
+                    subject = group_watcher.group("subject").casefold()
+                    if ((subject == "you"
+                         and event_controller is not context.get("controller"))
+                            or (subject == "an opponent"
+                                and event_controller is
+                                context.get("controller"))):
+                        return False
+                    eligible_attackers = [
+                        candidate_id for candidate_id in attack_group
+                        if _attack_target_qualifier_matches(
+                            gs, candidate_id, context.get("controller"),
+                            condition, context)]
+                    if (not eligible_attackers
+                            or eligible_attackers[0] != attacker_id):
+                        return False
+                    criteria = group_watcher.group("criteria")
+                    threshold = 1
+                    if criteria:
+                        threshold_match = re.match(
+                            r"(?P<count>\w+|\d+)\s+or\s+more\s+"
+                            r"(?P<criteria>.+)$", criteria,
+                            re.IGNORECASE)
+                        if threshold_match:
+                            threshold = _oracle_count(
+                                threshold_match.group("count"), default=1)
+                            criteria = threshold_match.group("criteria")
+                    matching_attackers = [
+                        candidate_id for candidate_id in eligible_attackers
+                        if (not criteria or _permanent_matches_any_criteria(
+                            gs, candidate_id, criteria,
+                            controller=event_controller,
+                            source_id=source_id))]
+                    if len(matching_attackers) < threshold:
+                        return False
+                    context["matching_attacker_ids"] = matching_attackers
+                    context["attacker_count"] = len(matching_attackers)
+                    protected_attackers = [
+                        candidate_id for candidate_id in attack_group
+                        if _attacks_player_or_their_planeswalker(
+                            gs, candidate_id, context.get("controller"),
+                            context)]
+                    context[
+                        "attacking_you_or_your_planeswalkers_ids"
+                    ] = protected_attackers
+                    context[
+                        "attacking_you_or_your_planeswalkers_count"
+                    ] = len(protected_attackers)
+
+                watcher = None if group_watcher else re.search(
+                    r"when(?:ever)?\s+(a|an|another|one or more)\s+"
+                    r"(.+?)\s+attacks?\b",
+                    condition, re.IGNORECASE)
+                if (names_source_attack and not self_arm_event
+                        and watcher is None):
                     return False
+                if (self_arm_event
+                        and re.search(
+                            r"\band at least one other creature\s+attack\b",
+                            condition, re.IGNORECASE)
+                        and not any(
+                            candidate_id != effective_source_id
+                            for candidate_id in attack_group)):
+                    return False
+                if "attacks alone" in self.trigger_condition:
+                    declared_attackers = list(
+                        getattr(gs, "current_attackers", []) or []) if gs else []
+                    if (len(declared_attackers) != 1
+                            or declared_attackers[0] != attacker_id):
+                        return False
                 if ("first time each turn" in self.trigger_condition
                         and not context.get("first_attack_this_turn", False)):
                     return False
                 attacker_card = (gs._safe_get_card(attacker_id)
                                  if gs and attacker_id is not None else None)
+                while_condition = re.search(
+                    r"\battacks?(?:\s+or\s+blocks?)?\s+while\s+(.+)$",
+                    condition, re.IGNORECASE)
+                if (while_condition
+                        and not _attack_while_condition_met(
+                            gs, context.get("controller"),
+                            effective_source_id,
+                            while_condition.group(1))):
+                    return False
                 # A trigger granted by an Aura or Equipment is scoped to the
                 # creature that source is actually attached to. Previously
                 # these wordings either over-fired for every attacker or were
                 # suppressed by the generic watcher vocabulary check.
-                if (gs and attacker_id is not None
-                        and re.search(
-                            r"\b(?:equipped|enchanted)\s+creature\s+attacks\b",
-                            self.trigger_condition, re.IGNORECASE)):
-                    attached_to = None
-                    for player in (gs.p1, gs.p2):
-                        if source_id in player.get("attachments", {}):
-                            attached_to = player["attachments"][source_id]
-                            break
-                    if attached_to != attacker_id:
+                attachment_scope_validated = False
+                attachment_watcher = re.search(
+                    r"\b(?P<kind>equipped|enchanted)\s+creature"
+                    r"(?P<controlled>\s+you\s+control)?\s+attacks\b",
+                    self.trigger_condition, re.IGNORECASE)
+                if gs and attacker_id is not None and attachment_watcher:
+                    if (attachment_watcher.group("controlled")
+                            and gs.get_card_controller(attacker_id) is not
+                            context.get("controller")):
                         return False
+                    required_subtype = (
+                        "equipment"
+                        if attachment_watcher.group("kind").lower() ==
+                        "equipped" else "aura")
+                    # "Equipped/enchanted creature" on the attachment itself
+                    # refers only to that source's bearer. The article-bearing
+                    # watcher form ("an equipped creature") instead belongs to
+                    # sources such as Swordsman and may inspect any matching
+                    # attachment on the attacker.
+                    has_attachment = (
+                        attachment_subject_id == attacker_id
+                        if watcher is None else False)
+                    if watcher is not None:
+                        for player in (gs.p1, gs.p2):
+                            for attachment_id, attached_to in player.get(
+                                    "attachments", {}).items():
+                                if attached_to != attacker_id:
+                                    continue
+                                attachment_card = gs._safe_get_card(
+                                    attachment_id)
+                                attachment_subtypes = {
+                                    str(value).lower() for value in getattr(
+                                        attachment_card, "subtypes", [])}
+                                if required_subtype in attachment_subtypes:
+                                    has_attachment = True
+                                    break
+                            if has_attachment:
+                                break
+                    if not has_attachment:
+                        return False
+                    attachment_scope_validated = True
                 # Watcher wordings ("whenever a/another <what> [you control]
                 # attacks") fire only when the attacker matches the printed
                 # scope. Before July 2026 every watcher fired on every attack,
                 # wrong-controller and wrong-type watchers included.
-                watcher = re.search(
-                    r"when(?:ever)?\s+(a|an|another|one or more)\s+(.+?)\s+attacks?\b",
-                    self.trigger_condition, re.IGNORECASE)
-                if watcher and attacker_card:
+                if watcher and not self_arm_event:
+                    if not gs or attacker_card is None:
+                        return False
                     scope = watcher.group(2).strip().lower()
-                    if scope.endswith("you control"):
-                        scope = scope[: -len("you control")].strip()
-                        if gs.get_card_controller(attacker_id) is not context.get("controller"):
+                    controlled_scope = re.match(
+                        r"^(?P<criteria>.+?)\s+you control"
+                        r"(?P<qualifiers>(?:\s+(?:with|without)\b.*)?)$",
+                        scope)
+                    if controlled_scope:
+                        if (gs.get_card_controller(attacker_id) is not
+                                context.get("controller")):
                             return False
+                        scope = (
+                            controlled_scope.group("criteria")
+                            + (controlled_scope.group("qualifiers") or ""))
                     if (watcher.group(1).lower() == "another"
                             and context.get("source_card_id") == attacker_id):
                         return False
-                    vocabulary = {"permanent"}
-                    for group in ("card_types", "subtypes", "supertypes"):
-                        vocabulary.update(
-                            str(t).lower()
-                            for t in getattr(attacker_card, group, None) or [])
-                    scope_words = [
-                        word for word in re.split(r"[\s,]+", scope) if word]
-                    is_token = bool(getattr(attacker_card, "is_token", False))
-                    if "nontoken" in scope_words and is_token:
+                    if attachment_scope_validated:
+                        scope = re.sub(
+                            r"\b(?:equipped|enchanted)\s+", "", scope,
+                            count=1)
+                    criteria = "{} {}".format(
+                        watcher.group(1), scope)
+                    criteria_controller = (
+                        context.get("controller") if controlled_scope
+                        else gs.get_card_controller(attacker_id))
+                    if not _permanent_matches_any_criteria(
+                            gs, attacker_id, criteria,
+                            controller=criteria_controller,
+                            source_id=source_id):
                         return False
-                    if "token" in scope_words and not is_token:
-                        return False
-                    for word in scope_words:
-                        if word in {"nontoken", "token"}:
-                            continue
-                        if (word and word not in vocabulary
-                                and not (word.endswith("s") and word[:-1] in vocabulary)):
+                    if watcher.group(1).lower() == "one or more":
+                        matching_attackers = []
+                        for candidate_id in list(
+                                getattr(gs, "current_attackers", []) or []):
+                            if (controlled_scope
+                                    and gs.get_card_controller(candidate_id)
+                                    is not context.get("controller")):
+                                continue
+                            if not _attack_target_qualifier_matches(
+                                    gs, candidate_id,
+                                    context.get("controller"), condition,
+                                    context):
+                                continue
+                            if _permanent_matches_any_criteria(
+                                    gs, candidate_id, criteria,
+                                    controller=(
+                                        context.get("controller")
+                                        if controlled_scope else
+                                        gs.get_card_controller(candidate_id)),
+                                    source_id=source_id):
+                                matching_attackers.append(candidate_id)
+                        context["matching_attacker_ids"] = matching_attackers
+                        context["attacker_count"] = len(matching_attackers)
+                        if (not matching_attackers
+                                or matching_attackers[0] != attacker_id):
                             return False
-                # Defender-side wordings ("attacks you or a planeswalker you
-                # control") belong to the player being attacked, never the
-                # attacker's own controller.
-                if (re.search(r"\battacks?\s+you\b", self.trigger_condition, re.IGNORECASE)
-                        and gs and attacker_id is not None
-                        and gs.get_card_controller(attacker_id) is context.get("controller")):
+                if (not group_watcher
+                        and not _attack_target_qualifier_matches(
+                            gs, attacker_id, context.get("controller"),
+                            condition, context)):
                     return False
             if event_type == "BLOCKS":
                 context = context or {}
@@ -1943,6 +3125,14 @@ class TriggeredAbility(Ability):
                         self.trigger_condition, re.IGNORECASE)))
                 if (names_source
                         and source_id != blocker_id):
+                    return False
+                block_while = re.search(
+                    r"\bblocks?\s+while\s+(.+)$",
+                    self.trigger_condition, re.IGNORECASE)
+                if (block_while
+                        and not _attack_while_condition_met(
+                            gs, context.get("controller"), source_id,
+                            block_while.group(1))):
                     return False
                 watcher = re.search(
                     r"when(?:ever)?\s+(a|an|another|one or more)\s+"
@@ -2019,6 +3209,26 @@ class TriggeredAbility(Ability):
                                 for card_type in getattr(
                                     damaged_card, "card_types", [])}):
                         return False
+            if event_type in ("TAPPED", "UNTAPPED"):
+                context = context or {}
+                event_card_id = context.get("event_card_id")
+                source_card_id = context.get("source_card_id")
+                source_card = context.get("source_card")
+                source_name = str(
+                    getattr(source_card, "name", "") or "").lower()
+                short_name = source_name.split(",")[0].strip()
+                state_word = "tapped" if event_type == "TAPPED" else "untapped"
+                names_source = bool(
+                    re.search(
+                        rf"\bthis\s+(?:artifact|creature|land|permanent|"
+                        rf"vehicle)\b.*\b{state_word}\b",
+                        self.trigger_condition, re.IGNORECASE)
+                    or (short_name and re.search(
+                        rf"^\s*when(?:ever)?\s+{re.escape(short_name)}\s+"
+                        rf"(?:becomes?\s+|is\s+)?{state_word}\b",
+                        self.trigger_condition, re.IGNORECASE)))
+                if names_source and source_card_id != event_card_id:
+                    return False
             if event_type == "BEGINNING_OF_COMBAT":
                 context = context or {}
                 gs = context.get("game_state")
@@ -2120,6 +3330,26 @@ class TriggeredAbility(Ability):
 
         normalized_condition = str(condition_text).lower().strip(" .,;")
         last_known = context.get("last_known") or {}
+        lki_counters = {
+            str(kind).casefold(): int(amount or 0)
+            for kind, amount in (last_known.get("counters", {}) or {}).items()
+            if int(amount or 0) > 0}
+        lki_any_counter = re.fullmatch(
+            r"if it had (?P<amount>no|one or more)?\s*counters on it",
+            normalized_condition)
+        if lki_any_counter:
+            has_counters = bool(lki_counters)
+            return (not has_counters if lki_any_counter.group("amount") == "no"
+                    else has_counters)
+        lki_named_counter = re.fullmatch(
+            r"if it had (?P<none>no )?(?:an? )?"
+            r"(?P<kind>[+\-/\w]+) counters? on it",
+            normalized_condition)
+        if lki_named_counter:
+            has_counter = lki_counters.get(
+                lki_named_counter.group("kind").casefold(), 0) > 0
+            return (not has_counter
+                    if lki_named_counter.group("none") else has_counter)
         if ("if it's not suspected" in normalized_condition
                 or "if it is not suspected" in normalized_condition):
             return self.card_id not in controller.setdefault(
@@ -2141,6 +3371,60 @@ class TriggeredAbility(Ability):
             # stack captures that provenance before the permanent moves, so a
             # card put directly onto the battlefield does not qualify.
             return bool(context.get("was_cast"))
+
+        if normalized_condition == (
+                "if none of them were cast or no mana was spent to cast them"):
+            if not context.get("was_cast"):
+                return True
+            paid = context.get("final_paid_cost")
+            if not isinstance(paid, dict):
+                details = context.get("final_paid_details") or {}
+                paid = (details.get("spent_specific")
+                        if isinstance(details, dict) else None)
+            if not isinstance(paid, dict):
+                return False
+            try:
+                return sum(int(value or 0) for value in paid.values()) == 0
+            except (TypeError, ValueError):
+                return False
+
+        if normalized_condition == (
+                "if you cast them and there are three or more dragon and/or "
+                "lesson cards in your graveyard"):
+            controller_id = "p1" if controller is gs.p1 else "p2"
+            if (not context.get("was_cast")
+                    or context.get("cast_controller_id") != controller_id):
+                return False
+            matching = 0
+            for card_id in controller.get("graveyard", []):
+                card = gs._safe_get_card(card_id)
+                subtypes = {
+                    str(value).casefold()
+                    for value in getattr(card, "subtypes", []) or []}
+                if subtypes.intersection({"dragon", "lesson"}):
+                    matching += 1
+            return matching >= 3
+
+        if normalized_condition == (
+                "if one or more of them entered from exile or was cast from "
+                "exile"):
+            return (str(context.get("from_zone", "")).casefold() == "exile"
+                    or (bool(context.get("was_cast"))
+                        and str(context.get(
+                            "event_source_zone",
+                            context.get("source_zone", ""))).casefold()
+                        == "exile"))
+
+        protected_attackers = re.search(
+            r"if (\w+|\d+) or more of those creatures are attacking "
+            r"you and/or planeswalkers you control",
+            normalized_condition)
+        if protected_attackers:
+            needed = _oracle_count(
+                protected_attackers.group(1), default=1)
+            return int(context.get(
+                "attacking_you_or_your_planeswalkers_count", 0) or 0) \
+                >= needed
 
         source_counter_match = re.fullmatch(
             r"if it has (\w+|\d+) or more ([\w+/-]+) counters? on it",
@@ -2184,6 +3468,19 @@ class TriggeredAbility(Ability):
             toughness = int(getattr(subject, "toughness", 0) or 0)
             return (toughness <= threshold if toughness_match.group(2) == "less"
                     else toughness >= threshold)
+
+        life_gain_threshold = re.search(
+            r"\bif\s+you(?:(?:['\u2019])ve| have)?\s+gained\s+"
+            r"([a-z]+|\d+)\s+or\s+more\s+life\s+this\s+turn\b",
+            normalized_condition)
+        if life_gain_threshold:
+            needed = text_to_number(life_gain_threshold.group(1))
+            player_key = (
+                "p1" if controller is gs.p1 else
+                "p2" if controller is gs.p2 else None)
+            gained = int((getattr(gs, "life_gained_this_turn", {}) or {}).get(
+                player_key, 0) or 0) if player_key else 0
+            return gained >= needed
 
         # Delirium: "if there are four or more card types among cards in your
         # graveyard" counts DISTINCT card types, not cards.
@@ -2338,7 +3635,19 @@ class TriggeredAbility(Ability):
         m = re.match(
             r'^\s*(?:when|whenever|at)\b[^,]*,\s*if\s+([^,]+?),',
             text or '', re.IGNORECASE)
-        return ("if " + m.group(1).strip()) if m else None
+        if m:
+            return "if " + m.group(1).strip()
+        # A small set of card implementations intentionally gates a phase
+        # trigger on a trailing turn-history threshold. Keep this extraction
+        # narrow so unrelated conditional instructions retain their normal
+        # resolution-time behavior.
+        trailing_life_threshold = re.search(
+            r"\b(if\s+you(?:(?:['\u2019])ve| have)?\s+gained\s+"
+            r"(?:[a-z]+|\d+)\s+or\s+more\s+life\s+this\s+turn)"
+            r"\s*\.?\s*$",
+            text or '', re.IGNORECASE)
+        return (trailing_life_threshold.group(1)
+                if trailing_life_threshold else None)
 
     def _intervening_if_met(self, game_state, controller, context=None):
         """Evaluate the intervening 'if' right now (used at resolution, CR 603.4)."""
@@ -4160,6 +5469,7 @@ class DamageEffect(AbilityEffect):
                  return True
             relevant_categories = set()
             if self.target_type == "any target": relevant_categories = {"creatures", "players", "planeswalkers", "battles"}
+            elif self.target_type == "creature_or_planeswalker": relevant_categories = {"creatures", "planeswalkers"}
             elif self.target_type == "creature": relevant_categories = {"creatures"}
             elif self.target_type == "player": relevant_categories = {"players"}
             elif self.target_type == "planeswalker": relevant_categories = {"planeswalkers"}
@@ -4688,9 +5998,14 @@ class RemoveCounterEffect(AbilityEffect):
 
 
 class CreateTokenEffect(AbilityEffect):
-    """Effect that creates token creatures. Can handle copies with modified P/T."""
+    """Create a token permanent, including named noncreature tokens."""
     # ADDED: is_copy flag and source_card_for_copy attribute
-    def __init__(self, power, toughness, creature_type="Creature", count=1, keywords=None, colors=None, is_legendary=False, controller_gets=True, condition=None, is_copy=False, source_card_for_copy=None, count_expr=None, enters_tapped=False):
+    def __init__(self, power, toughness, creature_type="Creature", count=1,
+                 keywords=None, colors=None, is_legendary=False,
+                 controller_gets=True, condition=None, is_copy=False,
+                 source_card_for_copy=None, count_expr=None,
+                 enters_tapped=False, token_name=None, card_types=None,
+                 subtypes=None):
         self.is_copy = is_copy
         self.source_card_for_copy = source_card_for_copy # Should be the Card object
         # "for each X" token counts are resolved against the controller at
@@ -4720,6 +6035,38 @@ class CreateTokenEffect(AbilityEffect):
         self.is_legendary = is_legendary # Base legendary status if not copy
         self.controller_gets = controller_gets
         self.enters_tapped = bool(enters_tapped)
+        self.token_name = str(token_name).strip() if token_name else None
+        self.token_card_types = [
+            str(card_type).lower() for card_type in (card_types or [])
+            if str(card_type).strip()]
+        self.token_subtypes = [
+            str(subtype).lower() for subtype in (subtypes or [])
+            if str(subtype).strip()]
+
+    def _resolve_that_many_count(self, game_state):
+        """Resolve a supported pronoun antecedent from frozen event data."""
+        context = getattr(self, "resolution_context", {}) or {}
+        ability = context.get("ability")
+        antecedent_texts = [
+            getattr(ability, "trigger_condition", None),
+            context.get("trigger_condition"),
+            context.get("effect_text"),
+        ]
+        for antecedent_text in antecedent_texts:
+            color_word = _mana_symbol_antecedent_color(antecedent_text)
+            if not color_word:
+                continue
+            mana_cost = _triggering_spell_mana_cost(game_state, context)
+            return _count_colored_mana_symbols(mana_cost, color_word)
+        return None
+
+    @staticmethod
+    def _record_unresolved_that_many(game_state, source_id):
+        counters = game_state._ensure_fidelity_counters()
+        counters["unparsed_effects"] += 1
+        source = game_state._safe_get_card(source_id)
+        counters["unparsed_cards"].add(getattr(
+            source, "name", f"card_{source_id}"))
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         target_player = controller
@@ -4728,7 +6075,19 @@ class CreateTokenEffect(AbilityEffect):
 
         effective_count = self.count
         if self.count_expr:
-            effective_count = game_state.count_dynamic_quantity(self.count_expr, controller)
+            if str(self.count_expr).casefold().strip() == "that many":
+                effective_count = self._resolve_that_many_count(game_state)
+                if effective_count is None:
+                    self._record_unresolved_that_many(
+                        game_state, source_id)
+                    logging.warning(
+                        "CreateTokenEffect cannot resolve 'that many' from "
+                        "the frozen event context for source %r. Failing "
+                        "closed.", source_id)
+                    return False
+            else:
+                effective_count = game_state.count_dynamic_quantity(
+                    self.count_expr, controller)
             logging.debug(f"CreateTokenEffect: dynamic count '{self.count_expr}' = {effective_count}.")
             if effective_count <= 0:
                 return True  # Zero tokens is a successful resolution.
@@ -4744,20 +6103,30 @@ class CreateTokenEffect(AbilityEffect):
                 import copy # Import copy locally if not already imported
                 # Get copyable characteristics based on Rule 707.2
                 # Make sure to use getattr for safety and handle potential None values
+                printed = (
+                    original_card.printed
+                    if hasattr(original_card, "printed") else
+                    lambda attr, default=None: getattr(
+                        original_card, attr, default))
+                original_colors = printed("colors", [0] * 5)
                 token_data = {
-                    "name": getattr(original_card, 'name', 'Unknown'),
-                    "mana_cost": getattr(original_card, 'mana_cost', ""),
-                    "color_identity": copy.deepcopy(getattr(original_card, 'colors', [0]*5)), # Use colors for copy identity
-                    "card_types": copy.deepcopy(getattr(original_card, 'card_types', [])),
-                    "subtypes": copy.deepcopy(getattr(original_card, 'subtypes', [])),
-                    "supertypes": copy.deepcopy(getattr(original_card, 'supertypes', [])),
-                    "oracle_text": getattr(original_card, 'oracle_text', ''),
+                    "name": printed("name", "Unknown"),
+                    "mana_cost": printed("mana_cost", ""),
+                    # Card consumes WUBRG letters here, not its internal
+                    # five-number color vector.
+                    "color_identity": [
+                        letter for letter, present
+                        in zip("WUBRG", original_colors) if present],
+                    "card_types": copy.deepcopy(printed("card_types", [])),
+                    "subtypes": copy.deepcopy(printed("subtypes", [])),
+                    "supertypes": copy.deepcopy(printed("supertypes", [])),
+                    "oracle_text": printed("oracle_text", ""),
                     # *** OFFSPRING Specific: Set P/T to 1/1 ***
                     "power": 1,
                     "toughness": 1,
                     # Keywords: Copy the *final* keyword state from the original (post-layers?)
                     # Simpler: copy the base keyword array/list from original Card object
-                    "keywords": copy.deepcopy(getattr(original_card, 'keywords', [])),
+                    "keywords": copy.deepcopy(printed("keywords", [])),
                     "is_token": True,
                 }
                 # Rebuild typeline (assuming helper exists and handles supertypes/types/subtypes)
@@ -4790,14 +6159,27 @@ class CreateTokenEffect(AbilityEffect):
                     if color_name.lower() in color_map:
                          color_list[color_map[color_name.lower()]] = 1
 
-            # Handle "artifact creature" type line properly
+            # Handle noncreature tokens and "artifact creature" type lines.
             card_types_list = ["token"] # Always a token
-            subtypes_list = []
+            subtypes_list = list(self.token_subtypes)
             base_type = "Creature" # Default unless specified
             # Known noncreature artifact token types.
             ARTIFACT_TOKEN_TYPES = {"treasure", "food", "clue", "map", "blood",
                                     "gold", "powerstone", "junk", "incubator"}
-            if isinstance(self.creature_type, str):
+            if self.token_card_types:
+                for card_type in self.token_card_types:
+                    if card_type not in card_types_list:
+                        card_types_list.append(card_type)
+                if self.token_name:
+                    base_type = self.token_name
+                elif ("creature" in self.token_card_types
+                        and self.token_subtypes):
+                    base_type = " ".join(
+                        subtype.capitalize()
+                        for subtype in self.token_subtypes)
+                else:
+                    base_type = self.token_card_types[-1].capitalize()
+            elif isinstance(self.creature_type, str):
                 ct_lower = self.creature_type.lower()
                 if "artifact" in ct_lower: card_types_list.append("artifact")
                 if "creature" in ct_lower: card_types_list.append("creature")
@@ -4828,14 +6210,17 @@ class CreateTokenEffect(AbilityEffect):
             type_line = "Token "
             if self.is_legendary: type_line += "Legendary "
             # Order types conventionally
-            type_order = {"artifact": 1, "enchantment": 2, "creature": 3}
+            type_order = {
+                "artifact": 1, "enchantment": 2, "land": 3,
+                "creature": 4,
+            }
             sorted_types = sorted([ct for ct in card_types_list if ct != "token"], key=lambda t: type_order.get(t, 99))
             type_line += " ".join(t.capitalize() for t in sorted_types) + " "
             if subtypes_list:
                  type_line += f"— {' '.join(sorted(list(set(subtypes_list))))}"
 
             token_data = {
-                "name": f"{base_type} Token",
+                "name": self.token_name or f"{base_type} Token",
                 "type_line": type_line.strip(),
                 "card_types": list(set(card_types_list)),
                 "subtypes": sorted(list(set(subtypes_list))),
@@ -6907,6 +8292,33 @@ class ShuffleGraveyardEffect(AbilityEffect):
         return did
 
 
+class UnpreventableDamageEffect(AbilityEffect):
+    """Make all damage unpreventable for the rest of the current turn."""
+
+    def __init__(self, condition=None):
+        super().__init__("Damage can't be prevented this turn", condition)
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        re_sys = getattr(game_state, 'replacement_effects', None)
+        if not re_sys:
+            return False
+
+        # This continuous rule survives its resolving spell leaving the
+        # stack. Keep the originating card only as provenance; source-based
+        # battlefield cleanup must not remove the end-of-turn marker.
+        re_sys.register_effect({
+            'event_type': 'DAMAGE_PREVENTION_RULE',
+            'source_id': None,
+            'origin_source_id': source_id,
+            'controller_id': controller,
+            'duration': 'end_of_turn',
+            'stops_damage_prevention': True,
+            'description': self.effect_text,
+        })
+        logging.debug("Registered global unpreventable-damage rule until end of turn.")
+        return True
+
+
 class PreventDamageEffect(AbilityEffect):
     """Register a damage-prevention replacement (fog / prevention shields).
 
@@ -6958,6 +8370,7 @@ class PreventDamageEffect(AbilityEffect):
             'condition': _condition,
             'source_id': source_id,
             'duration': 'end_of_turn',
+            'is_damage_prevention': True,
             'description': self.effect_text,
         })
         logging.debug(f"Registered prevention: {self.effect_text}")
@@ -7014,15 +8427,38 @@ class ScryEffect(AbilityEffect):
         return True # Initiated scry choice process successfully
 
 class SurveilEffect(AbilityEffect):
-    def __init__(self, count=1, condition=None):
+    def __init__(self, count=1, condition=None, count_expr=None):
         super().__init__(f"Surveil {count}", condition)
-        self.count = count
+        self.base_count = count
+        # ``Surveil X, where X is the number of ...`` is counted when the
+        # instruction resolves, rather than when the spell is cast.
+        self.count_expr = count_expr
 
     def _apply_effect(self, game_state, source_id, controller, targets):
         """Initiate the surveil process by setting the game state."""
         if not controller or "library" not in controller:
-            logging.debug(f"Cannot Surveil: Player {controller.get('name', 'Unknown')} or library invalid.")
+            player_name = (controller or {}).get('name', 'Unknown')
+            logging.debug(
+                f"Cannot Surveil: Player {player_name} or library invalid.")
             return False
+
+        has_chosen_x = isinstance(targets, dict) and 'X' in targets
+        if self.count_expr:
+            effective_count = game_state.count_dynamic_quantity(
+                self.count_expr, controller)
+            logging.debug(
+                "SurveilEffect: dynamic count %r = %s.",
+                self.count_expr, effective_count)
+        elif self.base_count == 'x' and has_chosen_x:
+            effective_count = targets.get('X', 0)
+            logging.debug(
+                "SurveilEffect: Using X=%s for surveil count.",
+                effective_count)
+        else:
+            effective_count = text_to_number(self.base_count)
+
+        if effective_count <= 0:
+            return True # Surveil 0 is valid, does nothing
 
         # Looking at zero cards is a legal no-op.  A following instruction
         # still happens; for Prismari Charm that means attempting its draw and
@@ -7030,8 +8466,7 @@ class SurveilEffect(AbilityEffect):
         if not controller["library"]:
             return True
 
-        count = min(self.count, len(controller["library"]))
-        if count <= 0: return True # Surveil 0 is valid, does nothing
+        count = min(effective_count, len(controller["library"]))
 
         surveiled_cards = controller["library"][:count]
         if not surveiled_cards: return False
@@ -8670,8 +10105,21 @@ class ExileLibrariesExceptBottomEffect(AbilityEffect):
 
 class ExileEffect(AbilityEffect):
     """Effect that exiles permanents or cards from zones."""
-    def __init__(self, target_type="permanent", zone="battlefield", condition=None):
-        super().__init__(f"Exile target {target_type}" + (f" from {zone}" if zone != "battlefield" else ""), condition)
+    def __init__(self, target_type="permanent", zone="battlefield",
+                 condition=None, optional=False, max_targets=1):
+        self.optional = bool(optional)
+        self.min_targets = 0 if self.optional else 1
+        self.max_targets = max(1, int(max_targets))
+        count_words = {1: "one", 2: "two", 3: "three"}
+        target_phrase = "target"
+        if self.optional:
+            target_phrase = (
+                f"up to {count_words.get(self.max_targets, self.max_targets)} "
+                "target")
+        super().__init__(
+            f"Exile {target_phrase} {target_type}"
+            + (f" from {zone}" if zone != "battlefield" else ""),
+            condition)
         self.target_type = target_type.lower()
         self.zone = zone.lower() # graveyard, hand, library, battlefield, stack
         self.requires_target = True
@@ -8706,7 +10154,16 @@ class ExileEffect(AbilityEffect):
             elif target_zone: # Found, but wrong zone
                  logging.debug(f"Exile target {target_id} found in {target_zone}, expected {self.zone}. Skipping.")
 
-        if not targets_to_exile: return False
+        if not targets_to_exile:
+            # Choosing zero for an explicit "up to" instruction is a
+            # successful no-op.  A mandatory target that disappeared after
+            # commitment is likewise handled by the validated lifecycle
+            # snapshot; an arbitrary empty mandatory payload still fails in
+            # AbilityEffect.apply before reaching this branch.
+            if not self._contains_target_id(targets):
+                return self._allows_empty_target_set(
+                    getattr(self, "resolution_context", {}))
+            return False
 
         exiled_count = 0
         for card_id, owner, current_zone in targets_to_exile:

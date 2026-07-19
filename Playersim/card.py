@@ -816,9 +816,17 @@ class Card:
             processed_text = re.sub(r'\s*\([^()]*?\)\s*', ' ', oracle_text).strip()
             processed_text = re.sub(r'\s+', ' ', processed_text)
 
+            # A Class level marker is one adjacent mana-symbol sequence
+            # immediately followed by ``: Level N``.  Starting at an earlier
+            # cost embedded in an ability (equip {2}, ward {1}, or "cost {1}
+            # less") would consume and truncate that unlocked ability row.
+            mana_cost_sequence = r"(?:\{[^{}]+\})+"
+
             # --- Parse Base Level (Level 1) ---
             # Find text before the first level-up indicator (e.g., "{COST}: Level 2")
-            level_2_marker_match = re.search(r"(\{.+?\}:\s*Level\s+2)", processed_text)
+            level_2_marker_match = re.search(
+                rf"{mana_cost_sequence}:\s*Level\s+2\b",
+                processed_text, re.IGNORECASE)
             base_text = processed_text
             if level_2_marker_match:
                 base_text = processed_text[:level_2_marker_match.start()].strip()
@@ -838,12 +846,14 @@ class Card:
             # --- Parse Higher Levels ---
             # Regex to find COST: Level N followed by ability text until next marker or end
             # Pattern explanation:
-            # (\{.+?\}):\s*       # Group 1: Capture the cost like {3}{U}:
+            # ((?:\{[^{}]+\})+):  # Group 1: Capture the cost like {3}{U}:
             # Level\s+(\d+)       # Group 2: Capture the level number
             # \s*                  # Optional whitespace
             # ([\s\S]*?)          # Group 3: Capture the abilities text (non-greedy)
-            # (?=(\{.+?\}:\s*Level|\Z)) # Lookahead: Stop before the next level marker or end of string
-            higher_level_pattern = r"(\{.+?\}):\s*Level\s+(\d+)\s*([\s\S]*?)(?=(?:\{.+?\}:\s*Level\s+\d)|\Z)"
+            # Look ahead to the next exact level marker or end of string.
+            higher_level_pattern = (
+                rf"({mana_cost_sequence}):\s*Level\s+(\d+)\s*"
+                rf"([\s\S]*?)(?={mana_cost_sequence}:\s*Level\s+\d+\b|\Z)")
             higher_level_matches = re.finditer(higher_level_pattern, processed_text, re.IGNORECASE)
 
             for match in higher_level_matches:

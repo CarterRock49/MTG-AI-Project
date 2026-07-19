@@ -315,6 +315,9 @@ class ColorstormRuntimeTest(unittest.TestCase):
         token = game_state._safe_get_card(token_id)
         self.assertEqual(token.name, "Colorstorm Stallion")
         self.assertEqual((token.power, token.toughness), (3, 3))
+        self.assertEqual(stallion.colors, [0, 1, 0, 1, 0])
+        self.assertEqual(token.colors, stallion.printed("colors"))
+        self.assertEqual(token.printed("colors"), [0, 1, 0, 1, 0])
 
 
 if __name__ == "__main__":

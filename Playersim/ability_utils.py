@@ -25,6 +25,27 @@ def has_damage_prevention_instruction(effect_text):
         return True
     return False
 
+
+def has_unpreventable_damage_instruction(effect_text):
+    """Recognize a global, end-of-turn unpreventable-damage instruction.
+
+    Persistent static abilities and scoped wording (for example, ``that
+    damage can't be prevented``) need a different model and deliberately do
+    not enter this temporary global-effect path.
+    """
+    for clause in re.split(r"[.\n;]+", str(effect_text or '').lower()):
+        normalized = clause.strip()
+        if not any(duration in normalized for duration in (
+                'this turn', 'until end of turn')):
+            continue
+        if re.fullmatch(
+                r"(?:until end of turn,\s*)?damage\s+"
+                r"(?:can(?:not|['\u2019]t)|may not)\s+be\s+prevented"
+                r"(?:\s+(?:this turn|until end of turn))?",
+                normalized):
+            return True
+    return False
+
 def is_beneficial_effect(effect_text):
     # (Keep existing implementation)
     """
@@ -281,6 +302,35 @@ class EffectFactory:
     @classmethod
     def unregister_card_override(cls, card_name):
         return cls._CARD_OVERRIDES.pop(str(card_name).strip().casefold(), None)
+
+    @staticmethod
+    def _restore_printed_name_case(name):
+        """Recover ordinary Oracle name casing after trigger normalization.
+
+        TriggeredAbility stores its parsed effect lowercase. Preserve already
+        cased input, and otherwise title-case significant words while keeping
+        interior articles/conjunctions/prepositions lowercase.
+        """
+        cleaned = str(name or "").strip()
+        if not cleaned or any(character.isupper() for character in cleaned):
+            return cleaned
+        minor_words = {
+            "a", "an", "and", "as", "at", "by", "for", "from", "in",
+            "of", "on", "or", "the", "to", "with",
+        }
+        restored = []
+        for index, word in enumerate(cleaned.split()):
+            core = word.rstrip(",")
+            suffix = word[len(core):]
+            if index and core in minor_words:
+                cased = core
+            else:
+                cased = "-".join(
+                    part[:1].upper() + part[1:]
+                    for part in core.split("-"))
+            restored.append(cased + suffix)
+        return " ".join(restored)
+
     @staticmethod
     def _extract_target_description(effect_text):
         """Helper to find the most specific target description."""
@@ -1395,6 +1445,40 @@ class EffectFactory:
                          r'(?<=\.)\s+(?=(?i:create\s+(?:a|an|one)\s+(?:cursed|monster|royal|sorcerer|young\s+hero|virtuous|wicked)\s+role token\b))|'
                          r'\s*—\s*|\s*\u2014\s*')
         split_text = re.sub(r'\s*\([^()]*\)\s*', ' ', effect_text).strip('. ')
+        # A comma that introduces the characteristics of a named legendary
+        # token is part of the same instruction. Protect that delimiter and
+        # any comma inside the printed name (for example, ``Primo, the
+        # Indivisible``), but leave a comma after ``token`` available to split
+        # a real follow-up action.
+        token_noun_comma_marker = "__TOKEN_NOUN_COMMA__"
+        named_token_preamble = re.compile(
+            r"(?P<prefix>\bcreate(?:s)?\s+)"
+            r"(?P<name>(?:(?!\bcreate(?:s)?\b|[.;\n]).)+?),"
+            r"(?P<descriptor>\s+(?:a|an)\s+legendary\s+\d+/\d+\b)",
+            re.IGNORECASE)
+
+        def protect_named_token_preamble(match):
+            protected_name = match.group("name").replace(
+                ",", token_noun_comma_marker)
+            return (match.group("prefix") + protected_name
+                    + token_noun_comma_marker + match.group("descriptor"))
+
+        split_text = named_token_preamble.sub(
+            protect_named_token_preamble, split_text)
+
+        # A color conjunction inside a token's characteristic noun phrase is
+        # not an instruction boundary. Protect only the ``and`` between two
+        # color words when it is downstream of ``create`` and upstream of the
+        # corresponding ``token`` noun. Genuine sequences such as ``create a
+        # token and draw a card`` still reach the ordinary conjunction split.
+        token_color_and_marker = "__TOKEN_COLOR_AND__"
+        color_word = r"(?:white|blue|black|red|green|colorless)"
+        token_color_conjunction = re.compile(
+            rf"(\bcreate(?:s)?\b[^.;]*?\b{color_word})\s+and\s+"
+            rf"({color_word}\b)(?=[^.;]*\btokens?\b)",
+            re.IGNORECASE)
+        split_text = token_color_conjunction.sub(
+            rf"\1 {token_color_and_marker} \2", split_text)
         parts = re.split(split_pattern, split_text)
         # Carry only an explicit leading player subject into a grammatically
         # subjectless player-action fragment.  This repairs shapes such as
@@ -1405,7 +1489,8 @@ class EffectFactory:
             r"^(?:loses?|gains?|draws?|discards?|mills?|sacrifices?)\b",
             re.IGNORECASE)
         for raw_part in parts:
-            part = raw_part.strip()
+            part = raw_part.replace(token_color_and_marker, "and")
+            part = part.replace(token_noun_comma_marker, ",").strip()
             if not part:
                 continue
             subject_match = re.match(
@@ -1432,6 +1517,7 @@ class EffectFactory:
             AddManaEffect, ControlEffect,
             RegenerateEffect, DigEffect, PutOnLibraryEffect,
             ShuffleGraveyardEffect, PreventDamageEffect,
+            UnpreventableDamageEffect,
             AnimateLandEffect, RevealHandEffect)
         from .card import Card  # for ALL_KEYWORDS in the keyword-grant branch
 
@@ -1445,6 +1531,13 @@ class EffectFactory:
             clause_clean = re.sub(r'\s*\([^()]*?\)\s*', ' ', clause).strip() # Basic reminder text removal
             clause_lower = clause_clean.lower()
             created_effect = None
+
+            # This is a rules-changing instruction, not a prevention shield.
+            # Append it independently so a combined clause such as
+            # Impractical Joke's can still produce its later DamageEffect.
+            if has_unpreventable_damage_instruction(clause_lower):
+                effects.append(UnpreventableDamageEffect())
+
             source_sacrifice = re.search(
                 r"\bsacrifice\s+this\s+"
                 r"(artifact|battle|creature|enchantment|land|permanent|token)\b",
@@ -1561,6 +1654,11 @@ class EffectFactory:
                     target_type = "each creature you control"
                 elif re.search(r"\beach creatures?\b", clause_lower):
                     target_type = "each creature"
+                elif re.search(
+                        r"\b(?:creature\s+(?:or|and/or)\s+planeswalker|"
+                        r"planeswalker\s+(?:or|and/or)\s+creature)\b",
+                        clause_lower):
+                    target_type = "creature_or_planeswalker"
                 elif "creature or player" in target_desc or "any target" in target_desc: target_type="any target"
                 elif "each opponent" in target_desc: target_type="each opponent"
                 elif "each creature" in target_desc: target_type="each creature"
@@ -1620,7 +1718,19 @@ class EffectFactory:
                      r"(battlefield|graveyard|hand|library|stack|exile)\b",
                      clause_lower)
                  zone = zone_match.group(1) if zone_match else "battlefield"
-                 created_effect = ExileEffect(target_type=target_type, zone=zone)
+                 optional_match = re.search(
+                     r"\bup to\s+(one|two|three|\d+)\s+target\b",
+                     clause_lower)
+                 optional_count = 1
+                 if optional_match:
+                     count_token = optional_match.group(1)
+                     optional_count = (
+                         int(count_token) if count_token.isdigit()
+                         else {"one": 1, "two": 2, "three": 3}[count_token])
+                 created_effect = ExileEffect(
+                     target_type=target_type, zone=zone,
+                     optional=bool(optional_match),
+                     max_targets=optional_count)
 
             # Printed-value token copy of a chosen permanent.  This must
             # precede the generic token branch, which otherwise invents a
@@ -1808,7 +1918,15 @@ class EffectFactory:
             # Create Token
             elif re.search(r"\b(create(?:s)?)\b", clause_lower) and "token" in clause_lower:
                  count_match = re.search(r"create(?:s)?\s+(a|an|one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+", clause_lower)
-                 count = text_to_number(count_match.group(1)) if count_match else 1
+                 that_many_count = bool(re.search(
+                     r"\bcreate(?:s)?\s+that many\b", clause_lower))
+                 # A pronoun count is never implicitly one. Its antecedent
+                 # belongs to the resolving event (discarded cards, damage,
+                 # mana symbols, and so on), so CreateTokenEffect resolves it
+                 # from the frozen context or fails closed.
+                 count = (0 if that_many_count else
+                          text_to_number(count_match.group(1))
+                          if count_match else 1)
                  pt_match = re.search(r"(\d+)/(\d+)", clause_lower)
                  power, toughness = (safe_int(pt_match.group(1)), safe_int(pt_match.group(2))) if pt_match else (1, 1)
 
@@ -1833,6 +1951,91 @@ class EffectFactory:
                  if not colors: # Infer from mana cost if token has one (rare)
                       pass
 
+                 # Keep a printed token name separate from its permanent
+                 # types. Stop before characteristic riders such as "that is
+                 # every basic land type" or "with flying".
+                 token_name = None
+                 explicit_card_types = None
+                 explicit_subtypes = None
+                 created_named_token_match = re.search(
+                     r"\bcreate(?:s)?\s+"
+                     r"(?P<name>(?:(?!\bcreate(?:s)?\b|[.;\n]).)+?),\s+"
+                     r"(?:a|an)\s+legendary\s+"
+                     r"(?P<power>\d+)/(?P<toughness>\d+)\s+"
+                     r"(?P<descriptor>.+?)\s+creature\s+tokens?\b",
+                     clause_clean, re.IGNORECASE)
+                 if created_named_token_match:
+                     token_name = EffectFactory._restore_printed_name_case(
+                         created_named_token_match.group("name"))
+                     power = safe_int(
+                         created_named_token_match.group("power"))
+                     toughness = safe_int(
+                         created_named_token_match.group("toughness"))
+                     descriptor_words = re.findall(
+                         r"[A-Za-z][A-Za-z'\-]*",
+                         created_named_token_match.group("descriptor"))
+                     explicit_card_types = ["creature"]
+                     explicit_subtypes = [
+                         word.lower() for word in descriptor_words
+                         if word.lower() not in known_colors
+                         and word.lower() != "and"]
+
+                 # Generic creature-token descriptors may contain any number
+                 # of printed subtypes (``Human Soldier``, ``Dinosaur
+                 # Dragon``). The old one-word look-behind below retained
+                 # only the final word. Parse the complete characteristic
+                 # phrase and exclude only grammar/card-type modifiers; this
+                 # also preserves the named/multicolor path above.
+                 if explicit_subtypes is None:
+                     generic_creature_match = re.search(
+                         r"\bcreate(?:s)?\s+"
+                         r"(?:a|an|one|two|three|four|five|six|seven|"
+                         r"eight|nine|ten|\d+|x|that many)\s+"
+                         r"(?P<descriptor>.+?)\s+creature\s+tokens?\b",
+                         clause_clean, re.IGNORECASE)
+                     if generic_creature_match:
+                         descriptor_words = re.findall(
+                             r"[A-Za-z][A-Za-z'\-]*",
+                             generic_creature_match.group("descriptor"))
+                         descriptor_word_set = {
+                             word.casefold() for word in descriptor_words}
+                         token_descriptor_modifiers = {
+                             "a", "an", "and", "artifact", "colorless",
+                             "enchantment", "legendary", "tapped", "the",
+                             *known_colors,
+                         }
+                         parsed_subtypes = [
+                             word.lower() for word in descriptor_words
+                             if word.lower() not in token_descriptor_modifiers]
+                         if parsed_subtypes:
+                             explicit_subtypes = parsed_subtypes
+                             explicit_card_types = ["creature"]
+                             for additional_type in (
+                                     "artifact", "enchantment"):
+                                 if additional_type in descriptor_word_set:
+                                     explicit_card_types.append(
+                                         additional_type)
+                 named_token_match = re.search(
+                     r"\btokens?\s+named\s+(.+?)"
+                     r"(?=\s+(?:that|with)\b|[.,;]|$)",
+                     clause_clean, re.IGNORECASE)
+                 if named_token_match and token_name is None:
+                     # TriggeredAbility stores its parsed effect lowercase, so
+                     # restore ordinary printed-name capitalization here.
+                     token_name = EffectFactory._restore_printed_name_case(
+                         named_token_match.group(1))
+
+                 if re.search(r"\bland\s+tokens?\b", clause_lower):
+                     explicit_card_types = ["land"]
+                     # Card uses numeric P/T fields for every object; zero is
+                     # the neutral representation for a noncreature token.
+                     power, toughness = 0, 0
+                     if "every basic land type" in clause_lower:
+                         explicit_subtypes = [
+                             "plains", "island", "swamp", "mountain",
+                             "forest",
+                         ]
+
                  # Extract creature type/name - This is the hardest part generically
                  token_name_type = "Creature" # Default
                  # Remove count, p/t, colors, keywords text to isolate name/type text
@@ -1841,29 +2044,36 @@ class EffectFactory:
                  if pt_match: text_for_type = text_for_type.replace(pt_match.group(0), "")
                  if kw_match: text_for_type = text_for_type.replace(kw_match.group(0), "")
                  for color_word in known_colors: text_for_type = text_for_type.replace(color_word,"")
-                 # Try to find "creature token named X", or "X creature token", or "TYPE token"
-                 named_match = re.search(r"token(?:s)?\s+named\s+([\w\s]+)", text_for_type)
-                 if named_match: token_name_type = named_match.group(1).strip().capitalize()
-                 else:
-                     type_match = re.search(r"(\w+)\s+(artifact\s+)?(creature|artifact|treasure|food|clue)\s+token", text_for_type) # Basic common types
-                     if type_match:
-                          prefix = type_match.group(1)
-                          base = type_match.group(3)
-                          if prefix and prefix not in ['a','an','the']: token_name_type = prefix.capitalize()
-                          elif base: token_name_type = base.capitalize()
-                          # Refine: Might need better identification based on position relative to P/T etc.
+                 # Try to find "X creature token" or another common TYPE
+                 # token. A printed token name is carried independently above.
+                 type_match = re.search(r"(\w+)\s+(artifact\s+)?(creature|artifact|treasure|food|clue)\s+token", text_for_type) # Basic common types
+                 if type_match:
+                      prefix = type_match.group(1)
+                      base = type_match.group(3)
+                      if prefix and prefix not in ['a','an','the']: token_name_type = prefix.capitalize()
+                      elif base: token_name_type = base.capitalize()
+                      # Refine: Might need better identification based on position relative to P/T etc.
 
                  # Determine final type line components
                  is_legendary = "legendary" in clause_lower
                  # "for each X" scales the token count at resolution (Domain
                  # counts, permanents you control, etc.).
-                 count_expr = None
+                 count_expr = "that many" if that_many_count else None
                  for_each_match = re.search(r"tokens?\s+for each\s+(.+?)(?:\.|,|$)", clause_lower)
                  if for_each_match:
                      count_expr = for_each_match.group(1).strip()
                  # ... construct full token_data dict for the game state ...
                  # Using simplified CreateTokenEffect for now
-                 created_effect = CreateTokenEffect(power, toughness, token_name_type, count, keywords, colors=colors, is_legendary=is_legendary, count_expr=count_expr)
+                 created_effect = CreateTokenEffect(
+                     power, toughness, token_name_type, count, keywords,
+                     colors=colors, is_legendary=is_legendary,
+                     count_expr=count_expr,
+                     enters_tapped=bool(re.search(
+                         r"\bcreate(?:s)?\b.*\btapped\b.*\btokens?\b",
+                         clause_lower)),
+                     token_name=token_name,
+                     card_types=explicit_card_types,
+                     subtypes=explicit_subtypes)
 
 
             # A source-bound "this card" instruction is not targeted and
@@ -2043,7 +2253,16 @@ class EffectFactory:
                     # Refine target_type based on target_desc (also check the
                     # clause itself: adjectives like "attacking" make the
                     # extracted description drop the "creature" noun).
-                    if re.search(r"\bthis creature gets\b", clause_lower):
+                    source_subjects = {
+                        source_key,
+                        source_key.split(",", 1)[0].strip(),
+                    } - {""}
+                    names_source = any(re.match(
+                        rf"^\s*{re.escape(subject)}\s+gets\b",
+                        clause_lower)
+                        for subject in source_subjects)
+                    if (re.search(r"\bthis creature gets\b", clause_lower)
+                            or names_source):
                         target_type = "self"
                     elif ("target creature" in target_desc
                             or ("target" in clause_lower and "creature" in target_desc)
@@ -2416,10 +2635,22 @@ class EffectFactory:
             elif re.search(r"\bsurveil\b", clause_lower):
                  match = re.search(r"surveil (\d+|x)\b", clause_lower)
                  count = 1 # Default Surveil 1
+                 count_expr = None
                  if match:
                       count_str = match.group(1)
                       count = 'x' if count_str == 'x' else text_to_number(count_str)
-                 created_effect = SurveilEffect(count) # Pass 'x' or number
+                 if count == 'x':
+                      # The comma splitter separates ``Surveil X`` from its
+                      # rules definition, so recover the definition from the
+                      # complete effect text and evaluate it at resolution.
+                      count_expr_match = re.search(
+                          r"\bwhere\s+x\s+is\s+the\s+number\s+of\s+"
+                          r"(.+?)(?=[.;]|$)",
+                          effect_text, re.IGNORECASE)
+                      if count_expr_match:
+                           count_expr = count_expr_match.group(1).strip()
+                 created_effect = SurveilEffect(
+                     count, count_expr=count_expr) # Pass 'x' or number
 
             # Life Drain (Checked earlier with em dash fix)
 

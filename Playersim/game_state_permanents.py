@@ -480,10 +480,16 @@ class GameStatePermanentsMixin:
         try:
             _pr = original_card.printed if hasattr(original_card, 'printed') else \
                 (lambda attr, default=None: getattr(original_card, attr, default))
+            printed_colors = copy.deepcopy(_pr("colors", [0] * 5))
             copyable_values = {
                 "name": _pr("name"),
                 "mana_cost": _pr("mana_cost"),
-                "color_identity": copy.deepcopy(_pr("colors", [0] * 5)),  # 5-dim vector
+                # Card._extract_colors consumes WUBRG letters. Passing its
+                # internal five-number color vector here made every copied
+                # colored permanent construct as colorless.
+                "color_identity": [
+                    letter for letter, present
+                    in zip("WUBRG", printed_colors) if present],
                 "card_types": copy.deepcopy(_pr("card_types", [])),
                 "subtypes": copy.deepcopy(_pr("subtypes", [])),
                 "supertypes": copy.deepcopy(_pr("supertypes", [])),
