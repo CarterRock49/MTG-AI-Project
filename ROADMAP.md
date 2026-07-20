@@ -711,26 +711,32 @@ v3 throughput and memory alongside behavior telemetry.
 
 ## Current execution plan
 
-### Now — verify and run the Round 7.92 pinned canary
+### Now — verify and run the Round 7.95 pinned canary
 
-1. Keep the now-green delivery gate mandatory for the mixed-pool ratchet,
-   strict fidelity counters, composite-payment transaction, canary validation,
-   and paired qualification interval. Do not launch if that gate regresses.
+1. Keep the now-green delivery gate mandatory: golden scenarios, discovered
+   unit tests, runtime and training smoke, default invariant fuzz, and canary
+   validation, including the 7.95 ride-along guards (scenario 601.2f
+   mask/observation affordability agreement and the restored per-turn
+   game_state analytics). Do not launch if that gate regresses.
 2. Launch a fresh Standard candidate with
-   `--canary-config round-7.92 --run-name round-7.92-combat-v5-v2`. The named
-   configuration checks reward `discounted-state-potential-v6`, the full
-   resolved `combat-v5` hash, feature width/device class, 1M timesteps, eight
-   environments, 100k periodic
+   `--canary-config round-7.95 --run-name round-7.95-combat-v7-v1`. The named
+   configuration checks reward `tempo-graded-potential-v1` (including its
+   0.005 per-step time cost), the full resolved `combat-v7` hash, feature
+   width/device class, 2M timesteps, eight environments, 100k periodic
    evaluation with 64 games (32 seat-swapped pairs), 50k checkpoints, training
-   seed `20260715`, and evaluation seed `21260715`.
-   Do not resume an older curriculum checkpoint.
-3. Confirm `race` and `bridge` satisfy their full-strength profile floors and
-   reach epsilon zero before mastery. In the terminal `full_pool` stage,
-   interleaved novice games must not starve the qualifying scripted window:
-   epsilon must reach zero by 750,000 trainer timesteps, followed by at least
-   24 full-strength scripted `full_pool` outcomes before the 1M-step run ends.
-   Treat either miss as a failed canary acceptance criterion. A stage deadline
-   transition must be reported as `deadline`.
+   seed `20260715`, and evaluation seed `21260715`. Do not resume an older
+   curriculum or reward checkpoint; pre-7.94 canaries fail closed across the
+   reward-contract boundary by design.
+3. Watch the halved scripted ladder resolve where round 7.94 could not:
+   `bridge` and `full_pool` scripted epsilon now steps 0.10 per confident
+   48-episode Wilson window (the novice ramp keeps 0.25), placing rungs at
+   0.30 and 0.10 inside the cliff that ping-ponged 0.40 <-> 0.20. Acceptance
+   requires `race` and `bridge` to satisfy their full-strength profile floors,
+   the `full_pool` scripted epsilon to reach zero with enough horizon left to
+   accumulate a full-strength scripted qualifying window before the 2M-step
+   run ends, and interleaved novice games not to starve that window. Treat a
+   miss as a failed canary acceptance criterion. A stage deadline transition
+   must be reported as `deadline`.
 4. At each 100k boundary, compare checkpoints through `evaluations.json`.
    Require balanced case/seat exposure, zero reward-sign failures, zero strict
    fidelity counters (including effect-continuation failures and lost-spell
@@ -742,6 +748,12 @@ v3 throughput and memory alongside behavior telemetry.
    Treat source, runtime-library, or specific-GPU differences recorded in the
    manifest as audit variables; the selector records but does not constrain
    them.
+6. Sustained oscillation on a 0.10 rung is a finding, not a tuning miss: it
+   would mean the plateau is not ratchet granularity. If the finer ladder also
+   plateaus, the designated follow-ups are the evaluation timeout tail (10-15%
+   of games, scored as losses by the qualification gate) on the reward side,
+   then the pilot-side levers from Round 7.91 (matchup-weighted scheduling
+   first) — not further horizon extensions.
 
 ### Next — qualify and calibrate Standard
 
@@ -943,7 +955,7 @@ The project is complete only when all of these are true:
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
 mistake. The practical rule is: **start fresh from the Round 7.89 Observation
-v3 boundary using the current Round 7.92 reward/curriculum contract.**
+v3 boundary using the current Round 7.95 reward/curriculum contract.**
 
 | Minimum round | Incompatible change |
 | --- | --- |
@@ -965,6 +977,9 @@ v3 boundary using the current Round 7.92 reward/curriculum contract.**
 | 7.90 | Analytics memory-redundancy refactor, validated behavior-neutral against the 7.89 canary trajectory |
 | 7.91 | Annealed opponent handicap (`combat-v4`), stage turn limits, graded turn-limit reward v6, doubled damage-progress potential, and the paired-seat observation audit |
 | 7.92 | `combat-v5` (goldfish 25 turns, full-pool handicap ramp), mixed-profile-safe terminal ratchet windows, strict recovery fidelity counters, pinned canary seeds/configuration, and pair-aware lower-bound qualification |
+| 7.93 | `combat-v6`: two-way 95% Wilson-interval handicap ratchet with 48-episode windows |
+| 7.94 | `tempo-graded-potential-v1` reward contract: graded win speed and stall penalties, negative draws, per-step time cost, offense-dominant potential |
+| 7.95 | `combat-v7` halved scripted ratchet step (0.10 rungs) and the 2M-timestep canary horizon |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing
