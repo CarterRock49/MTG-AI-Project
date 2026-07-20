@@ -274,9 +274,32 @@ class AbilityHandler:
                 f"{door_to_unlock_num} of {room_card.name}")
             return False
 
+        return self.complete_door_unlock(
+            room_id, controller, door_to_unlock_num,
+            cost_paid=door_cost_str)
+
+    def complete_door_unlock(self, room_id, controller, door_number,
+                             cost_paid=None):
+        """Unlock an already-paid (or free) door through the shared pipeline.
+
+        Both the public paid unlock action and cost-free effect unlocks
+        (Ghostly Dancers' "unlock a locked door" mode) route here so layer
+        recomputation, unlock events, and chapter advancement cannot drift
+        between the two paths.
+        """
+        gs = self.game_state
+        room_card = gs._safe_get_card(room_id)
+        if (not room_card
+                or room_id not in controller.get("battlefield", [])
+                or door_number not in (1, 2)):
+            return False
+        door_data = getattr(room_card, f"door{door_number}", None)
+        if not door_data or door_data.get("unlocked", False):
+            return False
+
         # Unlock the door (Update the card's state)
         door_data['unlocked'] = True
-        logging.info(f"Unlocked Door {door_to_unlock_num} for Room {room_card.name}")
+        logging.info(f"Unlocked Door {door_number} for Room {room_card.name}")
 
         # Continuous effects from the newly unlocked face begin functioning
         # immediately. Recompute them before trigger conditions inspect the
@@ -296,10 +319,10 @@ class AbilityHandler:
 
         # --- Prepare context for triggers ---
         context = {
-            "door_number": door_to_unlock_num,
+            "door_number": door_number,
             "room_id": room_id,
             "controller": controller,
-            "cost_paid": door_cost_str,
+            "cost_paid": cost_paid,
             "fully_unlocked": fully_unlocked
         }
 
@@ -307,7 +330,7 @@ class AbilityHandler:
         # Generic door unlocked event
         self.check_abilities(room_id, "DOOR_UNLOCKED", context)
         # Specific door unlocked event
-        self.check_abilities(room_id, f"DOOR{door_to_unlock_num}_UNLOCKED", context)
+        self.check_abilities(room_id, f"DOOR{door_number}_UNLOCKED", context)
         # Room fully unlocked event
         if fully_unlocked:
             self.check_abilities(room_id, "ROOM_FULLY_UNLOCKED", context)
@@ -338,7 +361,7 @@ class AbilityHandler:
         # Let game loop handle layer application
 
         return True
-    
+
 
     def _parse_text_with_patterns(self, text, patterns, ability_type, card_id, card, abilities_list):
             """
@@ -2181,6 +2204,35 @@ class AbilityHandler:
          # Convert defaultdict back to regular dict for consistency if needed
          return dict(produced)
     
+    def _trigger_doubling_count(self, controller):
+        """Count live "triggers an additional time" sources controller controls.
+
+        Fractured Realm's sentence is flagged at StaticAbility construction
+        (``is_trigger_doubling``); activity is read live so a locked door or
+        an ability-stripped source never doubles anything.
+        """
+        gs = self.game_state
+        layer_system = getattr(gs, 'layer_system', None)
+        count = 0
+        for source_id in controller.get('battlefield', []):
+            registered = self.registered_abilities.get(source_id)
+            if not registered:
+                continue
+            if (layer_system
+                    and layer_system.source_has_lost_all_abilities(source_id)):
+                continue
+            source_card = None
+            for registered_ability in registered:
+                if not getattr(registered_ability, 'is_trigger_doubling',
+                               False):
+                    continue
+                if source_card is None:
+                    source_card = gs._safe_get_card(source_id)
+                if self._room_ability_is_active(
+                        registered_ability, source_card):
+                    count += 1
+        return count
+
     def _room_ability_is_active(self, ability, source_card=None):
         """Return whether a face-scoped Room ability currently functions."""
         door_number = getattr(ability, 'room_door_number', None)
@@ -2263,6 +2315,9 @@ class AbilityHandler:
 
         # Iterate through collected potential triggers
         queued_trigger_count = 0
+        # Trigger-doubling sources are counted at most once per controller
+        # per event so the queue-time check stays off the hot path.
+        doubling_counts = {}
         for card_id, ability, controller, zone_name in abilities_to_check:
              if not isinstance(ability, TriggeredAbility): continue
 
@@ -2391,6 +2446,30 @@ class AbilityHandler:
                          self.active_triggers.append((ability, controller, context_for_queue)) # Store context too
                          queued_trigger_count += 1
                          # logging.debug(f"Queued trigger: '{ability.trigger_condition}' from {getattr(source_card,'name','Unknown')} ({card_id} in {zone_name}) for {controller.get('name','?')}")
+                         # Fractured Realm: a triggered ability of a
+                         # permanent this controller controls triggers one
+                         # additional time per live doubling source.  The
+                         # battlefield-home check covers LKI dies/exile
+                         # triggers; hand/graveyard-zone abilities and
+                         # cast-from-stack self-triggers are not permanent
+                         # triggers and stay single.
+                         doubles_as_permanent_trigger = (
+                             str(getattr(ability, 'zone', 'battlefield')
+                                 ).lower() == 'battlefield'
+                             and zone_name in (
+                                 'battlefield', 'graveyard', 'exile'))
+                         if doubles_as_permanent_trigger:
+                             controller_key = id(controller)
+                             if controller_key not in doubling_counts:
+                                 doubling_counts[controller_key] = (
+                                     self._trigger_doubling_count(controller))
+                             for _ in range(doubling_counts[controller_key]):
+                                 doubled_context = trigger_check_context.copy()
+                                 doubled_context['original_zone'] = zone_name
+                                 doubled_context['trigger_doubled'] = True
+                                 self.active_triggers.append(
+                                     (ability, controller, doubled_context))
+                                 queued_trigger_count += 1
                      else:
                          logging.warning(f"Trigger source {card_id} has no valid controller, cannot queue trigger.")
              except Exception as e:
@@ -2620,6 +2699,24 @@ class AbilityHandler:
                 and gs.choice_context.get('type') == 'order_triggers'):
             gs.start_pending_stack_target_choice()
 
+    @staticmethod
+    def _inline_or_trigger_modes(effect_text):
+        """Recognize the bounded "<do A> or unlock a locked door" modal family.
+
+        CR 603.3c: a modal trigger's mode is chosen as it is put on the
+        stack.  Only the Room unlock or-template is recognized (Ghostly
+        Dancers); any other inline "or" keeps its single-effect parse so
+        cost choices and type unions cannot be misread as modes.
+        """
+        match = re.fullmatch(
+            r"\s*(?P<first>return\b[^.;•]*?to your hand)\s+or\s+"
+            r"(?P<second>unlock a locked door of a room you control)"
+            r"\s*\.?\s*",
+            str(effect_text or ""), re.IGNORECASE)
+        if not match:
+            return None
+        return [match.group("first").strip(), match.group("second").strip()]
+
     def _push_trigger_to_stack(self, ability, controller, context_at_trigger):
         """Put a single queued trigger onto the stack with its captured context."""
         gs = self.game_state
@@ -2638,6 +2735,9 @@ class AbilityHandler:
         modal_modes = None
         if source_name == "cosmogrand zenith":
             modal_modes, _, _ = self._parse_modal_text(
+                getattr(ability, "effect", ""))
+        if modal_modes is None:
+            modal_modes = self._inline_or_trigger_modes(
                 getattr(ability, "effect", ""))
         pending_choice = getattr(gs, 'choice_context', None)
         if (modal_modes and "selected_trigger_mode" not in context_at_trigger
@@ -2993,6 +3093,20 @@ class AbilityHandler:
 
         # --- Path 1: Use Ability Object (Standard Resolution - if not special trigger) ---
         elif ability and isinstance(ability, Ability):
+            # Victor-style ladders: count this resolution of the exact
+            # printed ability and expose the ordinal to its effects. The
+            # count belongs to resolution (CR 608), so a countered or
+            # removed trigger never advances the ladder.
+            if (isinstance(ability, TriggeredAbility)
+                    and getattr(ability, 'tracks_resolution_count', False)):
+                counts = getattr(gs, 'ability_resolutions_this_turn', None)
+                if counts is None:
+                    counts = {}
+                    gs.ability_resolutions_this_turn = counts
+                ladder_key = (
+                    card_id, getattr(ability, 'trigger_condition', '') or '')
+                counts[ladder_key] = counts.get(ladder_key, 0) + 1
+                context['ability_resolution_ordinal'] = counts[ladder_key]
             # ...(Rest of standard ability resolution remains the same)...
             # --- Target Validation ---
             ability_effect_text = getattr(ability, 'effect_text', effect_text_from_context)

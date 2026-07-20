@@ -1691,16 +1691,66 @@ class EffectFactory:
                 return_zone="battlefield", effect_text=effect_text))
             return effects
 
+        # Victor-style resolution-count ladders bind each sentence to this
+        # turn's Nth resolution of the same printed ability.  Recognized
+        # before clause splitting so the ordinal conditions cannot be
+        # severed from their instructions; each arm parses independently
+        # and only the arm matching the stamped ordinal runs.
+        ladder_text = re.sub(
+            r'\s*\([^()]*\)\s*', ' ', effect_text).strip()
+        ladder = re.search(
+            r"^(?P<first>.+?)\s+if this is the first time this ability has "
+            r"resolved this turn\.\s*"
+            r"if it(?:'|’)s the second time,\s*(?P<second>.+?)\.\s*"
+            r"if it(?:'|’)s the third time,\s*(?P<third>.+?)\.?\s*$",
+            ladder_text, re.IGNORECASE | re.DOTALL)
+        if ladder:
+            from .ability_types import ResolutionCountLadderEffect
+            arms = []
+            for ordinal, arm_text in enumerate(
+                    (ladder.group("first"), ladder.group("second"),
+                     ladder.group("third")), start=1):
+                arm_effects = EffectFactory.create_effects(
+                    arm_text.strip(" ."), targets, source_name)
+                if not arm_effects:
+                    arms = None
+                    break
+                arms.append((ordinal, arm_effects))
+            if arms:
+                effects.append(ResolutionCountLadderEffect(
+                    arms, effect_text=ladder_text))
+                return effects
+
+        # Forgotten Cellar's compound unlock sentence: a turn-scoped
+        # graveyard cast permission linked with a turn-scoped "exile it
+        # instead" replacement.  Recognized before clause splitting because
+        # the splitter severs the replacement's "if" clause from its
+        # instruction.
+        cellar = re.fullmatch(
+            r"you may cast spells from your graveyard this turn,?\s*and\s*"
+            r"if a card would be put into your graveyard from anywhere this "
+            r"turn,\s*exile it instead\.?\s*",
+            ladder_text, re.IGNORECASE)
+        if cellar:
+            from .ability_types import (
+                GraveyardCastThisTurnEffect, GraveyardToExileThisTurnEffect)
+            effects.append(GraveyardCastThisTurnEffect())
+            effects.append(GraveyardToExileThisTurnEffect())
+            return effects
+
         # ``Mill N. You may put ... from among the milled cards`` binds its
         # selection to the exact physical cards moved by the first sentence.
         # Preserve it before commas in a type union can fragment the text.
         linked_mill_text = re.sub(
             r'\s*\([^()]*\)\s*', ' ', effect_text).strip()
         linked_mill = re.search(
-            r"\bmill\s+(\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten)"
-            r"\s+cards?\s*\.\s*you may put\s+(?:a|an|one)\s+(.+?)\s+card\s+"
-            r"from among\s+(?:the\s+)?(?:milled cards?|cards? milled(?: this way)?)\s+"
-            r"into your hand\s*\.?",
+            r"\bmill\s+(?P<count>\d+|x|a|an|one|two|three|four|five|six|seven|eight|nine|ten)"
+            r"\s+cards?\s*"
+            r"(?:\.\s*you may put\s+(?:a|an|one)"
+            r"|,?\s*then\s+return\s+up\s+to\s+(?P<up_to>one|two|three|\d+))"
+            r"\s+(?P<types>.+?)\s+cards?\s+"
+            r"from among\s+(?:the\s+)?(?:milled cards?|cards? milled(?: this way)?|them)\s+"
+            r"(?:into|to) your hand\s*\.?",
             linked_mill_text, re.IGNORECASE | re.DOTALL)
         linked_mill_suffix = (
             linked_mill_text[linked_mill.end():].strip(" .")
@@ -1711,20 +1761,30 @@ class EffectFactory:
                 r"you gain\s+(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten)\s+life",
                 linked_mill_suffix, re.IGNORECASE))
         if linked_mill and supported_mill_suffix:
-            raw_count = linked_mill.group(1).lower()
+            raw_count = linked_mill.group("count").lower()
             count = ('x' if raw_count == 'x'
                      else text_to_number(raw_count))
-            allowed_text = linked_mill.group(2).lower()
+            # Both recognized phrasings are free selections: "you may put
+            # a ..." and "then return up to N ..." allow choosing fewer,
+            # including zero.  A mandatory "then return two ..." keeps
+            # failing closed rather than guessing.
+            raw_up_to = linked_mill.group("up_to")
+            max_selections = (
+                text_to_number(raw_up_to.lower()) if raw_up_to else 1)
+            allowed_text = linked_mill.group("types").lower()
             permanent_types = (
                 "artifact", "battle", "creature", "enchantment", "land",
                 "planeswalker")
             allowed_types = (["permanent"] if "permanent" in allowed_text
                              else [card_type for card_type in permanent_types
                                    if re.search(rf"\b{card_type}s?\b", allowed_text)])
-            if isinstance(count, int) and count > 0 and allowed_types:
+            if (isinstance(count, int) and count > 0 and allowed_types
+                    and isinstance(max_selections, int)
+                    and max_selections > 0):
                 from .ability_types import MillThenChooseEffect
                 effects.append(MillThenChooseEffect(
                     count=count, allowed_types=allowed_types, optional=True,
+                    max_selections=max_selections,
                     effect_text=linked_mill.group(0).strip()))
                 if linked_mill_suffix:
                     effects.extend(EffectFactory.create_effects(
@@ -3019,6 +3079,120 @@ class EffectFactory:
                 if tt not in ("creature", "artifact", "enchantment", "permanent", "land", "planeswalker"):
                     tt = "creature"
                 created_effect = PutOnLibraryEffect(target_type=tt, position=pos)
+
+            # Non-targeted graveyard recovery: "return a/an/one/up to one
+            # <type> card from your graveyard to your hand" chooses the card
+            # on resolution -- there is no "target", so nothing is committed
+            # on the stack.  Parsed before the bounce branch, whose graveyard
+            # rewrite used to manufacture a mandatory targeted effect from
+            # this wording (July 19 room-exhaust probe: Ghostly Dancers).
+            elif ("from your graveyard" in clause_lower
+                    and "to your hand" in clause_lower
+                    and "target" not in clause_lower
+                    and re.search(r"\breturn\s+(?:a|an|one|up to one)\s",
+                                  clause_lower)):
+                recovery = re.search(
+                    r"return\s+(?P<quantifier>a|an|one|up to one)\s+"
+                    r"(?P<types>[a-z][a-z\- ]*?)\s+cards?\s+"
+                    r"from your graveyard\s+to your hand", clause_lower)
+                allowed_types = None
+                excluded_subtypes = []
+                if recovery:
+                    # Card types and the common graveyard-return subtypes.
+                    # Unknown tokens fail the whole clause closed.
+                    known_types = {
+                        "artifact", "battle", "creature", "enchantment",
+                        "instant", "land", "permanent", "planeswalker",
+                        "sorcery",
+                    }
+                    known_subtypes = {"vehicle", "spacecraft"}
+                    excluded_vocab = {"avatar"}
+                    type_words = []
+                    parsed_ok = True
+                    for phrase in re.split(
+                            r"\s+or\s+|\s*,\s*(?:or\s+)?",
+                            recovery.group("types")):
+                        phrase = phrase.strip()
+                        if not phrase or phrase in ("a", "an", "one", "and"):
+                            continue
+                        # Strip a leading article inside the union
+                        # ("... or a planeswalker") and an interior/trailing
+                        # "card" token ("non-avatar creature card or ...").
+                        phrase = re.sub(r"^(?:a|an|one)\s+", "", phrase)
+                        phrase = re.sub(r"\s+cards?$", "", phrase).strip()
+                        exclusion = re.match(
+                            r"non-(?P<sub>[a-z]+)\s+(?P<base>[a-z]+)$", phrase)
+                        if exclusion:
+                            sub = exclusion.group("sub")
+                            base = exclusion.group("base")
+                            if (sub in excluded_vocab
+                                    and base in known_types):
+                                excluded_subtypes.append(sub)
+                                type_words.append(base)
+                                continue
+                            parsed_ok = False
+                            break
+                        if phrase in known_types or phrase in known_subtypes:
+                            type_words.append(phrase)
+                        else:
+                            parsed_ok = False
+                            break
+                    if parsed_ok and type_words:
+                        allowed_types = type_words
+                if allowed_types:
+                    from .ability_types import ReturnFromGraveyardChoiceEffect
+                    created_effect = ReturnFromGraveyardChoiceEffect(
+                        allowed_types=allowed_types,
+                        optional=("you may" in clause_lower
+                                  or recovery.group("quantifier")
+                                  == "up to one"),
+                        excluded_subtypes=excluded_subtypes,
+                        effect_text=recovery.group(0))
+                # Unknown quantifiers or type words fail closed instead of
+                # becoming a targeted battlefield bounce.
+
+            # "Unlock a locked door of a Room you control" chooses among the
+            # controller's locked doors on resolution and pays no cost.
+            elif re.search(r"\bunlock a locked door of a room you control\b",
+                           clause_lower):
+                from .ability_types import UnlockDoorChoiceEffect
+                created_effect = UnlockDoorChoiceEffect()
+
+            # "Put a <type> card from a/your graveyard onto the battlefield
+            # (under your control)" chooses the card on resolution; "a
+            # graveyard" spans both graveyards (Victor's third-time arm).
+            elif ("graveyard" in clause_lower
+                    and "onto the battlefield" in clause_lower
+                    and "target" not in clause_lower
+                    and re.search(r"\bput\s+(?:a|an)\s", clause_lower)):
+                reanimation = re.search(
+                    r"put\s+(?:a|an)\s+(?P<types>[a-z][a-z\- ]*?)\s+cards?\s+"
+                    r"from\s+(?P<zone>a|your)\s+graveyard\s+onto\s+the\s+"
+                    r"battlefield(?:\s+under\s+your\s+control)?",
+                    clause_lower)
+                allowed_types = None
+                if reanimation:
+                    type_words = [
+                        word.strip() for word in re.split(
+                            r"\s+or\s+|\s*,\s*(?:or\s+)?",
+                            reanimation.group("types"))
+                        if word.strip() and word.strip() != "and"]
+                    known_types = {
+                        "artifact", "battle", "creature", "enchantment",
+                        "land", "planeswalker",
+                    }
+                    if type_words and all(
+                            word in known_types for word in type_words):
+                        allowed_types = type_words
+                if allowed_types:
+                    from .ability_types import PutFromGraveyardChoiceEffect
+                    created_effect = PutFromGraveyardChoiceEffect(
+                        allowed_types=allowed_types,
+                        from_any_graveyard=(
+                            reanimation.group("zone") == "a"),
+                        optional="you may" in clause_lower,
+                        effect_text=reanimation.group(0))
+                # Unknown type words fail closed.
 
             # Return to Hand (Bounce). BUGFIX (July 2026): the owner's-hand
             # test embedded a regex pattern inside a plain substring `in`

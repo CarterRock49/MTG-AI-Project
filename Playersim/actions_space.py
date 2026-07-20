@@ -2805,6 +2805,7 @@ class ActionSpaceMixin:
             emblem.get("kind") == "graveyard_permanents"
             for emblem in player.get("emblems", []))
         has_land_permission = gs.can_play_lands_from_graveyard(player)
+        has_turn_cast = gs.can_cast_spells_from_graveyard_this_turn(player)
         casting_allowed = gs.can_player_cast_spells(player)
         permanent_types = {
             "creature", "artifact", "enchantment", "planeswalker", "battle"}
@@ -2889,21 +2890,29 @@ class ActionSpaceMixin:
                         continue
                     context.update({"flashback_cast": True,
                                     "flashback_cost": flashback_cost})
-                elif has_emblem or has_land_permission:
+                elif has_emblem or has_land_permission or has_turn_cast:
                     card_types = set(getattr(card, "card_types", []))
                     is_land = "land" in card_types
+                    emblem_castable = (
+                        has_emblem
+                        and card_types.intersection(permanent_types))
                     if is_land:
-                        if (not can_sorcery
+                        if (not (has_emblem or has_land_permission)
+                                or not can_sorcery
                                 or not gs.can_play_land_this_turn(player)):
                             continue
-                    elif (not has_emblem
-                          or not card_types.intersection(permanent_types)
-                          or (not can_sorcery and not self._has_flash(card_id))):
+                    elif not emblem_castable and not has_turn_cast:
+                        continue
+                    elif (not can_sorcery
+                          and "instant" not in card_types
+                          and not self._has_flash(card_id)):
                         continue
                     if is_land and has_land_permission:
                         context["controlled_permanent_land_play"] = True
-                    else:
+                    elif emblem_castable or is_land:
                         context["emblem_graveyard_cast"] = True
+                    else:
+                        context["graveyard_turn_cast"] = True
                     context.update({
                         "card_id": card_id,
                         "controller_id": (
@@ -3612,6 +3621,8 @@ class ActionSpaceMixin:
                 for emblem in player.get("emblems", []))
         has_land_permission = self.game_state.can_play_lands_from_graveyard(
             player)
+        has_turn_cast = (
+            self.game_state.can_cast_spells_from_graveyard_this_turn(player))
         has_adventure_permission = any(
             self.game_state.has_graveyard_adventure_permission(
                 player, card_id)
@@ -3622,7 +3633,7 @@ class ActionSpaceMixin:
         has_harmonize = any(
             self.game_state.harmonize_cost_for(player, card_id)
             for card_id in player.get("graveyard", []))
-        if (not has_emblem and not has_land_permission
+        if (not has_emblem and not has_land_permission and not has_turn_cast
                 and not has_adventure_permission
                 and not has_flashback and not has_harmonize):
             return
@@ -3737,15 +3748,19 @@ class ActionSpaceMixin:
                 continue
             card_types = set(getattr(card, "card_types", []))
             is_land = "land" in card_types
+            emblem_castable = (has_emblem
+                               and card_types.intersection(
+                                   permanent_spell_types))
             if is_land:
                 if (not (has_emblem or has_land_permission)
                         or not is_sorcery_speed
                         or not gs.can_play_land_this_turn(player)):
                     continue
-            elif (not has_emblem
-                  or not card_types.intersection(permanent_spell_types)):
+            elif not emblem_castable and not has_turn_cast:
                 continue
-            elif not is_sorcery_speed and not self._has_flash(card_id):
+            elif (not is_sorcery_speed
+                  and "instant" not in card_types
+                  and not self._has_flash(card_id)):
                 continue
             cast_context = {
                 "source_zone": "graveyard",
@@ -3755,8 +3770,10 @@ class ActionSpaceMixin:
             }
             if is_land and has_land_permission:
                 cast_context["controlled_permanent_land_play"] = True
-            else:
+            elif emblem_castable or is_land:
                 cast_context["emblem_graveyard_cast"] = True
+            else:
+                cast_context["graveyard_turn_cast"] = True
             if not is_land:
                 if getattr(card, "is_room", False):
                     for room_context in self._room_cast_contexts(

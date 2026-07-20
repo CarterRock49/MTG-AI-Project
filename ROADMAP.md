@@ -55,6 +55,142 @@ player-relative turns, draw-aware rates, and atomic per-file persistence.
 Evaluator caches retain only static characteristics, while live state and
 perspective are recomputed for each decision.
 
+### Room/Exhaust evidence replay — July 19, 2026
+
+The follow-up replay to the affected-evidence run exercised its four retained
+gap families across 43 cards: every Standard Room plus the Exhaust and
+unlock-adjacent creatures. The report is
+`probe_runs/standard-room-exhaust-evidence-2026-07-19-v2/card_probe_report.json`
+with canonical SHA-256
+`107e99c8495f36105a58005a7ceafdf800848afb70645242fee866f575b17adb` and
+physical SHA-256
+`a1da84abd642fa8bac97aeda9fe4fc14eb4618861999b88450d81bcde22c33be`.
+
+Result: 0 mechanical passes, 36 coverage gaps, and 7 failed. Room-face
+provenance was fully exercised (38/38), as were most spell, choice-branch, and
+negative-mask obligations; the dominant remaining gap families are static
+preflight evidence (38), alternate-face registration (23), split-layout paths
+(23), and static surfaces (18). The retained diagnostics triage the seven
+failures into six root causes, none of which touch the eight-deck training
+corpus:
+
+- Charred Foyer // Warped Space: the cast-from-exile alternative-cost clause
+  ("Once each turn, you may pay {0} rather than pay the mana cost for a spell
+  you cast from exile") cannot be classified; the primary cast, trigger, and
+  matched negative event all fail.
+- Ghostly Dancers and Greenhouse // Rickety Gazebo: a mandatory
+  `ReturnToHandEffect` resolved with an empty target set without a validated
+  post-commit invalidation context.
+- Mirror Room // Fractured Realm: the trigger-doubling static ("that ability
+  triggers an additional time") is misrouted to the layer system, which has no
+  layer for it.
+- Victor, Valgavoth's Seneschal: the graveyard-to-battlefield trigger resolves
+  into an unimplemented `AbilityEffect`, and the effect continuation finishes
+  with a failed instruction.
+- Walk-In Closet // Forgotten Cellar: both halves of its graveyard
+  replacement ("if a card would be put into your graveyard from anywhere this
+  turn" / "exile it instead") are unimplemented `AbilityEffect`s.
+- Pit Automaton: fails only its declared-partial static preflight evidence;
+  no runtime diagnostic.
+
+Every card remains `semantic_status=unverified`. The repair order is the two
+shared-family defects first (empty-target return, trigger-doubling routing),
+then the three unimplemented-effect cards, each scenario-first through the
+production mask/cast/trigger pipeline.
+
+**First repair batch — July 20, 2026.** The empty-target return family is
+repaired at the parser level, scenario-first:
+
+- Non-targeted graveyard recovery ("return a/an/one/up to one `<type>` card
+  from your graveyard to your hand") now resolves as a
+  `return_from_graveyard` resolution choice instead of a manufactured
+  mandatory targeted bounce. Unknown quantifiers or type words fail closed;
+  targeted returns and "return this card" self-returns keep their existing
+  paths.
+- Ghostly Dancers' trigger is the first member of a bounded inline-or modal
+  family: "return … to your hand or unlock a locked door of a Room you
+  control" now chooses its mode as the trigger is put on the stack (CR
+  603.3c) through the existing `trigger_mode` flow. The unlock arm chooses
+  among the controller's locked doors and routes through
+  `complete_door_unlock`, extracted from the paid public unlock so free and
+  paid unlocks share one production pipeline (layers, unlock events, chapter
+  advancement).
+- The linked-mill recognizer accepts "mill N cards, then return up to K
+  `<type>` cards from among them to your hand" with multi-select bound to
+  the physically milled cards (Rickety Gazebo), alongside the existing
+  "you may put a … from among the milled cards" phrasing. Mandatory
+  "then return two …" phrasings still fail closed.
+
+Four permanent scenarios in
+`tests/nontargeted_return_choice_regression_test.py` pin the family through
+the production mask/apply/trigger pipeline, including the mandatory
+no-decline mask, the exact-door unlock, and the empty-graveyard quiet
+resolution. The delivery gate is green at 800 discovered unit tests and all
+eight default invariant-fuzz seeds plus the controlled phase-boundary check.
+A scoped production re-probe
+(`probe_runs/room-exhaust-repair1-2026-07-20-v1`) moved Ghostly Dancers and
+Greenhouse // Rickety Gazebo from `failed` to `coverage_gap` with zero
+diagnostics; both remain `semantic_status=unverified`. Still failed from
+this probe family: Charred Foyer // Warped Space (cast-from-exile
+alternative cost), Mirror Room // Fractured Realm (trigger doubling),
+Victor (reanimation effect), Walk-In Closet // Forgotten Cellar (graveyard
+replacement), and Pit Automaton (declared-partial ledger evidence).
+
+**Second repair batch — July 20, 2026.** The remaining runtime failures from
+the first batch were repaired scenario-first, plus a subtype-aware extension
+found during ledger regeneration:
+
+- Fractured Realm trigger doubling: "if a triggered ability of a permanent
+  you control triggers, that ability triggers an additional time" is now
+  recognized as an event modification, not a CR 613 layer effect (it was
+  misrouted to the layer system, which warned and dropped it). A flagged
+  `StaticAbility.is_trigger_doubling` is read live at trigger-queue time with
+  Room-door gating; each live source queues one extra copy of every
+  permanent trigger the controller controls. Pinned by
+  `tests/trigger_doubling_regression_test.py` (doubled with the Fractured
+  Realm door unlocked, single with it locked).
+- Victor's resolution-count ladder: "surveil 2 if this is the first time
+  this ability has resolved this turn. If it's the second time … If it's the
+  third time …" now runs exactly the arm matching a per-turn resolution
+  count stamped at resolution (CR 608), and the third-time reanimation is a
+  real non-targeted put-from-any-graveyard choice. A fourth+ resolution does
+  nothing. Pinned by `tests/victor_resolution_ladder_test.py`.
+- Forgotten Cellar's compound unlock: a turn-scoped "you may cast spells
+  from your graveyard this turn" permission plus a turn-scoped "if a card
+  would be put into your graveyard from anywhere this turn, exile it
+  instead" replacement, scoped to the controller's graveyard only. Pinned by
+  `tests/forgotten_cellar_regression_test.py`.
+- Subtype-aware non-targeted graveyard return: the first-batch return parser
+  handled only card types, so "return a creature or Vehicle/Spacecraft card
+  from your graveyard" fell through. It now recognizes the Vehicle and
+  Spacecraft subtypes and `non-<subtype>` exclusions (Carrion Cruiser, Fell
+  Gravship, Overlord of the Balemurk). Pinned by a Carrion Cruiser scenario
+  in `tests/nontargeted_return_choice_regression_test.py`.
+
+Charred Foyer // Warped Space and Pit Automaton were confirmed correctly
+fail-closed rather than repaired: their failures are the cast-from-exile
+alternative cost and the source-coupled exhaust-copy trigger respectively,
+both genuinely bounded mechanics the ledger already flags (`unparsed` and
+`partial`), not false-clean bugs.
+
+The support ledger was regenerated so it reflects the improved parser (same
+corpus, label, and overrides; only Victor and Walk-In Closet changed,
+`partial` → `unseen`, zero regressions across all 4,702 cards). Its new
+declared SHA-256 is
+`4ed2dce764032d9cfdfa7e2f9721bc0514ac6bef0b514daaa15a58f1db5b7e14` and its
+physical file SHA-256 is
+`17a74dae77ba533a8d3ef745790ceeb217f3f6777470142b58e5d17db0dea7f7`.
+
+The delivery gate is green at 806 discovered unit tests and all eight
+default invariant-fuzz seeds plus the controlled phase-boundary check. The
+re-probe at `probe_runs/room-exhaust-repair2-2026-07-20-v1` (canonical
+SHA-256
+`9dbe252579fb27637213e8d26f4696265a1f9d7c21dfed05a300792d0bea7c58`) moved
+seven of the eight affected cards to `coverage_gap` with zero diagnostics.
+Fell Gravship remains `failed` on its Station and "8+" level layering — a
+documented bounded mechanic (Station layering) unrelated to the repaired
+return clause. Every affected card remains `semantic_status=unverified`.
+
 ### Evidence-ledger reset and first trusted-card repair — July 19, 2026
 
 Support ledger/override schema v2 removed every name-only semantic

@@ -866,6 +866,7 @@ class GameStateTurnMixin:
         self.defender_attack_permissions.clear()
         self.cards_drawn_this_turn = {'p1': 0, 'p2': 0} # Reset draw counts
         self.cards_milled_this_turn = {'p1': 0, 'p2': 0} # Reset mill counts
+        self.ability_resolutions_this_turn = {} # Reset Victor-style ladders
         # Proper graveyard tracking reset
         if not hasattr(self, 'cards_to_graveyard_this_turn'): self.cards_to_graveyard_this_turn = {}
         self.cards_to_graveyard_this_turn[self.turn] = []

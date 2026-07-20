@@ -345,7 +345,10 @@ class CastingHandlersMixin:
         has_permanent_land_permission = bool(
             context.get("controlled_permanent_land_play")
             and gs.can_play_lands_from_graveyard(player))
-        if not (has_emblem_permission or has_permanent_land_permission):
+        has_turn_cast_permission = (
+            gs.can_cast_spells_from_graveyard_this_turn(player))
+        if not (has_emblem_permission or has_permanent_land_permission
+                or has_turn_cast_permission):
             return -0.15, False
         card_id = player["graveyard"][source_index]
         card = gs._safe_get_card(card_id)
@@ -353,21 +356,24 @@ class CastingHandlersMixin:
             return -0.15, False
         card_types = set(getattr(card, "card_types", []))
         if "land" in card_types:
+            if not (has_emblem_permission or has_permanent_land_permission):
+                return -0.1, False
             success = gs.play_land(
                 card_id, player, source_zone="graveyard",
                 permission=("controlled_permanent"
                             if has_permanent_land_permission
                             else "graveyard_permanents"))
             return (0.2, True) if success else (-0.1, False)
-        if not has_emblem_permission:
+        emblem_castable = has_emblem_permission and card_types.intersection(
+            {"creature", "artifact", "enchantment", "planeswalker", "battle"})
+        if not emblem_castable and not has_turn_cast_permission:
             return -0.1, False
-        if not card_types.intersection(
-                {"creature", "artifact", "enchantment", "planeswalker", "battle"}):
-            return -0.1, False
+        permission_flag = ("emblem_graveyard_cast" if emblem_castable
+                           else "graveyard_turn_cast")
         if getattr(card, "is_room", False):
             cast_context = self._canonical_room_cast_context(
                 card, card_id, context, player, "graveyard", source_index,
-                extra_context={"emblem_graveyard_cast": True})
+                extra_context={permission_flag: True})
             if cast_context is None:
                 return -0.2, False
         else:
@@ -375,7 +381,7 @@ class CastingHandlersMixin:
             cast_context.update({
                 "source_zone": "graveyard",
                 "source_idx": source_index,
-                "emblem_graveyard_cast": True,
+                permission_flag: True,
             })
         success = gs.cast_spell(card_id, player, context=cast_context)
         return (0.2, True) if success else (-0.1, False)

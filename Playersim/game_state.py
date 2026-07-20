@@ -58,7 +58,7 @@ class GameState(
                  "mana_system", "replacement_effects", "cards_drawn_this_turn", "cards_milled_this_turn",
                  "combat_resolver", "temp_control_effects", "abilities_activated_this_turn",
                  "card_evaluator", "spells_cast_this_turn", "_phase_history",
-                 "once_per_turn_triggers",
+                 "once_per_turn_triggers", "ability_resolutions_this_turn",
                  "strategic_planner", "attackers_this_turn", "creatures_died_this_turn", 'strategy_memory',
                  "_logged_card_ids", "_logged_errors", "targeting_system",
                  "_phase_action_count", "priority_player", "stats_tracker",
@@ -686,6 +686,9 @@ class GameState(
             # Turn-based tracking (resets each turn usually)
             self.spells_cast_this_turn = []
             self.once_per_turn_triggers = {}
+            # Victor-style "Nth time this ability has resolved this turn"
+            # ladders: {(card_id, trigger_condition): resolutions this turn}.
+            self.ability_resolutions_this_turn = {}
             self.attackers_this_turn = set()
             self.creatures_died_this_turn = {}
             self.damage_dealt_this_turn = {}

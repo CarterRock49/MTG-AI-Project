@@ -2707,6 +2707,13 @@ class GameStateStackMixin:
                         getattr(card, "card_types", []))):
                 logging.warning("Invalid Wrenn-emblem graveyard cast permission.")
                 return False
+        if context.get("graveyard_turn_cast"):
+            if (source_zone != "graveyard"
+                    or not self.can_cast_spells_from_graveyard_this_turn(
+                        player)):
+                logging.warning(
+                    "Invalid turn-scoped graveyard cast permission.")
+                return False
         if context.get("graveyard_adventure_cast"):
             if (source_zone != "graveyard"
                     or not context.get("cast_as_adventure")
@@ -3920,6 +3927,14 @@ class GameStateStackMixin:
     def can_play_land_this_turn(self, controller):
         return self.lands_played_this_turn(controller) < self.land_play_limit(
             controller)
+
+    def can_cast_spells_from_graveyard_this_turn(self, controller):
+        """Turn-scoped "you may cast spells from your graveyard this turn".
+
+        Granted by Forgotten Cellar's unlock trigger; the stamp expires
+        naturally when the turn number advances.
+        """
+        return controller.get("graveyard_spell_cast_turn") == self.turn
 
     def can_play_lands_from_graveyard(self, controller):
         """Whether a live controlled permanent grants this zone permission."""

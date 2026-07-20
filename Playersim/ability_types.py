@@ -2048,6 +2048,13 @@ class TriggeredAbility(Ability):
         self.effect = self.effect.lower() # Store lower
         self.additional_condition = additional_condition # Can be string or callable
 
+        # Victor-style ladders ("if this is the first/second/third time this
+        # ability has resolved this turn") need a per-turn resolution count.
+        # AbilityHandler.resolve_ability stamps the ordinal into the
+        # resolution context only for flagged abilities.
+        self.tracks_resolution_count = (
+            "time this ability has resolved this turn" in self.effect)
+
         # CR 603.4 intervening "if": "When/Whenever/At [event], if [condition],
         # [effect]." The condition is checked at trigger time (can_trigger) AND
         # again at resolution (resolve/resolve_with_targets); if false at either
@@ -3852,12 +3859,22 @@ class BoundExileTriggeredAbility(TriggeredAbility):
 
 class StaticAbility(Ability):
     """Continuous ability that affects the game state"""
+
+    _TRIGGER_DOUBLING_RE = re.compile(
+        r"if a triggered ability of a permanent you control triggers,?\s*"
+        r"that ability triggers an additional time\.?")
+
     def __init__(self, card_id, effect, effect_text=""):
         super().__init__(card_id, effect_text)
         self.effect = effect.lower() if effect else "" # Handle potential None effect
         # Set effect_text from effect if not provided
         if not effect_text and self.effect:
             self.effect_text = self.effect.capitalize()
+        # Trigger doubling (Fractured Realm) is consulted by the ability
+        # handler at trigger-queue time; flag it at construction so the
+        # queue check never depends on whether apply() has already run.
+        self.is_trigger_doubling = bool(
+            self._TRIGGER_DOUBLING_RE.fullmatch(self.effect.strip()))
 
     def _parse_static_keyword_grants(self, effect_lower_clean):
         """Return every canonical keyword granted by a static declaration."""
@@ -3979,6 +3996,14 @@ class StaticAbility(Ability):
                 r"(?:you have no maximum hand size|"
                 r"untap each creature you control during each other "
                 r"player(?:'|\u2019)s untap step)", effect_lower_clean):
+            return True
+
+        # Trigger doubling (Fractured Realm) modifies trigger events, not
+        # CR 613 object characteristics.  check_abilities consults
+        # is_trigger_doubling at queue time with live Room-door gating, so
+        # registration is complete here and must not emit an
+        # unsupported-layer warning.
+        if self.is_trigger_doubling:
             return True
 
         layer = self._determine_layer_for_effect(effect_lower_clean)
@@ -8110,12 +8135,13 @@ class MillThenChooseEffect(AbilityEffect):
     })
 
     def __init__(self, count=1, allowed_types=None, optional=True,
-                 effect_text=None, condition=None):
+                 max_selections=1, effect_text=None, condition=None):
         self.base_count = count
         self.allowed_types = frozenset(
             str(card_type).lower().rstrip("s")
             for card_type in (allowed_types or ("permanent",)))
         self.optional = bool(optional)
+        self.max_selections = max(1, int(max_selections))
         count_text = "X" if count == "x" else str(count)
         allowed_text = ", ".join(sorted(self.allowed_types))
         super().__init__(
@@ -8177,7 +8203,9 @@ class MillThenChooseEffect(AbilityEffect):
 
         game_state.choice_context = {
             "type": "dig_select", "player": controller,
-            "options": options, "remaining": 1, "selected": [],
+            "options": options,
+            "remaining": min(self.max_selections, len(options)),
+            "selected": [],
             "source_zone": "graveyard", "destination": "hand",
             "rest_destination": "stay", "optional": self.optional,
             "move_cause": "milled_card_selection",
@@ -10278,6 +10306,290 @@ class StrategicBetrayalEffect(AbilityEffect):
         game_state.phase = game_state.PHASE_CHOOSE
         game_state.priority_player = opponent
         return True
+
+
+class ReturnFromGraveyardChoiceEffect(AbilityEffect):
+    """Return a chosen (not targeted) matching card from your graveyard.
+
+    The printed instruction carries no "target", so the card is chosen on
+    resolution: an empty or mismatched graveyard resolves quietly instead of
+    demanding a committed target (July 19 room-exhaust probe family).
+    """
+
+    _PERMANENT_TYPES = frozenset({
+        "artifact", "battle", "creature", "enchantment", "land",
+        "planeswalker",
+    })
+
+    def __init__(self, allowed_types, optional=False, excluded_subtypes=None,
+                 effect_text=None, condition=None):
+        # allowed_types may name card types (creature, artifact, ...) or
+        # subtypes (vehicle, spacecraft); eligibility checks both.
+        self.allowed_types = frozenset(
+            str(card_type).lower().rstrip("s")
+            for card_type in (allowed_types or ()))
+        self.excluded_subtypes = frozenset(
+            str(subtype).lower().rstrip("s")
+            for subtype in (excluded_subtypes or ()))
+        self.optional = bool(optional)
+        allowed_label = " or ".join(sorted(self.allowed_types)) or "matching"
+        super().__init__(
+            effect_text or (
+                f"Return a {allowed_label} card from your graveyard "
+                "to your hand"),
+            condition)
+        self.requires_target = False
+
+    def _is_eligible(self, game_state, card_id):
+        card = game_state._safe_get_card(card_id)
+        if not card:
+            return False
+        card_types = {
+            str(card_type).lower().rstrip("s")
+            for card_type in getattr(card, "card_types", [])}
+        subtypes = {
+            str(subtype).lower().rstrip("s")
+            for subtype in getattr(card, "subtypes", [])}
+        if self.excluded_subtypes and subtypes.intersection(
+                self.excluded_subtypes):
+            return False
+        if "card" in self.allowed_types:
+            return True
+        if ("permanent" in self.allowed_types
+                and card_types.intersection(self._PERMANENT_TYPES)):
+            return True
+        return bool((card_types | subtypes).intersection(self.allowed_types))
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        options = [
+            card_id for card_id in controller.get("graveyard", [])
+            if self._is_eligible(game_state, card_id)]
+        if not options:
+            return True
+        game_state.choice_context = {
+            "type": "resolution_choice",
+            "choice_kind": "return_from_graveyard",
+            "player": controller, "controller": controller,
+            "options": options, "optional": self.optional,
+            "source_id": source_id,
+            "resume_phase": game_state.PHASE_PRIORITY,
+            "choice_page": 0,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        game_state.priority_pass_count = 0
+        return True
+
+
+class UnlockDoorChoiceEffect(AbilityEffect):
+    """Unlock a chosen locked door of a Room you control, paying no cost.
+
+    Options are encoded as ``"<room_id>:<door_number>"`` strings; the apply
+    handler routes the unlock through the shared production unlock pipeline
+    so unlock events and layers behave exactly like a paid public unlock.
+    """
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "Unlock a locked door of a Room you control", condition)
+        self.requires_target = False
+
+    @staticmethod
+    def locked_door_options(game_state, controller):
+        options = []
+        for permanent_id in controller.get("battlefield", []):
+            card = game_state._safe_get_card(permanent_id)
+            if not card or not getattr(card, "is_room", False):
+                continue
+            for door_number in (1, 2):
+                door = getattr(card, f"door{door_number}", None)
+                if door and not door.get("unlocked", False):
+                    options.append(f"{permanent_id}:{door_number}")
+        return options
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        options = self.locked_door_options(game_state, controller)
+        if not options:
+            return True
+        game_state.choice_context = {
+            "type": "resolution_choice", "choice_kind": "unlock_door",
+            "player": controller, "controller": controller,
+            "options": options, "optional": False,
+            "source_id": source_id,
+            "resume_phase": game_state.PHASE_PRIORITY,
+            "choice_page": 0,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        game_state.priority_pass_count = 0
+        return True
+
+
+class ResolutionCountLadderEffect(AbilityEffect):
+    """Run exactly the arm matching this turn's resolution ordinal.
+
+    Victor's "surveil 2 if this is the first time this ability has resolved
+    this turn. If it's the second time … If it's the third time …" ladder:
+    AbilityHandler.resolve_ability stamps ``ability_resolution_ordinal``
+    into the resolution context; the unmatched arms (including a fourth or
+    later resolution) do nothing and the trigger still resolves cleanly.
+    """
+
+    def __init__(self, arms, effect_text=None, condition=None):
+        # arms: [(ordinal, [AbilityEffect, ...]), ...]
+        self.arms = [
+            (int(ordinal), list(arm_effects))
+            for ordinal, arm_effects in arms]
+        super().__init__(
+            effect_text or "Resolution-count ladder", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        context = getattr(self, 'resolution_context', {}) or {}
+        ordinal = int(context.get('ability_resolution_ordinal', 0) or 0)
+        if ordinal <= 0:
+            logging.warning(
+                "ResolutionCountLadderEffect resolved without a stamped "
+                "resolution ordinal for source %s.", source_id)
+            return False
+        for arm_ordinal, arm_effects in self.arms:
+            if arm_ordinal != ordinal:
+                continue
+            success = True
+            for arm_effect in arm_effects:
+                success = arm_effect.apply(
+                    game_state, source_id, controller, targets,
+                    context) and success
+            return success
+        return True
+
+
+class PutFromGraveyardChoiceEffect(AbilityEffect):
+    """Put a chosen (not targeted) matching card from a graveyard onto the
+    battlefield under your control.
+
+    "a graveyard" spans both players' graveyards; the card is chosen on
+    resolution, so empty graveyards resolve quietly.
+    """
+
+    def __init__(self, allowed_types, from_any_graveyard=True,
+                 optional=False, effect_text=None, condition=None):
+        self.allowed_types = frozenset(
+            str(card_type).lower().rstrip("s")
+            for card_type in (allowed_types or ()))
+        self.from_any_graveyard = bool(from_any_graveyard)
+        self.optional = bool(optional)
+        allowed_label = " or ".join(sorted(self.allowed_types)) or "matching"
+        zone_label = ("a graveyard" if self.from_any_graveyard
+                      else "your graveyard")
+        super().__init__(
+            effect_text or (
+                f"Put a {allowed_label} card from {zone_label} onto the "
+                "battlefield under your control"),
+            condition)
+        self.requires_target = False
+
+    def _is_eligible(self, game_state, card_id):
+        card = game_state._safe_get_card(card_id)
+        if not card:
+            return False
+        card_types = {
+            str(card_type).lower().rstrip("s")
+            for card_type in getattr(card, "card_types", [])}
+        if "card" in self.allowed_types:
+            return True
+        return bool(card_types.intersection(self.allowed_types))
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        pools = [controller]
+        if self.from_any_graveyard:
+            pools.append(
+                game_state.p2 if controller is game_state.p1
+                else game_state.p1)
+        options = [
+            card_id
+            for player in pools
+            for card_id in player.get("graveyard", [])
+            if self._is_eligible(game_state, card_id)]
+        if not options:
+            return True
+        game_state.choice_context = {
+            "type": "resolution_choice",
+            "choice_kind": "reanimate_from_graveyard",
+            "player": controller, "controller": controller,
+            "options": options, "optional": self.optional,
+            "source_id": source_id,
+            "resume_phase": game_state.PHASE_PRIORITY,
+            "choice_page": 0,
+        }
+        game_state.phase = game_state.PHASE_CHOOSE
+        game_state.priority_player = controller
+        game_state.priority_pass_count = 0
+        return True
+
+
+class GraveyardCastThisTurnEffect(AbilityEffect):
+    """Grant "you may cast spells from your graveyard this turn".
+
+    The stamp is read by GameState.can_cast_spells_from_graveyard_this_turn
+    and expires when the turn number advances (Forgotten Cellar).
+    """
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "You may cast spells from your graveyard this turn", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        controller["graveyard_spell_cast_turn"] = game_state.turn
+        return True
+
+
+class GraveyardToExileThisTurnEffect(AbilityEffect):
+    """Register "if a card would be put into your graveyard from anywhere
+    this turn, exile it instead" (Forgotten Cellar).
+
+    The replacement intercepts every graveyard-bound move whose destination
+    is the effect controller's graveyard, regardless of origin zone, and
+    expires at end of turn through the replacement system's own duration
+    cleanup.
+    """
+
+    def __init__(self, condition=None):
+        super().__init__(
+            "If a card would be put into your graveyard from anywhere this "
+            "turn, exile it instead", condition)
+        self.requires_target = False
+
+    def _apply_effect(self, game_state, source_id, controller, targets):
+        replacement_system = getattr(game_state, 'replacement_effects', None)
+        if not replacement_system:
+            logging.warning(
+                "GraveyardToExileThisTurnEffect: replacement system missing.")
+            return False
+        source = game_state._safe_get_card(source_id)
+        source_name = getattr(source, "name", f"Card {source_id}")
+
+        def condition(ctx, _controller=controller):
+            return (ctx.get('to_player') is _controller
+                    and ctx.get('to_zone') == 'graveyard')
+
+        def replacement(ctx):
+            ctx['to_zone'] = 'exile'
+            return ctx
+
+        effect_id = replacement_system.register_effect({
+            'source_id': source_id,
+            'event_type': 'ENTER_GRAVEYARD',
+            'condition': condition,
+            'replacement': replacement,
+            'duration': 'end_of_turn',
+            'controller_id': controller,
+            'description': (
+                f"{source_name}: exile cards headed to your graveyard "
+                "this turn"),
+        })
+        return bool(effect_id)
 
 
 class CrewEffect(AbilityEffect):

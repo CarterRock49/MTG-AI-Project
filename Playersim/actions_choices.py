@@ -2067,6 +2067,33 @@ class ChoiceHandlersMixin:
                 for grave_card in list(player.get('graveyard', [])):
                     gs.move_card(grave_card, player, 'graveyard', player,
                                  'exile', cause='strategic_betrayal')
+            elif kind == 'return_from_graveyard':
+                if option not in player.get('graveyard', []):
+                    return -0.1, False
+                if not gs.move_card(
+                        option, player, 'graveyard', player, 'hand',
+                        cause='return_from_graveyard_choice'):
+                    return -0.1, False
+            elif kind == 'reanimate_from_graveyard':
+                owner, zone = gs.find_card_location(option)
+                if owner is None or zone != 'graveyard':
+                    return -0.1, False
+                # The card enters under the chooser's control; its owner
+                # keeps ownership (CR 111.2 analog for reanimation).
+                if not gs.move_card(
+                        option, owner, 'graveyard', player, 'battlefield',
+                        cause='reanimate'):
+                    return -0.1, False
+            elif kind == 'unlock_door':
+                room_text, _, door_text = str(option).partition(':')
+                try:
+                    room_id = int(room_text)
+                    door_number = int(door_text)
+                except ValueError:
+                    return -0.1, False
+                if not gs.ability_handler.complete_door_unlock(
+                        room_id, player, door_number):
+                    return -0.1, False
             elif kind == 'reflect_damage':
                 from .ability_types import ReflectDamageEffect
                 if option != 'deal_damage':

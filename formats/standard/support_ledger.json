@@ -99461,13 +99461,7 @@
       "effect_probes": 1,
       "faces_audited": 1,
       "index": 4481,
-      "issues": [
-        {
-          "count": 1,
-          "reason": "unparsed clause: put a creature card from a graveyard onto the battlefield under your control",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [
         "Eerie",
         "Surveil"
@@ -99479,8 +99473,8 @@
       "replacement_effects_registered": 0,
       "semantic_evidence": null,
       "semantic_status": "unverified",
-      "static_status": "partial",
-      "status": "partial"
+      "static_status": "unseen",
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -100719,18 +100713,7 @@
       "effect_probes": 2,
       "faces_audited": 2,
       "index": 4537,
-      "issues": [
-        {
-          "count": 2,
-          "reason": "unparsed clause: exile it instead",
-          "severity": "partial"
-        },
-        {
-          "count": 2,
-          "reason": "unparsed clause: if a card would be put into your graveyard from anywhere this turn",
-          "severity": "partial"
-        }
-      ],
+      "issues": [],
       "keywords": [],
       "layout": "split",
       "legacy_verified_claim": false,
@@ -100739,8 +100722,8 @@
       "replacement_effects_registered": 2,
       "semantic_evidence": null,
       "semantic_status": "unverified",
-      "static_status": "partial",
-      "status": "partial"
+      "static_status": "unseen",
+      "status": "unseen"
     },
     {
       "abilities_registered": 2,
@@ -115389,15 +115372,6 @@
     {
       "deck_slots": 0,
       "decks": [],
-      "name": "Victor, Valgavoth's Seneschal",
-      "reasons": [
-        "unparsed clause: put a creature card from a graveyard onto the battlefield under your control"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
       "name": "Vile Entomber",
       "reasons": [
         "unparsed clause: put that card into your graveyard"
@@ -115501,16 +115475,6 @@
       "name": "Vren, the Relentless",
       "reasons": [
         "unsupported token rider: tokens with \"this token gets +1/+1 for each"
-      ],
-      "status": "partial"
-    },
-    {
-      "deck_slots": 0,
-      "decks": [],
-      "name": "Walk-In Closet // Forgotten Cellar",
-      "reasons": [
-        "unparsed clause: exile it instead",
-        "unparsed clause: if a card would be put into your graveyard from anywhere this turn"
       ],
       "status": "partial"
     },
@@ -115774,7 +115738,7 @@
   ],
   "ranked_mechanics": [
     {
-      "affected_cards": 887,
+      "affected_cards": 886,
       "deck_cards": 1,
       "deck_slots": 4,
       "examples": [
@@ -115791,7 +115755,7 @@
       ],
       "mechanic": "unclassified oracle text",
       "status_counts": {
-        "partial": 703,
+        "partial": 702,
         "unparsed": 184
       }
     },
@@ -116165,23 +116129,6 @@
       "deck_cards": 0,
       "deck_slots": 0,
       "examples": [
-        "Charred Foyer // Warped Space",
-        "Flotsam // Jetsam",
-        "Hustle // Bustle",
-        "Push // Pull",
-        "Walk-In Closet // Forgotten Cellar"
-      ],
-      "mechanic": "layout:split",
-      "status_counts": {
-        "partial": 2,
-        "unparsed": 3
-      }
-    },
-    {
-      "affected_cards": 5,
-      "deck_cards": 0,
-      "deck_slots": 0,
-      "examples": [
         "Case of the Crimson Pulse",
         "Case of the Locked Hothouse",
         "Case of the Ransacked Lab",
@@ -116206,6 +116153,22 @@
       "mechanic": "layout:modal_dfc",
       "status_counts": {
         "partial": 4
+      }
+    },
+    {
+      "affected_cards": 4,
+      "deck_cards": 0,
+      "deck_slots": 0,
+      "examples": [
+        "Charred Foyer // Warped Space",
+        "Flotsam // Jetsam",
+        "Hustle // Bustle",
+        "Push // Pull"
+      ],
+      "mechanic": "layout:split",
+      "status_counts": {
+        "partial": 1,
+        "unparsed": 3
       }
     },
     {
@@ -116673,25 +116636,25 @@
     }
   ],
   "schema_version": 2,
-  "sha256": "a3eadac1876e9db05935094bf6db9c427051b60b05cb7a739b3c44ae79fc92de",
+  "sha256": "4ed2dce764032d9cfdfa7e2f9721bc0514ac6bef0b514daaa15a58f1db5b7e14",
   "summary": {
     "legacy_verified_claims": 96,
     "semantic_status_counts": {
       "unverified": 4702
     },
     "semantic_verified_fraction": 0.0,
-    "static_clean_fraction": 0.7522330923011484,
+    "static_clean_fraction": 0.7526584432156529,
     "static_status_counts": {
       "observed_clean": 119,
-      "partial": 835,
+      "partial": 833,
       "unparsed": 330,
-      "unseen": 3418
+      "unseen": 3420
     },
     "status_counts": {
       "observed_clean": 119,
-      "partial": 835,
+      "partial": 833,
       "unparsed": 330,
-      "unseen": 3418
+      "unseen": 3420
     },
     "total": 4702
   }
