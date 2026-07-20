@@ -314,19 +314,34 @@ def check_mask_aware_evaluation():
             assert noisy_summary["qualification_interval"][
                 "lower_bound"] < 0.55
 
+            # The frozen v3-pinned canaries fail closed against the live
+            # Observation v4 by design.  For checks that verify a round's
+            # reward/curriculum/registry contract (not the observation
+            # boundary), relineage the canary to the current observation so
+            # the intended contract dimension is what is being tested.
+            def to_current_observation(canary):
+                relineaged = json.loads(json.dumps(canary))
+                relineaged["lineage"]["observation_schema_version"] = \
+                    m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION
+                relineaged["lineage"]["observation_schema_sha256"] = \
+                    m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256
+                return relineaged
+
+            # Use the current Observation-v4 canary; the v3-pinned canaries
+            # correctly fail closed against v4 runtime.
             canary_args = SimpleNamespace(
-                **m.ROUND_7_92_CANARY["cli"],
-                canary_config="round-7.92", resume=None,
+                **m.ROUND_7_96_CANARY["cli"],
+                canary_config="round-7.96", resume=None,
                 optimize_hp=False)
             canary = m.validate_canary_cli(canary_args)
-            assert canary is not m.ROUND_7_92_CANARY
+            assert canary is not m.ROUND_7_96_CANARY
             canary_decks = [{"name": name} for name in (
                 "Selesnya Ouroboroid", "Jeskai Lessons", "Izzet Prowess",
                 "4c Control", "Izzet Spellementals", "Dimir Excruciator",
                 "Mono-Green Landfall", "Azorius Momo",
             )]
             canary_curriculum = m.resolve_curriculum(
-                "combat-v5", canary_decks)
+                "combat-v7", canary_decks)
             m.validate_canary_runtime(
                 canary,
                 lineage={
@@ -409,7 +424,7 @@ def check_mask_aware_evaluation():
                 canary_config="round-7.93", resume=None,
                 optimize_hp=False))
             m.validate_canary_runtime(
-                round_7_93,
+                to_current_observation(round_7_93),
                 lineage={
                     "card_registry": {"sha256": round_7_93["lineage"][
                         "card_registry_sha256"]},
@@ -441,7 +456,7 @@ def check_mask_aware_evaluation():
                 "tempo-graded-potential-v1"
             assert live_training_config["time_cost_per_step"] == 0.005
             m.validate_canary_runtime(
-                round_7_94,
+                to_current_observation(round_7_94),
                 lineage={
                     "card_registry": {"sha256": round_7_94["lineage"][
                         "card_registry_sha256"]},
@@ -494,7 +509,7 @@ def check_mask_aware_evaluation():
             assert round_7_95["cli"]["timesteps"] == 2_000_000
             assert round_7_95["cli"]["curriculum"] == "combat-v7"
             m.validate_canary_runtime(
-                round_7_95,
+                to_current_observation(round_7_95),
                 lineage={
                     "card_registry": {"sha256": round_7_95["lineage"][
                         "card_registry_sha256"]},

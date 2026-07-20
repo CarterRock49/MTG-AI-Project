@@ -55,6 +55,64 @@ player-relative turns, draw-aware rates, and atomic per-file persistence.
 Evaluator caches retain only static characteristics, while live state and
 perspective are recomputed for each decision.
 
+### Round 7.95 verdict, plateau diagnosis, and the Observation v4 response — July 20, 2026
+
+The `round-7.95-combat-v7-v1` canary completed all 2M steps. Its finer 0.10
+scripted ratchet did **not** break the plateau: across 20 evaluations the
+qualification score oscillated between 0.125 and 0.328 (peak 0.328 at 300k,
+final 0.266), never approaching the 0.55 gate, while the scripted handicap
+ping-ponged exactly as in 7.94. This confirms the round hypothesis was wrong —
+the plateau is not ratchet granularity — and that four consecutive
+curriculum-ratchet canaries (7.92–7.95) have exhausted that lever.
+
+A diagnosis over the run's own artifacts (1,280 eval games, 6,608 training
+games, and the gzip traces) located the cause. It is **not** diffuse weakness,
+sampling, or a globally broken reward. Win rate splits cleanly by the deck the
+policy pilots: proactive decks play well (Izzet Prowess 52.5%, Selesnya 45.0%,
+Izzet Spellementals 38.8%) while reactive/control decks collapse (Jeskai 0.6%,
+Dimir 0.6%, 4c Control 0.0% across 160 eval games each). Sampling is ruled out:
+every deck received ~650 balanced full_pool training games and 4c still won
+only 10.6% in training. The mechanism is a self-inflicted mulligan
+death-spiral: the policy mulligans to an average of 3–4 cards on exactly the
+decks it cannot pilot (Dimir 4.12, 4c/Jeskai/Momo ~3.0) while keeping seven on
+the decks it can (aggro 0.05–0.33), and the scripted opponent never mulligans,
+so the agent enters control games down 3–4 cards against a full grip. The
+eval timeout tail (173 turn-limit games, ~47% ahead / 49% behind) is
+secondary and concentrated in the go-wide decks (Azorius Momo, Izzet
+Spellementals) stalling near parity.
+
+Root cause: the policy could not see its own deck. The library was count-only,
+`deck_composition_estimate` summarized only already-revealed cards, and there
+was no remaining-draw signal — so the mulligan/keep decision was uninformed at
+the most basic level (the policy did not even know its own land count), and
+reactive decks, which require deck knowledge to pilot, were unplayable.
+
+**Observation v4** (schema hash
+`15783924c36af23cf9dffb2700894f21d4c15343d0dc1fb353d351eae2f5d19f`) closes
+this gap. It exposes the observer's own full starting decklist as canonical
+identities (`my_deck_card_identity`, an order-free multiset — the cards you
+own, never your hidden draw order), the remaining-library composition
+(`my_library_composition`: type counts, mana-curve buckets, color counts, and
+remaining total — the live "what's left to draw" signal), and changes
+`deck_composition_estimate` to summarize the full starting deck. Every
+decklist-derived feature is observer-own only; the opponent's decklist and
+library are never exposed (`opponent_archetype` remains an estimate from
+observed cards). An observation audit found the decklist family was the
+primary gap; every other fact a player legitimately knows (zones, counts,
+mana, counters, combat, stack) was already present. Per the working agreement,
+the mulligan decision is left to the policy rather than capped — v4 gives it
+the information to learn a good keep, instead of legislating one.
+
+This is a hard lineage boundary. The `round-7.96` canary re-pins the unchanged
+`tempo-graded-potential-v1` reward and `combat-v7` curriculum over Observation
+v4; the v3-pinned canaries (7.92–7.95) fail closed against v4 runtime by
+design, and v2/v3 checkpoints cannot resume into it. The delivery gate is
+green at 806 discovered unit tests, 9/9 runtime smoke, 13/13 training smoke,
+and all eight default invariant-fuzz seeds plus the phase-boundary check. The
+next training run is a fresh `round-7.96` candidate from the v4 boundary; the
+mulligan death-spiral and reactive-deck win rates are its primary success
+signals.
+
 ### Room/Exhaust evidence replay — July 19, 2026
 
 The follow-up replay to the affected-evidence run exercised its four retained
@@ -430,15 +488,22 @@ only from independent exact-state scenarios.
 
 ### Non-negotiable lineage rules
 
-- **Start every new policy from the Round 7.89 Observation v3 boundary, using
-  the current Round 7.95 reward/curriculum contract.** Observation v3 corrects learned
-  mana, land-development, resource-advantage, and strategic-viability
-  semantics. Adaptive card/deck history is recorded but excluded from live
-  evaluator advice by default so worker-local histories cannot make the same
-  public state nonstationary. Recorded archetypes are canonical and play-turn
-  analytics are player-relative; targetable observations match the active
-  target instruction. Do not resume an Observation v2 checkpoint into this
-  lineage. Fresh Round 7.95 training uses
+- **Start every new policy from the Round 7.96 Observation v4 boundary, using
+  the current `tempo-graded-potential-v1` reward and `combat-v7` curriculum
+  contract.** Observation v4 adds the observer's own decklist
+  (`my_deck_card_identity`) and remaining-library composition
+  (`my_library_composition`), and changes `deck_composition_estimate` to
+  summarize the full starting deck; all decklist-derived features are
+  observer-own only and the opponent's decklist is never exposed. Observation
+  v3's corrected mana, land-development, resource-advantage, and
+  strategic-viability semantics carry forward. Adaptive card/deck history is
+  recorded but excluded from live evaluator advice by default so worker-local
+  histories cannot make the same public state nonstationary. Recorded
+  archetypes are canonical and play-turn analytics are player-relative;
+  targetable observations match the active target instruction. Do not resume
+  an Observation v2 or v3 checkpoint into this lineage; the v4 schema hash is
+  `15783924c36af23cf9dffb2700894f21d4c15343d0dc1fb353d351eae2f5d19f` and
+  earlier-schema resumes fail closed. Fresh Round 7.96 training uses
   `tempo-graded-potential-v1` and `combat-v7`; do not resume an older
   curriculum or reward checkpoint.
 - Resume now verifies the companion manifest's reward contract and Observation
@@ -847,32 +912,34 @@ v3 throughput and memory alongside behavior telemetry.
 
 ## Current execution plan
 
-### Now — verify and run the Round 7.95 pinned canary
+### Now — run the Round 7.96 Observation v4 canary
+
+The 7.95 diagnosis (above) attributes the plateau to a reactive-deck collapse
+driven by the policy being blind to its own deck. Observation v4 is the
+response; stop tuning the curriculum ratchet.
 
 1. Keep the now-green delivery gate mandatory: golden scenarios, discovered
-   unit tests, runtime and training smoke, default invariant fuzz, and canary
-   validation, including the 7.95 ride-along guards (scenario 601.2f
-   mask/observation affordability agreement and the restored per-turn
-   game_state analytics). Do not launch if that gate regresses.
+   unit tests (806), runtime and training smoke, default invariant fuzz, and
+   canary validation. The v4 observation schema hash is
+   `15783924c36af23cf9dffb2700894f21d4c15343d0dc1fb353d351eae2f5d19f`. Do not
+   launch if the gate regresses.
 2. Launch a fresh Standard candidate with
-   `--canary-config round-7.95 --run-name round-7.95-combat-v7-v1`. The named
-   configuration checks reward `tempo-graded-potential-v1` (including its
-   0.005 per-step time cost), the full resolved `combat-v7` hash, feature
-   width/device class, 2M timesteps, eight environments, 100k periodic
+   `--canary-config round-7.96 --run-name round-7.96-obs-v4-v1`. The named
+   configuration re-pins the unchanged `tempo-graded-potential-v1` reward
+   (with its 0.005 per-step time cost), the full resolved `combat-v7` hash,
+   feature width/device class, 2M timesteps, eight environments, 100k periodic
    evaluation with 64 games (32 seat-swapped pairs), 50k checkpoints, training
-   seed `20260715`, and evaluation seed `21260715`. Do not resume an older
-   curriculum or reward checkpoint; pre-7.94 canaries fail closed across the
-   reward-contract boundary by design.
-3. Watch the halved scripted ladder resolve where round 7.94 could not:
-   `bridge` and `full_pool` scripted epsilon now steps 0.10 per confident
-   48-episode Wilson window (the novice ramp keeps 0.25), placing rungs at
-   0.30 and 0.10 inside the cliff that ping-ponged 0.40 <-> 0.20. Acceptance
-   requires `race` and `bridge` to satisfy their full-strength profile floors,
-   the `full_pool` scripted epsilon to reach zero with enough horizon left to
-   accumulate a full-strength scripted qualifying window before the 2M-step
-   run ends, and interleaved novice games not to starve that window. Treat a
-   miss as a failed canary acceptance criterion. A stage deadline transition
-   must be reported as `deadline`.
+   seed `20260715`, and evaluation seed `21260715` — over Observation v4. This
+   is a hard schema boundary: v2/v3 checkpoints and the 7.92–7.95 canaries
+   fail closed against v4 runtime by design.
+3. The primary success signals are the diagnosis targets, not the ratchet.
+   Watch the per-deck eval win rates (`evaluations.json` grouped by the agent's
+   deck) and the agent's mulligan depth per deck (MULLIGAN actions in the eval
+   traces). Success means the reactive decks (4c Control, Dimir Excruciator,
+   Jeskai Lessons) move off the ~0% floor and the mulligan death-spiral on
+   those decks shrinks toward the aggro decks' near-zero rate — that is the
+   direct test of whether decklist visibility let the policy learn to pilot
+   control and to keep informed opening hands.
 4. At each 100k boundary, compare checkpoints through `evaluations.json`.
    Require balanced case/seat exposure, zero reward-sign failures, zero strict
    fidelity counters (including effect-continuation failures and lost-spell
@@ -880,16 +947,13 @@ v3 throughput and memory alongside behavior telemetry.
    qualification lower bound reaches 55%.
 5. Keep the enumerated named-canary fields unchanged. A mismatch in the checked
    seed, worker-count, schedule, reward/PPO configuration, resolved curriculum,
-   feature width/device class, or hashed lineage invalidates the comparison.
-   Treat source, runtime-library, or specific-GPU differences recorded in the
-   manifest as audit variables; the selector records but does not constrain
-   them.
-6. Sustained oscillation on a 0.10 rung is a finding, not a tuning miss: it
-   would mean the plateau is not ratchet granularity. If the finer ladder also
-   plateaus, the designated follow-ups are the evaluation timeout tail (10-15%
-   of games, scored as losses by the qualification gate) on the reward side,
-   then the pilot-side levers from Round 7.91 (matchup-weighted scheduling
-   first) — not further horizon extensions.
+   feature width/device class, or hashed lineage (now including Observation v4)
+   invalidates the comparison. Treat source, runtime-library, or specific-GPU
+   differences recorded in the manifest as audit variables.
+6. If the reactive decks stay near zero even with the decklist visible, the
+   remaining structural hypothesis is one policy collapsing onto the aggro
+   strategy across eight archetypes; the next lever is matchup-weighted
+   scheduling (Round 7.91 lever #1), not another observation or reward change.
 
 ### Next — qualify and calibrate Standard
 
@@ -1090,8 +1154,9 @@ The project is complete only when all of these are true:
 ## Checkpoint and schema boundaries
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
-mistake. The practical rule is: **start fresh from the Round 7.89 Observation
-v3 boundary using the current Round 7.95 reward/curriculum contract.**
+mistake. The practical rule is: **start fresh from the Round 7.96 Observation
+v4 boundary using the current `tempo-graded-potential-v1` reward and
+`combat-v7` curriculum contract.**
 
 | Minimum round | Incompatible change |
 | --- | --- |
@@ -1116,6 +1181,7 @@ v3 boundary using the current Round 7.95 reward/curriculum contract.**
 | 7.93 | `combat-v6`: two-way 95% Wilson-interval handicap ratchet with 48-episode windows |
 | 7.94 | `tempo-graded-potential-v1` reward contract: graded win speed and stall penalties, negative draws, per-step time cost, offense-dominant potential |
 | 7.95 | `combat-v7` halved scripted ratchet step (0.10 rungs) and the 2M-timestep canary horizon |
+| 7.96 | Observation v4: the observer's own decklist (`my_deck_card_identity`) and remaining-library composition (`my_library_composition`), full-deck `deck_composition_estimate`; reward/curriculum carry over from 7.95 |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing

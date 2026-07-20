@@ -1,8 +1,17 @@
 # Playersim policy observation schema
 
-Current contract: **Observation v3**, frozen July 15, 2026.
+Current contract: **Observation v4**, frozen July 20, 2026.
 
 Current schema hash:
+`15783924c36af23cf9dffb2700894f21d4c15343d0dc1fb353d351eae2f5d19f`.
+
+Observation v4 adds the observer's own decklist and remaining-library
+composition (see `my_deck_card_identity` and `my_library_composition` below)
+and changes `deck_composition_estimate` to summarize the full starting deck
+rather than only already-revealed cards. All decklist-derived features are
+observer-own only; the opponent's decklist and library are never exposed, and
+the list is an order-free multiset (the cards you own), never your hidden
+library draw order. The prior v3 hash was
 `6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137`.
 
 The executable version and hash live in
@@ -166,7 +175,10 @@ Mana vectors use color order `W,U,B,R,G,C` and saturate at 100 per entry.
 | `ability_recommendations` | `(B,5,2)`, `0..1` | Recommend/confidence pair per ability; rank-3 extractor route. |
 | `strategic_metrics` | `(7)`, `-1..1` | Position, board, card, mana, life, tempo, and game-stage metrics. Card and mana advantages use magnitude-preserving `tanh(delta / 3)` normalization. |
 | `position_advantage` | `(1)`, `-1..1` | Planner position score. |
-| `deck_composition_estimate`, `opponent_archetype` | `(6)`, `0..1` | Public-information deck/archetype summaries with specialized tempo, ramp, and tribal profiles preserved. |
+| `deck_composition_estimate` | `(6)`, `0..1` | v4: card-type ratios (creature, instant, sorcery, artifact, enchantment, land) of the observer's **full starting deck**, which the observer legitimately knows. Was a backward-looking estimate over already-revealed cards. |
+| `opponent_archetype` | `(6)`, `0..1` | Opponent deck/archetype summary inferred from **observed cards only**; the opponent's decklist is never exposed. |
+| `my_deck_card_identity` | `(60)`, `0..65535` | v4: the observer's full starting decklist as canonical categorical identities, sorted (an order-free multiset — the cards you own, not your hidden draw order). Padded with 0; shared categorical-embedding route. Observer-own only. |
+| `my_library_composition` | `(21)`, `0..count_max` | v4: the observer's **remaining** library — 8 card-type counts, 7 mana-curve buckets (cmc 0..6+), 5 color counts (WUBRG), and the total remaining count. The live "what's left to draw" signal for draw planning and keep/mulligan decisions. Observer-own only. |
 | `future_state_projections` | `(7)`, `-1..1` | Observer-antisymmetric planner projection; symmetric public states are exactly neutral. |
 | `multi_turn_plan`, `win_condition_viability` | `(6)`, `0..1` | Deterministic expected-value plan and win-condition summary. Plans use live untapped lands and spendable floating mana, respect every remaining land-drop allowance, and do not invent a current-turn draw. Nonviable paths have zero viability; viable damage paths increase monotonically as their projected win approaches. |
 | `win_condition_timings` | `(6)`, `0..max_turns+1` | Estimated turns to each win condition. |
@@ -260,7 +272,10 @@ printed card.
 
 ## Compatibility rule
 
-Observation v3 is checkpoint-incompatible with every earlier model. Consumers
-must reject or isolate runs when `lineage.observation_schema.sha256` differs.
-The canonical registry hash determines the identity embedding namespace; the
-card feature-schema hash determines `F`; both must match as well.
+Observation v4 is checkpoint-incompatible with every earlier model, including
+v3: it adds observation fields (a wider policy input) and changes
+`deck_composition_estimate` semantics. Consumers must reject or isolate runs
+when `lineage.observation_schema.sha256` differs. The canonical registry hash
+determines the identity embedding namespace; the card feature-schema hash
+determines `F`; both must match as well. Resuming a v3 checkpoint into a v4
+run fails closed.

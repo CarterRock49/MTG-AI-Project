@@ -1069,10 +1069,25 @@ ROUND_7_95_CANARY = {
             "91de663c2e15b7f61252e4dfafb431383834fa20f8408e0f52a064b0c28bb252"),
     },
 }
+# Round 7.96 re-pins the round-7.95 contract (tempo-graded-potential-v1 reward,
+# combat-v7 curriculum, 2M horizon) onto Observation v4, which exposes the
+# observer's own decklist and remaining-library composition.  The observation
+# change is a hard lineage boundary: the v3-pinned canaries above fail closed
+# against v4 runtime by design.  Only the observation lineage differs.
+ROUND_7_96_CANARY = {
+    **ROUND_7_95_CANARY,
+    "id": "round-7.96",
+    "lineage": {
+        **ROUND_7_95_CANARY["lineage"],
+        "observation_schema_version": 4,
+        "observation_schema_sha256": (
+            "15783924c36af23cf9dffb2700894f21d4c15343d0dc1fb353d351eae2f5d19f"),
+    },
+}
 CANARY_CONFIGS = {
     config["id"]: config
     for config in (ROUND_7_92_CANARY, ROUND_7_93_CANARY, ROUND_7_94_CANARY,
-                   ROUND_7_95_CANARY)
+                   ROUND_7_95_CANARY, ROUND_7_96_CANARY)
 }
 
 

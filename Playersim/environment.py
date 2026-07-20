@@ -31,8 +31,16 @@ from .ability_types import ManaAbility
 from .curriculum import CurriculumScheduler, OPPONENT_PROFILES, _stable_seed
 from .observation_schema import (
     OBSERVATION_SCHEMA_SHA256, OBSERVATION_SCHEMA_VERSION,
-    SEMANTIC_IDENTITY_MAX,
+    SEMANTIC_IDENTITY_MAX, MAX_DECK_OBSERVATION_SIZE,
 )
+
+# Remaining-library composition layout (v4): 8 card-type counts, 7 mana-curve
+# buckets (cmc 0,1,2,3,4,5,6+), 5 color counts (WUBRG), and the total count.
+LIBRARY_COMPOSITION_TYPES = (
+    "creature", "instant", "sorcery", "artifact", "enchantment", "land",
+    "planeswalker", "battle",
+)
+LIBRARY_COMPOSITION_SIZE = len(LIBRARY_COMPOSITION_TYPES) + 7 + 5 + 1
 
 
 _STATS_ARTIFACT_LOCKS = weakref.WeakValueDictionary()
@@ -466,6 +474,12 @@ class AlphaZeroMTGEnv(gym.Env):
             "position_advantage": spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32),
             "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "opponent_archetype": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
+            # v4: the observer's own full starting decklist as canonical
+            # identities (order-free multiset), and the remaining-library
+            # composition.  Both are observer-own only; the opponent's deck is
+            # never exposed.
+            "my_deck_card_identity": semantic_identity_space(MAX_DECK_OBSERVATION_SIZE),
+            "my_library_composition": spaces.Box(low=0, high=count_observation_max, shape=(LIBRARY_COMPOSITION_SIZE,), dtype=np.float32),
             "future_state_projections": spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32),
             "multi_turn_plan": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             "win_condition_viability": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
@@ -5823,6 +5837,10 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["strategic_metrics"] = np.zeros(7, dtype=np.float32) # Default
                 obs["position_advantage"] = np.array([self._calculate_position_advantage()], dtype=np.float32)
                 obs["deck_composition_estimate"] = self._get_deck_composition(agent_player_obj)
+                # v4: the observer's own decklist and remaining-library
+                # composition (observer-own; opponent deck never exposed).
+                obs["my_deck_card_identity"] = self._get_deck_card_identities(agent_player_obj)
+                obs["my_library_composition"] = self._get_library_composition(agent_player_obj)
                 obs["opponent_archetype"] = np.zeros(6, dtype=np.float32) # Default
                 obs["future_state_projections"] = np.zeros(7, dtype=np.float32) # Default
                 obs["multi_turn_plan"] = np.zeros(6, dtype=np.float32) # Default
@@ -7091,38 +7109,132 @@ class AlphaZeroMTGEnv(gym.Env):
         metrics[6] = 0.0 if stage == 'early' else 0.5 if stage == 'mid' else 1.0
         return np.clip(metrics, -1.0, 1.0)
 
+    def _observer_original_deck(self, observer):
+        """Return the observer's own full starting decklist (card-id list).
+
+        A player's own decklist is public information to that player.  Keyed on
+        the actual player object so it is correct for either seat and never
+        returns the opponent's deck (Observation v4 hidden-information rule).
+        """
+        gs = self.game_state
+        if gs is not None and observer is gs.p1:
+            return list(getattr(self, "original_p1_deck", []) or [])
+        if gs is not None and observer is gs.p2:
+            return list(getattr(self, "original_p2_deck", []) or [])
+        return []
+
+    def _deck_identity_index(self, card_id):
+        """Canonical identity for a card in the observer's own decklist.
+
+        Skips the face-down/hidden check that public-zone identities use: a
+        card in your own deck is always known to you.  0 is reserved for
+        padding, 1 for cards outside the frozen registry.
+        """
+        if card_id is None:
+            return 0
+        canonical_id = self.game_state.canonical_card_id(card_id)
+        if (isinstance(canonical_id, (int, np.integer))
+                and int(canonical_id) in self._canonical_card_ids):
+            return int(canonical_id) + 2
+        card = self.game_state.card_db.get(card_id)
+        by_name = self._canonical_card_ids_by_name.get(
+            str(getattr(card, "name", "")).casefold())
+        if by_name is not None:
+            return int(by_name) + 2
+        return 1
+
     def _get_deck_composition(self, player):
-        """Estimate deck composition based on known cards."""
+        """Card-type ratios of the observer's full starting deck (v4).
+
+        Was a backward-looking estimate over already-revealed cards; now it
+        summarizes the true 60-card decklist, which the observer legitimately
+        knows.  Shape is unchanged (6): creature, instant, sorcery, artifact,
+        enchantment, land ratios.
+        """
         composition = np.zeros(6, dtype=np.float32)
         gs = self.game_state
-        visible_exile = [
-            card_id for card_id in player.get("exile", [])
-            if not (hasattr(gs, "is_face_down_exile_card")
-                    and gs.is_face_down_exile_card(card_id, player))]
-        known_cards = (player.get("hand", [])
-                       + player.get("battlefield", [])
-                       + player.get("graveyard", [])
-                       + visible_exile)
-        total_known = len(known_cards)
-        if total_known == 0: return composition
+        deck_ids = self._observer_original_deck(player)
+        total = len(deck_ids)
+        if total == 0:
+            return composition
 
         counts = defaultdict(int)
-        for card_id in known_cards:
+        for card_id in deck_ids:
             card = gs._safe_get_card(card_id)
-            if card:
-                 if 'creature' in getattr(card, 'card_types', []): counts['creature'] += 1
-                 elif 'instant' in getattr(card, 'card_types', []): counts['instant'] += 1
-                 elif 'sorcery' in getattr(card, 'card_types', []): counts['sorcery'] += 1
-                 elif 'artifact' in getattr(card, 'card_types', []): counts['artifact'] += 1
-                 elif 'enchantment' in getattr(card, 'card_types', []): counts['enchantment'] += 1
-                 elif 'land' in getattr(card, 'type_line', '').lower(): counts['land'] += 1
+            if not card:
+                continue
+            card_types = getattr(card, 'card_types', [])
+            if 'creature' in card_types: counts['creature'] += 1
+            elif 'instant' in card_types: counts['instant'] += 1
+            elif 'sorcery' in card_types: counts['sorcery'] += 1
+            elif 'artifact' in card_types: counts['artifact'] += 1
+            elif 'enchantment' in card_types: counts['enchantment'] += 1
+            elif 'land' in getattr(card, 'type_line', '').lower(): counts['land'] += 1
 
-        composition[0] = counts['creature'] / total_known
-        composition[1] = counts['instant'] / total_known
-        composition[2] = counts['sorcery'] / total_known
-        composition[3] = counts['artifact'] / total_known
-        composition[4] = counts['enchantment'] / total_known
-        composition[5] = counts['land'] / total_known
+        composition[0] = counts['creature'] / total
+        composition[1] = counts['instant'] / total
+        composition[2] = counts['sorcery'] / total
+        composition[3] = counts['artifact'] / total
+        composition[4] = counts['enchantment'] / total
+        composition[5] = counts['land'] / total
+        return composition
+
+    def _get_deck_card_identities(self, observer):
+        """The observer's full starting decklist as canonical identities.
+
+        Sorted ascending so the field is an order-free multiset -- it exposes
+        the cards you own, never your hidden library draw order.  Padded with
+        0 to the fixed contract size; a longer deck is truncated (a larger
+        corpus would already start a new registry/observation lineage).
+        """
+        identities = np.zeros(MAX_DECK_OBSERVATION_SIZE, dtype=np.int32)
+        deck_ids = self._observer_original_deck(observer)
+        if not deck_ids:
+            return identities
+        encoded = sorted(
+            self._deck_identity_index(card_id) for card_id in deck_ids)
+        encoded = encoded[:MAX_DECK_OBSERVATION_SIZE]
+        identities[:len(encoded)] = encoded
+        return identities
+
+    def _get_library_composition(self, observer):
+        """Composition of the observer's remaining library (v4).
+
+        The remaining library is what you have left to draw; you know it
+        because you know your deck and everything you have already seen.
+        Layout: 8 type counts, 7 mana-curve buckets (cmc 0..6+), 5 color
+        counts (WUBRG), and the total remaining count.
+        """
+        composition = np.zeros(LIBRARY_COMPOSITION_SIZE, dtype=np.float32)
+        gs = self.game_state
+        library = observer.get("library", []) if observer else []
+        if not library:
+            return composition
+        type_base = 0
+        curve_base = len(LIBRARY_COMPOSITION_TYPES)
+        color_base = curve_base + 7
+        total_base = color_base + 5
+        for card_id in library:
+            card = gs._safe_get_card(card_id)
+            if not card:
+                continue
+            card_types = getattr(card, 'card_types', []) or []
+            type_line = getattr(card, 'type_line', '') or ''
+            for offset, type_name in enumerate(LIBRARY_COMPOSITION_TYPES):
+                if type_name in card_types or (
+                        type_name == 'land' and 'land' in type_line.lower()):
+                    composition[type_base + offset] += 1.0
+            try:
+                cmc = int(getattr(card, 'cmc', 0) or 0)
+            except (TypeError, ValueError):
+                cmc = 0
+            composition[curve_base + min(max(cmc, 0), 6)] += 1.0
+            colors = getattr(card, 'colors', None)
+            if isinstance(colors, (list, tuple)):
+                for color_offset in range(min(5, len(colors))):
+                    if colors[color_offset]:
+                        composition[color_base + color_offset] += 1.0
+        composition[total_base] = float(len(library))
         return composition
 
     def _get_threat_assessment(self, opp_bf_ids, threat_list=None):

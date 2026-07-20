@@ -13,9 +13,16 @@ import json
 
 
 OBSERVATION_SCHEMA_KIND = "playersim_policy_observation"
-OBSERVATION_SCHEMA_VERSION = 3
+OBSERVATION_SCHEMA_VERSION = 4
 SEMANTIC_IDENTITY_VOCAB_SIZE = 65_536
 SEMANTIC_IDENTITY_MAX = SEMANTIC_IDENTITY_VOCAB_SIZE - 1
+
+# The observer's own decklist is public information to that observer, so its
+# starting-deck identities and remaining-library composition are legitimate
+# observations.  The full list is exposed as an order-free multiset (the
+# cards you own), never the live library order (your hidden draw order), and
+# only for the observing player -- the opponent's decklist stays concealed.
+MAX_DECK_OBSERVATION_SIZE = 60
 
 # These are stable canonical registry indices encoded as:
 #   0 = padded slot, 1 = visible object with unknown/unsupported identity,
@@ -33,6 +40,8 @@ SEMANTIC_IDENTITY_FIELDS = (
     "stack_card_identity",
     "target_card_identity",
     "choice_card_identity",
+    # v4: the observer's own full starting decklist (order-free multiset).
+    "my_deck_card_identity",
 )
 
 # The action mask is consumed by MaskablePPO rather than the feature extractor.
@@ -81,6 +90,31 @@ ADDED_V2_FIELDS = (
 
 REMOVED_V3_FIELDS = (
     "resource_efficiency",  # duplicated/fabricated heuristic summary
+)
+
+# v4 exposes the observer's own decklist, which the policy previously never
+# saw (library was count-only and deck_composition_estimate summarized only
+# already-revealed cards).  Control decks are unplayable without it, and the
+# mulligan decision is uninformed without knowing your own land/spell counts.
+ADDED_V4_FIELDS = (
+    # Full starting decklist as canonical identities (observer-own multiset).
+    "my_deck_card_identity",
+    # Remaining-library composition: type counts, mana-curve buckets, color
+    # availability, and the remaining count -- the live "what's left to draw"
+    # signal for draw planning and keep/mulligan decisions.
+    "my_library_composition",
+)
+
+CORRECTED_V4_SEMANTICS = (
+    # deck_composition_estimate now summarizes the observer's full 60-card
+    # starting deck, not only the cards already revealed this game.
+    "deck_composition_estimate_uses_full_own_decklist",
+    # All decklist-derived features are observer-own only; the opponent's
+    # decklist and library composition are never exposed.
+    "decklist_features_are_observer_own_only",
+    # The decklist is an order-free multiset (cards owned), never the live
+    # library order (the observer's own draw order remains hidden).
+    "deck_card_identities_are_order_free_multiset",
 )
 
 CORRECTED_V3_SEMANTICS = (
@@ -132,6 +166,9 @@ def _schema_payload() -> dict:
         "added_v2_fields": list(ADDED_V2_FIELDS),
         "removed_v3_fields": list(REMOVED_V3_FIELDS),
         "corrected_v3_semantics": list(CORRECTED_V3_SEMANTICS),
+        "added_v4_fields": list(ADDED_V4_FIELDS),
+        "corrected_v4_semantics": list(CORRECTED_V4_SEMANTICS),
+        "max_deck_observation_size": MAX_DECK_OBSERVATION_SIZE,
     }
 
 

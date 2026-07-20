@@ -158,10 +158,15 @@ class DoomsdayExcruciatorTest(unittest.TestCase):
             observation["my_exile_card_identity"][1:1 + hidden_count] == 1))
         self.assertFalse(np.any(
             observation["my_exile_card_visibility"][1:1 + hidden_count]))
+        # Observation v4: deck_composition_estimate summarizes the observer's
+        # full starting deck, which is public information to that observer, so
+        # it is inherently independent of what is in exile (hidden or visible).
+        # The injected exile cards must not change it.
+        env = get_env()
+        expected_composition = env._get_deck_composition(game_state.p1)
         np.testing.assert_allclose(
-            observation["deck_composition_estimate"],
-            np.array([0.5, 0.0, 0.0, 0.5, 0.0, 0.0],
-                     dtype=np.float32))
+            observation["deck_composition_estimate"], expected_composition)
+        self.assertGreater(float(np.sum(expected_composition)), 0.0)
         self.assertIn(doomsday, game_state.p1["battlefield"])
 
     def test_hidden_exile_tracking_clones_and_clears_on_zone_change(self):
