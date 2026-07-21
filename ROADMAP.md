@@ -994,53 +994,124 @@ v3 throughput and memory alongside behavior telemetry.
 
 ---
 
+## Round 7.97 post-mortem — Observation v5 + matchup weighting did not break the piloting wall — July 21, 2026
+
+`round-7.97-obs-v5-v1` completed a full 2M timesteps clean: zero reward-sign
+failures, zero strict-fidelity counters, critic explained-variance 0.86–0.90,
+no crash. It did **not** qualify. Periodic-eval qualification peaked at **0.297
+@ 1.6M** and finished **0.281 @ 2.0M** against the fixed full-strength gauntlet
+(eval `opponent_handicap = 0.0`, confirmed in `game_log.jsonl`), never reaching
+the 0.55 promotion bar, so `best_model.zip` was never published. `final_model`
+(the 2M policy) is retained.
+
+**Not an improvement over v3 observation.** On the only cross-round-comparable
+metrics — qualification and timeout rate against the fixed gauntlet — 7.97 is a
+statistical dead heat with its predecessors and if anything trails: peak
+qualification 7.95 **0.328** > 7.96-obs-v4-v2 **0.312** > 7.97 **0.297**, all
+inside the ±0.14 interval of a 64-game eval. The v4 decklist and v5 color-mana
+observations plus matchup weighting produced **no measurable gain over 7.95's
+plain observation.** The ~0.30 ceiling is invariant across 7.94–7.97 regardless
+of observation richness or reward (shared `tempo-graded-potential-v1`). An
+earlier live-diagnosis call that 7.97 was "the strongest recent trajectory" was
+wrong — it anchored on the one run being watched; the cross-round table
+corrects it.
+
+**The wall is per-deck, and it is total.** Filtering `game_log.jsonl` to the 2M
+eval (64 games) gives the final policy's true skill by agent deck:
+
+| Agent deck | Archetype | 2M W–L | Win% | Timeout% | Avg turn |
+|---|---|---|---|---|---|
+| Izzet Spellementals | tempo | 5–3 | 62 | 12 | 18.6 |
+| Azorius Momo | reanimator | 4–4 | 50 | 25 | 23.2 |
+| Selesnya Ouroboroid | aggro | 4–4 | 50 | 0 | 19.0 |
+| Izzet Prowess | tempo | 3–5 | 38 | 0 | 16.5 |
+| Mono-Green Landfall | combo | 3–5 | 38 | 0 | 13.6 |
+| Jeskai Lessons | control | 0–8 | 0 | 0 | 15.8 |
+| Dimir Excruciator | control | 0–8 | 0 | 0 | 15.0 |
+| 4c Control | control | 0–8 | 0 | 0 | 15.8 |
+
+The headline 30% is a competent aggro/tempo pilot (Izzet Spellementals 62%)
+averaged with a control pilot that wins **nothing** — the three reactive decks
+go **0–24**. Matchup weighting, the lever this round expected to lift the
+reactive decks off the ~0% floor by oversampling them, **did not**; they remain
+pinned at zero.
+
+**It dies, it no longer durdles.** Every one of the 24 control-deck losses is
+`by life_total` (killed), clustering turns 12–17, against every proactive
+opponent — not timeouts. The mid-run durdle worry is largely resolved in the
+final policy (2M overall timeout 5%, eval timeouts 3/64). The residual failure
+is not stalling: the single policy learned exactly one gameplan — deploy threats
+and race — and has no defensive plan, so on a control deck it is killed around
+turn 14 before any control plan comes online.
+
+**Mulligans compound the collapse.** Cumulative per-deck, mulliganing craters
+win rate for every deck (keep-hand 0.28–0.85 vs mulligan-hand 0.00–0.32), and
+the three control decks mulligan the most (avg 2.2–2.3, i.e. down to ~5 cards)
+and win **0%** when they do — the user's replayed observation, quantified. Read
+as compounding, not root cause: control decks win only 0.28–0.33 even on kept
+sevens cumulatively and 0% at 2M, so the archetype deficit is primary and the
+over-mulligan makes a losing position hopeless. The mulligan behavior is most
+likely a symptom — the policy mulligans control hands searching for the
+proactive gameplan it knows, and finds none keepable.
+
+**Verdict.** The reactive-deck collapse is confirmed as a **single-policy
+piloting ceiling**, not an information or reward-shaping problem. Observation and
+reward levers are exhausted for this failure. Round 7.98 must change the training
+signal structurally rather than add features; see the plan below.
+
+---
+
 ## Current execution plan
 
-### Now — run the Round 7.97 Observation v5 canary
+### Now — Round 7.98: break the piloting ceiling structurally
 
-The round-7.96 runs (below) showed the reactive-deck collapse is a piloting
-problem decoupled from mulligans and information, so this round leads with the
-matchup-weighting lever and rides Observation v5 (color mana) alongside. Stop
-tuning the curriculum ratchet.
+The 7.97 post-mortem (above) confirms the reactive-deck 0% is a single-policy
+piloting ceiling, invariant to observation and reward changes. Stop adding
+observation fields and reward terms for this failure. Three structural levers,
+sequenced cheapest-first, one new lever per round for clean attribution:
 
-1. Keep the now-green delivery gate mandatory: golden scenarios, discovered
-   unit tests, runtime and training smoke, default invariant fuzz, and canary
-   validation. The v5 observation schema hash is
-   `cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16`. Do not
-   launch if the gate regresses.
-2. Launch a fresh Standard candidate with
-   `--canary-config round-7.97 --run-name round-7.97-obs-v5-v1
-   --matchup-weighting`. The named configuration re-pins the unchanged
-   `tempo-graded-potential-v1` reward (with its 0.005 per-step time cost), the
-   full resolved `combat-v7` hash, feature width/device class, 2M timesteps,
-   eight environments, 100k periodic evaluation with 64 games (32 seat-swapped
-   pairs), 50k checkpoints, training seed `20260715`, and evaluation seed
-   `21260715` — over Observation v5. This is a hard schema boundary: earlier-
-   schema checkpoints and the 7.92–7.96 canaries fail closed against v5 runtime
-   by design. `--matchup-weighting` is intentionally outside the canary
-   contract; include it to enable the scheduling lever.
-3. The primary success signals are the diagnosis targets, not the ratchet.
-   Watch the per-deck eval win rates (`evaluations.json` grouped by the agent's
-   deck). Success means the reactive decks (4c Control, Dimir Excruciator,
-   Jeskai Lessons) move off the ~0% floor. Because two levers land together,
-   attribute carefully: matchup weighting is the change expected to move the
-   reactive decks (it oversamples them in training), while Observation v5's
-   color mana is a genuine information upgrade whose effect the diagnosis
-   expects to be secondary.
-4. At each 100k boundary, compare checkpoints through `evaluations.json`.
-   Require balanced case/seat exposure, zero reward-sign failures, zero strict
-   fidelity counters (including effect-continuation failures and lost-spell
-   recoveries), and promotion to `best_model.zip` only when the pair-aware 95%
-   qualification lower bound reaches 55%.
-5. Keep the enumerated named-canary fields unchanged. A mismatch in the checked
-   seed, worker-count, schedule, reward/PPO configuration, resolved curriculum,
-   feature width/device class, or hashed lineage (now including Observation v4)
-   invalidates the comparison. Treat source, runtime-library, or specific-GPU
-   differences recorded in the manifest as audit variables.
-6. If the reactive decks stay near zero even with the decklist visible, the
-   remaining structural hypothesis is one policy collapsing onto the aggro
-   strategy across eight archetypes; the next lever is matchup-weighted
-   scheduling (Round 7.91 lever #1), not another observation or reward change.
+1. **Self-play / checkpoint league (lead lever).** The environment hook already
+   exists: `AlphaZeroMTGEnv.set_opponent_policy(policy)` installs any object
+   exposing `predict(obs, action_masks, deterministic)` as the opponent, and
+   `_get_opponent_policy_action` already fetches the opponent observation, runs
+   the net, and enforces mask-legality (raises on a mask-invalid action). The
+   scripted profiles (`passive`, `novice`, `scripted`) leave `opponent_policy =
+   None`; nothing in `main.py` or Harvest yet installs a neural opponent. What
+   is missing is orchestration only: (a) snapshot the training policy into a
+   frozen pool on a cadence, (b) sample a pool opponent per episode via
+   `set_opponent_policy`, added as a new curriculum source alongside the
+   scripted profiles, (c) gate behind an off-by-default CLI flag in the style of
+   `--matchup-weighting`. **Known blocker:** `_get_obs()` builds "me" as
+   `p1 if agent_is_p1 else p2`, i.e. it is hardwired to the agent seat, so the
+   existing hook would feed the opponent net the agent's own view (including the
+   agent's hidden hand). The hook validates mask-legality but has never been
+   exercised (`opponent_policy` is always `None`). Lever 1 must first add an
+   opponent-perspective observation path — either an `observer_is_p1` argument
+   to `_get_obs()` (cleaner, no state mutation) or a flip-`agent_is_p1`-and-
+   restore around the call (smaller, but must confirm nothing else caches
+   perspective). Rationale: the
+   scripted bots had to be handicap-ratcheted down to 0.20 to stay competitive,
+   so the agent was never pressured to learn the patient control game; self-play
+   supplies full-strength, self-scaling sparring the scripts cannot.
+2. **Archetype-conditioned capacity.** The agent observes `opponent_archetype`
+   (6-dim) but **not its own** — there is no `my_archetype` field. Add it
+   (Observation v6, hard lineage boundary) and/or a light policy conditioning
+   (FiLM or an archetype-indexed head) so the control gameplan is not averaged
+   away by the dominant aggro gradient. Sequence after lever 1 so the two do not
+   confound.
+3. **Mulligan policy, targeted.** Most likely downstream of levers 1–2 (the
+   policy mulligans control hands hunting a proactive plan it cannot execute);
+   revisit only if the 0% persists once control decks can win. No cap (standing
+   preference); if needed, sharpen the keep/mull value signal — the heuristic
+   `mulligan_recommendation` from `strategic_planner.suggest_mulligan_decision`
+   is already an observation — rather than legislate the decision.
+
+Do not launch more than one new lever per round. Keep the delivery gate
+mandatory (golden scenarios, discovered unit tests, runtime and training smoke,
+default invariant fuzz, canary validation); any observation change (lever 2)
+mints a new schema hash, canary, and checkpoint lineage and retrains from
+scratch. Promotion to `best_model.zip` still requires the pair-aware 95%
+qualification lower bound to reach 55% with zero fidelity counters.
 
 ### Next — qualify and calibrate Standard
 
@@ -1132,6 +1203,14 @@ suspect even when static classification is clean.
   finite rewards, mana clearing, and layer idempotence.
 - Failures retain seed, actions, context, state, and a replay command; clean
   seeds leave no artifact.
+- Test bug logs stay quarantined in `bugs/tests/` so they never masquerade as
+  production run failures. Detection (`Playersim/debug.py`) now covers three
+  layers: explicit `PLAYERSIM_TEST_MODE`/`PYTEST_CURRENT_TEST`, launcher argv
+  (`-m unittest`, `*_test.py`, and IDE runners — VS Code `unittestadapter`/
+  `visualstudio_py_testlauncher`, PyCharm `_jb_*_runner`), and an import-stack
+  fallback for any unenumerated launcher whose test module is live when
+  `debug.py` first loads. IDE-launched tests previously leaked to top-level
+  `bugs/` because their launcher argv matched none of the old patterns.
 - Successful fixed-evaluation games now retain evaluation-only, both-actor
   action/state traces in atomic gzip sidecars. The dependency-free Stats
   Workbench joins every case to its game-log provenance and loads one selected

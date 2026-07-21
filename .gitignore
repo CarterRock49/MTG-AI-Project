@@ -87,6 +87,7 @@ sqlite:///
 .agents
 Mtg_Cards
 Format Card Lists
+probe_runs
 
 # Runtime artifacts
 strategy_memory.pkl

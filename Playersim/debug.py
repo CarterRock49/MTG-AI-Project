@@ -32,17 +32,76 @@ def _looks_like_test_process(argv=None, environ=None):
     if any(token in {"pytest", "py.test", "unittest"}
            for token in lowered_invocation):
         return True
+    # IDE test runners (VS Code, PyCharm) drive tests through a launcher whose
+    # argv is neither ``-m unittest`` nor a ``*_test.py`` path, so match the
+    # launcher scripts themselves.  The import-stack fallback below is the real
+    # catch-all; these markers keep detection working before any test frame is
+    # on the stack (e.g. a launcher that pre-imports the package).
+    joined_invocation = " ".join(lowered_invocation)
+    if any(marker in joined_invocation for marker in _IDE_TEST_LAUNCHER_MARKERS):
+        return True
     executable = os.path.basename(str(argv[0])).lower()
     if executable.startswith("pytest") or executable in {
             "py.test", "unittest", "unittest.exe"}:
         return True
     normalized = str(argv[0]).replace("\\", "/").lower()
+    if any(marker in normalized for marker in _IDE_TEST_LAUNCHER_MARKERS):
+        return True
     filename = normalized.rsplit("/", 1)[-1]
     return (
         "/tests/" in f"/{normalized.lstrip('/')}"
         or "/unittest/" in f"/{normalized.lstrip('/')}"
         or filename.endswith(("_test.py", "test.py"))
     )
+
+
+# Launcher-script name fragments used by common IDE test runners.  ``unittest``
+# alone is deliberately absent — it is handled above as an exact token so it
+# does not match unrelated paths.
+_IDE_TEST_LAUNCHER_MARKERS = (
+    "unittestadapter",           # VS Code Python extension (modern)
+    "visualstudio_py_test",      # VS Code Python extension (legacy)
+    "testlauncher",              # generic VS Code / ptvsd launcher
+    "_jb_unittest_runner",       # PyCharm unittest
+    "_jb_pytest_runner",         # PyCharm pytest
+    "_jb_nosetest_runner",       # PyCharm nose
+    "pydev_runfiles",            # PyDev / Eclipse
+)
+
+
+def _looks_like_test_frame(filename):
+    """True when a stack frame belongs to a test module or the tests package."""
+    normalized = str(filename).replace("\\", "/").lower()
+    base = normalized.rsplit("/", 1)[-1]
+    return (
+        "/tests/" in f"/{normalized.lstrip('/')}"
+        or base.endswith(("_test.py", "test.py"))
+        or base.startswith("test_")
+    )
+
+
+def _test_context_in_stack(frames=None):
+    """Detect a test run from the import stack, independent of the launcher.
+
+    ``debug.py`` is only pulled in transitively (via ``environment`` etc.), so
+    during a test run the frame that first imports it always traces back
+    through a test module or the ``tests`` package.  A production ``main.py``
+    run never has such a frame, so this stays false there.
+    """
+    if frames is None:
+        frames = [frame.filename for frame in traceback.extract_stack()]
+    return any(_looks_like_test_frame(name) for name in frames)
+
+
+def _current_process_is_test(argv=None, environ=None):
+    """Full test-context check: explicit env, launcher argv, then stack."""
+    environ = os.environ if environ is None else environ
+    explicit = str(environ.get("PLAYERSIM_TEST_MODE", "")).strip().lower()
+    if explicit in {"0", "false", "no", "off"}:
+        return False
+    if _looks_like_test_process(argv=argv, environ=environ):
+        return True
+    return _test_context_in_stack()
 
 
 def _resolve_bug_log_directory(argv=None, environ=None):
@@ -56,10 +115,11 @@ def _resolve_bug_log_directory(argv=None, environ=None):
             argv=argv, environ=environ) else "bugs"
 
 
-TEST_LOG_CONTEXT = _looks_like_test_process()
+TEST_LOG_CONTEXT = _current_process_is_test()
 if TEST_LOG_CONTEXT:
-    # Windows spawned workers import this module afresh.  Mark the parent
-    # environment so every child keeps the same isolated destination.
+    # Windows spawned workers import this module afresh, and an IDE launcher's
+    # argv is invisible to them.  Mark the parent environment so every child --
+    # and the directory resolution just below -- keeps the isolated destination.
     os.environ.setdefault("PLAYERSIM_TEST_MODE", "1")
 BUG_LOG_DIRECTORY = _resolve_bug_log_directory()
 os.makedirs(BUG_LOG_DIRECTORY, exist_ok=True)

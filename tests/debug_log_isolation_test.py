@@ -32,6 +32,59 @@ class DebugLogIsolationTest(unittest.TestCase):
         self.assertFalse(debug_module._looks_like_test_process(
             argv=["main.py", "--run-id", "production"], environ={}))
 
+    def test_ide_test_launchers_are_detected(self):
+        # IDE test runners drive tests through a launcher script whose argv is
+        # neither ``-m unittest`` nor a ``*_test.py`` path.  Each must still be
+        # recognised so its logs land in bugs/tests, not top-level bugs/.
+        ide_launchers = [
+            # VS Code Python extension, modern and legacy launchers.
+            ["C:/x/.vscode/ms-python/python_files/unittestadapter/"
+             "execution.py", "--udiscovery", "-s", "tests"],
+            ["python", "-m", "unittestadapter.execution", "--udiscovery"],
+            ["C:/x/.vscode/pythonFiles/visualstudio_py_testlauncher.py",
+             "--us=tests", "--ut=test"],
+            # PyCharm test runners.
+            ["C:/x/.pycharm_helpers/_jb_unittest_runner.py", "true", "tests"],
+            ["C:/x/.pycharm_helpers/_jb_pytest_runner.py", "--target",
+             "tests/foo.py"],
+        ]
+        for argv in ide_launchers:
+            with self.subTest(argv=argv):
+                self.assertTrue(
+                    debug_module._looks_like_test_process(argv=argv, environ={}),
+                    argv,
+                )
+                self.assertEqual(
+                    debug_module._resolve_bug_log_directory(
+                        argv=argv, environ={}),
+                    str(Path("bugs") / "tests"),
+                )
+
+    def test_import_stack_fallback_catches_unknown_launchers(self):
+        # A launcher we do not enumerate is still caught when a test module is
+        # live on the import stack as debug.py first loads.
+        self.assertTrue(debug_module._looks_like_test_frame(
+            "C:/proj/tests/producible_mana_observation_test.py"))
+        self.assertTrue(debug_module._looks_like_test_frame(
+            "C:/proj/pkg/test_helpers.py"))
+        self.assertFalse(debug_module._looks_like_test_frame(
+            "C:/proj/main.py"))
+        self.assertFalse(debug_module._looks_like_test_frame(
+            "C:/proj/Playersim/environment.py"))
+        self.assertTrue(debug_module._test_context_in_stack(
+            frames=["C:/proj/main.py", "C:/proj/tests/foo_test.py"]))
+        self.assertFalse(debug_module._test_context_in_stack(
+            frames=["C:/proj/main.py", "C:/proj/Playersim/environment.py"]))
+
+    def test_explicit_test_mode_off_overrides_every_signal(self):
+        # An operator can force production routing even from a test-shaped argv.
+        self.assertFalse(debug_module._current_process_is_test(
+            argv=["tests/smoke_test.py"],
+            environ={"PLAYERSIM_TEST_MODE": "0"}))
+        self.assertFalse(debug_module._current_process_is_test(
+            argv=["C:/x/_jb_pytest_runner.py"],
+            environ={"PLAYERSIM_TEST_MODE": "false"}))
+
     def test_test_logs_use_isolated_directory_and_override_wins(self):
         self.assertEqual(
             debug_module._resolve_bug_log_directory(
