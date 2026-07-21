@@ -2797,6 +2797,53 @@ class ActionSpaceMixin:
                 })
         return options
 
+    def _graveyard_modal_cast_castable(self, player, card_id, card, cast_context):
+        """Fail-closed CR 601.2b modal gate for a graveyard cast.
+
+        A Tiered (or Spree) spell is only castable if at least one mode is
+        selectable -- payable AND with legal targets -- under this cast
+        context.  cast_spell enforces exactly this before it opens the mode
+        choice, so the mask must share the predicate: a base flashback/alt
+        cost can be affordable while every mode is unpayable or has no legal
+        target (Thunder Magic flashback, July 20).  Non-modal cards pass.
+        """
+        gs = self.game_state
+        if getattr(card, "is_tiered", False):
+            modes = getattr(card, "tiered_modes", []) or []
+            return any(
+                gs.tiered_mode_is_selectable(
+                    card_id, player, mode_index, context=cast_context)
+                for mode_index in range(len(modes)))
+        if getattr(card, "is_spree", False):
+            modes = getattr(card, "spree_modes", []) or []
+            return any(
+                gs.spree_mode_is_selectable(
+                    card_id, player, [], mode_index, context=cast_context)
+                for mode_index in range(len(modes)))
+        return True
+
+    def _cast_is_legal_for_mask(self, player, opponent, card_id, card,
+                                cast_context=None):
+        """One legality gate every cast-action generator must pass a spell
+        through before offering it.
+
+        Mirrors what `cast_spell` enforces before it commits: the spell must
+        have a legal target (CR 601.2c) and, if Tiered/Spree, at least one
+        selectable mode (CR 601.2b).  Sharing this predicate across the hand,
+        graveyard, exile, and alternative-cost cast paths is what keeps the
+        mask from offering a cast the engine then rejects -- the recurring
+        divergence class that has repeatedly stopped runs (flashback, exile
+        counterspell, Harmonize, and the hand alternative-cost mechanics).
+        Overload is intentionally exempt at its call sites because it replaces
+        "target" with "each", so it is castable regardless of target counts.
+        """
+        if not self._targets_available(card, player, opponent):
+            return False
+        if not self._graveyard_modal_cast_castable(
+                player, card_id, card, cast_context or {"card": card}):
+            return False
+        return True
+
     def _overflow_graveyard_actions(self, player, opponent):
         """Return cast/play permissions beyond the six fixed graveyard slots."""
         gs = self.game_state
@@ -2869,6 +2916,12 @@ class ActionSpaceMixin:
                                 {"card": card})
                             for reduction in reductions):
                         continue
+                    if (not self._targets_available(card, player, opponent)
+                            or not self._graveyard_modal_cast_castable(
+                                player, card_id, card, {
+                                    "card": card, "use_alt_cost": "harmonize",
+                                    "harmonize_cost": harmonize_cost})):
+                        continue
                     context.update({"harmonize_cast": True,
                                     "harmonize_cost": harmonize_cost})
                 elif flashback_cost:
@@ -2877,9 +2930,16 @@ class ActionSpaceMixin:
                         continue
                     flashback_context = {"card": card,
                                          "flashback_cost": flashback_cost,
-                                         "use_alt_cost": "flashback"}
+                                         "use_alt_cost": "flashback",
+                                         "flashback_cast": True,
+                                         "source_zone": "graveyard",
+                                         "source_idx": graveyard_index}
                     if getattr(card, "is_spree", False):
                         if not self._spree_alt_cast_payable(
+                                player, card_id, card, flashback_context):
+                            continue
+                    elif getattr(card, "is_tiered", False):
+                        if not self._graveyard_modal_cast_castable(
                                 player, card_id, card, flashback_context):
                             continue
                     elif (not self._can_afford_cost_string(
@@ -2970,6 +3030,7 @@ class ActionSpaceMixin:
     def _add_exile_casting_actions(self, player, valid_actions, set_valid_action):
         """Add actions for casting spells from exile."""
         gs = self.game_state
+        opponent = gs.p2 if player is gs.p1 else gs.p1
 
         for i, option in enumerate(gs.get_exile_cast_options(player)[:8]):
             card = gs._safe_get_card(option["card_id"])
@@ -3017,6 +3078,18 @@ class ActionSpaceMixin:
                         player, card, context=probe_context)
                 if not can_afford:
                     continue
+                if not is_land:
+                    # The exile cast must share the hand-cast legality
+                    # contract: a targeted spell (e.g. a counterspell exiled
+                    # with cast permission) needs a legal target, and a
+                    # Tiered/Spree spell needs a selectable mode. cast_spell
+                    # fails closed on both, so the mask must too (No More Lies
+                    # cast from exile with an empty stack, July 20).
+                    if not self._targets_available(card, player, opponent):
+                        continue
+                    if not self._graveyard_modal_cast_castable(
+                            player, option["card_id"], card, probe_context):
+                        continue
                 face_label = (
                     f" [{cast_context['room_cast_face_name']}]"
                     if getattr(card, "is_room", False) else "")
@@ -3042,18 +3115,22 @@ class ActionSpaceMixin:
     def _add_warp_actions(self, player, valid_actions, set_valid_action,
                           require_instant_speed=False):
         """Expose Warp using Plot's mutually exclusive hand-indexed slots."""
-        if not self.game_state.can_player_cast_spells(player):
+        gs = self.game_state
+        if not gs.can_player_cast_spells(player):
             return
+        opponent = gs.p2 if player is gs.p1 else gs.p1
         action_indices = [296, 297, 298, 309, 310, 311, 312, 313]
         for hand_index, card_id in enumerate(player.get("hand", [])[:8]):
-            card = self.game_state._safe_get_card(card_id)
+            card = gs._safe_get_card(card_id)
             warp_cost = getattr(card, "warp_cost", None) if card else None
             if (not card or not getattr(card, "is_warp", False)
                     or not warp_cost):
                 continue
             if require_instant_speed and not self._has_flash(card_id):
                 continue
-            if self._can_afford_cost_string(player, warp_cost):
+            if (self._can_afford_cost_string(player, warp_cost)
+                    and self._cast_is_legal_for_mask(
+                        player, opponent, card_id, card)):
                 set_valid_action(
                     action_indices[hand_index], f"WARP_CAST {card.name}",
                     context={"hand_idx": hand_index, "warp_cast": True})
@@ -3497,8 +3574,10 @@ class ActionSpaceMixin:
             if card and hasattr(card, 'oracle_text') and "jump-start" in card.oracle_text.lower():
                 is_instant = 'instant' in getattr(card, 'card_types', [])
                 if is_sorcery_speed or is_instant: # Check timing
-                    if len(player["hand"]) > 0 and self._can_afford_card(player, card):
-                        # FIXED: Use correct action ID for CAST_WITH_JUMP_START (399)
+                    if (len(player["hand"]) > 0
+                            and self._can_afford_card(player, card)
+                            and self._cast_is_legal_for_mask(
+                                player, opponent, card_id, card)):
                         discard_idx = min(
                             range(len(player["hand"])),
                             key=lambda idx: self.card_evaluator.evaluate_card(
@@ -3525,8 +3604,11 @@ class ActionSpaceMixin:
                         exile_count = self._word_to_number(re.search(r"(\w+|\d+)", exile_req_str).group(1)) if re.search(r"(\w+|\d+)", exile_req_str) else 1
 
                         # Check if enough *other* cards exist in GY
-                        if len(player["graveyard"]) > exile_count and self._can_afford_cost_string(player, cost_str):
-                            # FIXED: Use correct action ID for CAST_WITH_ESCAPE (400)
+                        if (len(player["graveyard"]) > exile_count
+                                and self._can_afford_cost_string(
+                                    player, cost_str)
+                                and self._cast_is_legal_for_mask(
+                                    player, opponent, card_id, card)):
                             escape_indices = [
                                 idx for idx in range(len(player["graveyard"]))
                                 if idx != i
@@ -3553,8 +3635,10 @@ class ActionSpaceMixin:
                         break
 
                 # Check affordability
-                if exile_idx != -1 and self._can_afford_cost_string(player, cost_str):
-                    # FIXED: Use correct action ID for CAST_FOR_MADNESS (401)
+                if (exile_idx != -1
+                        and self._can_afford_cost_string(player, cost_str)
+                        and self._cast_is_legal_for_mask(
+                            player, opponent, card_id, card)):
                     context = {'exile_idx': exile_idx, 'card_id': card_id}
                     set_valid_action(401, f"CAST_FOR_MADNESS {card.name if card else card_id}", context=context)
 
@@ -3585,7 +3669,11 @@ class ActionSpaceMixin:
                                 gs._safe_get_card(cid), 'card_types', [])
                         ]
                         # Simplified cost check - full check happens later
-                        if sacrifice_options and self._can_afford_cost_string(player, cost_match.group(1)):
+                        if (sacrifice_options
+                                and self._can_afford_cost_string(
+                                    player, cost_match.group(1))
+                                and self._cast_is_legal_for_mask(
+                                    player, opponent, card_id, card)):
                              sacrifice_idx, sacrifice_id = max(
                                  sacrifice_options,
                                  key=lambda pair: getattr(
@@ -3605,8 +3693,10 @@ class ActionSpaceMixin:
                 if card and hasattr(card, 'oracle_text') and "delve" in card.oracle_text.lower():
                     delve_indices = list(range(len(player.get("graveyard", []))))
                     affordability_context = {'delve_cards': delve_indices}
-                    if delve_indices and self._can_afford_card(
-                            player, card, context=affordability_context):
+                    if (delve_indices and self._can_afford_card(
+                            player, card, context=affordability_context)
+                            and self._cast_is_legal_for_mask(
+                                player, opponent, card_id, card)):
                         context = {
                             'hand_idx': i,
                             'gy_indices': delve_indices,
@@ -3708,6 +3798,13 @@ class ActionSpaceMixin:
                         for reduction in reductions)
                 if not payable:
                     continue
+                harmonize_context = {
+                    "card": card, "use_alt_cost": "harmonize",
+                    "harmonize_cost": harmonize_cost}
+                if (not self._targets_available(card, player, opponent)
+                        or not self._graveyard_modal_cast_castable(
+                            player, card_id, card, harmonize_context)):
+                    continue
                 set_valid_action(
                     472 + graveyard_index,
                     f"CAST_WITH_HARMONIZE {card.name}",
@@ -3724,9 +3821,16 @@ class ActionSpaceMixin:
                     continue
                 flashback_context = {"card": card,
                                      "flashback_cost": flashback_cost,
-                                     "use_alt_cost": "flashback"}
+                                     "use_alt_cost": "flashback",
+                                     "flashback_cast": True,
+                                     "source_zone": "graveyard",
+                                     "source_idx": graveyard_index}
                 if getattr(card, "is_spree", False):
                     if not self._spree_alt_cast_payable(
+                            player, card_id, card, flashback_context):
+                        continue
+                elif getattr(card, "is_tiered", False):
+                    if not self._graveyard_modal_cast_castable(
                             player, card_id, card, flashback_context):
                         continue
                 else:

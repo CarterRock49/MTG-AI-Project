@@ -3,6 +3,7 @@
 import random
 import unittest
 
+from collections import Counter
 from copy import deepcopy
 
 import numpy as np
@@ -320,6 +321,58 @@ class CurriculumSchedulerTest(unittest.TestCase):
                         resolve_curriculum("combat-v4", DECKS)
                 finally:
                     curriculum_module.COMBAT_CURRICULUM_V4 = original
+
+
+class MatchupWeightingTest(unittest.TestCase):
+    """Opt-in matchup weighting oversamples the agent's losing decks."""
+
+    def setUp(self):
+        self.spec = resolve_curriculum("combat-v7", DECKS)
+        self.full_pool = len(self.spec["stages"]) - 1
+
+    def _sample_agent_decks(self, scheduler, n=800):
+        counts = Counter()
+        scheduler.set_stage(self.full_pool)
+        for _ in range(n):
+            counts[scheduler.peek(True)["agent_deck"]] += 1
+            scheduler.commit(scheduler.stage_index())
+        return counts
+
+    def test_weighting_off_keeps_even_round_robin(self):
+        scheduler = CurriculumScheduler(
+            self.spec, matchup_seed=42, matchup_weighting=False)
+        counts = self._sample_agent_decks(scheduler)
+        self.assertEqual(len(counts), len(DECK_NAMES))
+        # Even round-robin over deck pairs: near-uniform agent exposure.
+        self.assertLessEqual(
+            max(counts.values()) - min(counts.values()), len(DECK_NAMES))
+
+    def test_weighting_oversamples_the_losing_deck(self):
+        scheduler = CurriculumScheduler(
+            self.spec, matchup_seed=42, matchup_weighting=True)
+        for _ in range(40):
+            scheduler.record_agent_result("4c Control", False)   # always loses
+            scheduler.record_agent_result("Izzet Prowess", True)  # always wins
+        counts = self._sample_agent_decks(scheduler)
+        self.assertGreater(
+            counts["4c Control"], 2 * counts["Izzet Prowess"])
+
+    def test_only_decisive_wins_lower_a_deck_weight(self):
+        base = CurriculumScheduler(
+            self.spec, matchup_seed=1,
+            matchup_weighting=True)._agent_deck_weight("4c Control")
+        # Losses (decisive_win=False) raise the weight (oversample losers).
+        losing = CurriculumScheduler(
+            self.spec, matchup_seed=1, matchup_weighting=True)
+        for _ in range(10):
+            losing.record_agent_result("4c Control", False)
+        self.assertGreater(losing._agent_deck_weight("4c Control"), base)
+        # Decisive wins lower it.
+        winning = CurriculumScheduler(
+            self.spec, matchup_seed=1, matchup_weighting=True)
+        for _ in range(10):
+            winning.record_agent_result("4c Control", True)
+        self.assertLess(winning._agent_deck_weight("4c Control"), base)
 
 
 if __name__ == "__main__":

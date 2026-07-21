@@ -327,14 +327,14 @@ def check_mask_aware_evaluation():
                     m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256
                 return relineaged
 
-            # Use the current Observation-v4 canary; the v3-pinned canaries
-            # correctly fail closed against v4 runtime.
+            # Use the current Observation-v5 canary; the older-schema canaries
+            # correctly fail closed against v5 runtime.
             canary_args = SimpleNamespace(
-                **m.ROUND_7_96_CANARY["cli"],
-                canary_config="round-7.96", resume=None,
+                **m.ROUND_7_97_CANARY["cli"],
+                canary_config="round-7.97", resume=None,
                 optimize_hp=False)
             canary = m.validate_canary_cli(canary_args)
-            assert canary is not m.ROUND_7_96_CANARY
+            assert canary is not m.ROUND_7_97_CANARY
             canary_decks = [{"name": name} for name in (
                 "Selesnya Ouroboroid", "Jeskai Lessons", "Izzet Prowess",
                 "4c Control", "Izzet Spellementals", "Dimir Excruciator",

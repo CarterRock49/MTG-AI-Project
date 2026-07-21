@@ -1084,10 +1084,24 @@ ROUND_7_96_CANARY = {
             "15783924c36af23cf9dffb2700894f21d4c15343d0dc1fb353d351eae2f5d19f"),
     },
 }
+# Round 7.97 re-pins the round-7.96 contract onto Observation v5, which adds
+# producible mana by color (my/opp_producible_mana).  Reward, curriculum, and
+# every other input carry over; only the observation lineage changes, and the
+# v4-pinned round-7.96 canary fails closed against v5 runtime by design.
+ROUND_7_97_CANARY = {
+    **ROUND_7_96_CANARY,
+    "id": "round-7.97",
+    "lineage": {
+        **ROUND_7_96_CANARY["lineage"],
+        "observation_schema_version": 5,
+        "observation_schema_sha256": (
+            "cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16"),
+    },
+}
 CANARY_CONFIGS = {
     config["id"]: config
     for config in (ROUND_7_92_CANARY, ROUND_7_93_CANARY, ROUND_7_94_CANARY,
-                   ROUND_7_95_CANARY, ROUND_7_96_CANARY)
+                   ROUND_7_95_CANARY, ROUND_7_96_CANARY, ROUND_7_97_CANARY)
 }
 
 
@@ -2064,7 +2078,7 @@ def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
                         time_cost_per_step=
                             AlphaZeroMTGEnv.DEFAULT_TIME_COST_PER_STEP,
                         curriculum=None, opponent_profile="scripted",
-                        matchup_seed=None,
+                        matchup_seed=None, matchup_weighting=False,
                         stats_persistence_interval_games=10):
     """Create an environment whose generated statistics stay in one scope."""
     os.makedirs(storage_root, exist_ok=True)
@@ -2087,6 +2101,7 @@ def make_masked_mtg_env(decks, card_db, storage_root, *, agent_is_p1=True,
             curriculum=curriculum,
             opponent_profile=opponent_profile,
             matchup_seed=matchup_seed,
+            matchup_weighting=matchup_weighting,
             stats_persistence_interval_games=
                 stats_persistence_interval_games,
         ),
@@ -4601,6 +4616,12 @@ def main():
         "--eval-seed", type=int, default=DEFAULT_EVALUATION_SEED,
         help=("Independent seed for evaluation deck selection, paired cases, "
               "and evaluation workers"))
+    parser.add_argument(
+        "--matchup-weighting", action="store_true",
+        help="Opt-in: bias training deck selection to oversample the decks the "
+             "agent is losing with (adaptive inverse-win-rate weighting). Off "
+             "by default; fixed evaluation is unaffected. Not part of the "
+             "named-canary contract.")
     parser.add_argument("--format", type=str, default=DEFAULT_FORMAT_NAME,
                         help="Enforce strict format legality and load the frozen "
                              "formats/<format> card registry and feature schema "
@@ -4918,6 +4939,7 @@ def main():
                     curriculum=resolved_curriculum,
                     opponent_profile="scripted",
                     matchup_seed=derive_matchup_seed(args.seed, idx),
+                    matchup_weighting=args.matchup_weighting,
                     stats_persistence_interval_games=10)
             return _init
 

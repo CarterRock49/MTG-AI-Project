@@ -13,7 +13,7 @@ import json
 
 
 OBSERVATION_SCHEMA_KIND = "playersim_policy_observation"
-OBSERVATION_SCHEMA_VERSION = 4
+OBSERVATION_SCHEMA_VERSION = 5
 SEMANTIC_IDENTITY_VOCAB_SIZE = 65_536
 SEMANTIC_IDENTITY_MAX = SEMANTIC_IDENTITY_VOCAB_SIZE - 1
 
@@ -117,6 +117,30 @@ CORRECTED_V4_SEMANTICS = (
     "deck_card_identities_are_order_free_multiset",
 )
 
+# v5 exposes producible mana by color.  The policy previously saw each card's
+# cost broken out by color but only a single colorless total_available_mana
+# scalar for what it could produce -- a color-blind view of a colored game
+# that particularly handicaps reactive decks deciding whether to hold up a
+# colored answer.
+ADDED_V5_FIELDS = (
+    # Per-color (WUBRG) mana the observer can produce now: untapped
+    # mana-source color access plus floating mana. Observer-own is exact.
+    "my_producible_mana",
+    # The opponent's producible mana by color from its visible untapped
+    # sources -- public information (lands are face-up), so this is a legal
+    # observation, an estimate of what colored responses they can pay for.
+    "opp_producible_mana",
+)
+
+CORRECTED_V5_SEMANTICS = (
+    # A dual/any-color source counts toward each color it can produce (color
+    # access), not simultaneous availability; floating mana adds on top.
+    "producible_mana_is_per_color_source_access_plus_floating",
+    # Only visible untapped mana sources contribute, so hidden information is
+    # never leaked and tapped sources are excluded.
+    "producible_mana_uses_visible_untapped_sources_only",
+)
+
 CORRECTED_V3_SEMANTICS = (
     "snow_mana_pool_includes_restricted_snow_provenance",
     "total_available_mana_excludes_snow_provenance_duplicates",
@@ -169,6 +193,8 @@ def _schema_payload() -> dict:
         "added_v4_fields": list(ADDED_V4_FIELDS),
         "corrected_v4_semantics": list(CORRECTED_V4_SEMANTICS),
         "max_deck_observation_size": MAX_DECK_OBSERVATION_SIZE,
+        "added_v5_fields": list(ADDED_V5_FIELDS),
+        "corrected_v5_semantics": list(CORRECTED_V5_SEMANTICS),
     }
 
 

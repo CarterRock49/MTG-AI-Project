@@ -107,7 +107,7 @@ class AlphaZeroMTGEnv(gym.Env):
                  state_potential_scale=DEFAULT_STATE_POTENTIAL_SCALE,
                  time_cost_per_step=DEFAULT_TIME_COST_PER_STEP,
                  curriculum=None, opponent_profile="scripted",
-                 matchup_seed=None,
+                 matchup_seed=None, matchup_weighting=False,
                  adaptive_decision_history_enabled=False,
                  stats_persistence_interval_games=1):
         logging.info("Initializing AlphaZeroMTGEnv...")
@@ -187,8 +187,14 @@ class AlphaZeroMTGEnv(gym.Env):
         self._pending_handicap_profiles = frozenset()
         self._opponent_handicap_rng = random.Random(0)
         self.curriculum = curriculum
+        # Opt-in matchup weighting only biases training deck selection through
+        # the scheduler; fixed evaluation uses an explicit schedule and is
+        # unaffected.
+        self.matchup_weighting = bool(matchup_weighting)
         self.curriculum_scheduler = (
-            CurriculumScheduler(curriculum, matchup_seed)
+            CurriculumScheduler(
+                curriculum, matchup_seed,
+                matchup_weighting=self.matchup_weighting)
             if curriculum is not None else None)
         self.matchup_seed = int(matchup_seed or 0)
         self._matchup_rng = random.Random(self.matchup_seed)
@@ -416,6 +422,11 @@ class AlphaZeroMTGEnv(gym.Env):
             "my_restricted_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
             "opp_restricted_mana_pool": spaces.Box(low=0, high=100, shape=(6,), dtype=np.int32),
             "total_available_mana": spaces.Box(low=0, high=100, shape=(1,), dtype=np.int32),
+            # v5: producible mana by color (WUBRG) from visible untapped
+            # sources plus floating mana -- own is exact, opponent is the
+            # public estimate from its face-up untapped lands.
+            "my_producible_mana": spaces.Box(low=0, high=100, shape=(5,), dtype=np.float32),
+            "opp_producible_mana": spaces.Box(low=0, high=100, shape=(5,), dtype=np.float32),
             "untapped_land_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
             "turn_vs_mana": spaces.Box(low=0, high=1, shape=(1,), dtype=np.float32),
             "my_library_count": spaces.Box(low=0, high=count_observation_max, shape=(1,), dtype=np.int32),
@@ -800,6 +811,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.evaluation_action_trace = []
                 self._reset_evaluation_capture_telemetry()
                 self._game_result_recorded = False
+                self._matchup_result_recorded = False
                 self._life_totals_by_turn = {}
                 self._stats_result_record_attempted = False
                 self._card_memory_result_record_attempted = False
@@ -1159,6 +1171,18 @@ class AlphaZeroMTGEnv(gym.Env):
         if not getattr(gs, 'terminal_reason', None):
             gs.terminal_reason = self._terminal_reason(
                 {"game_result": self._game_result})
+
+        # Opt-in matchup weighting: feed the agent's decisive-win outcome back
+        # to the scheduler so future resets oversample the decks the agent is
+        # losing with. Only a clean "win" counts as decisive; turn-limit and
+        # draw outcomes leave the deck's win rate (and thus its weight) low.
+        if (getattr(self, 'matchup_weighting', False)
+                and getattr(self, 'curriculum_scheduler', None) is not None
+                and not getattr(self, '_matchup_result_recorded', False)):
+            self._matchup_result_recorded = True
+            self.curriculum_scheduler.record_agent_result(
+                getattr(self, 'current_agent_deck', None),
+                self._game_result == "win")
 
         # Shared by the aggregate and card-memory writers. Keeping these
         # outside either optional subsystem also lets CardMemory operate when
@@ -5681,6 +5705,12 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["total_available_mana"] = self._bounded_int_array(
                     "total_available_mana",
                     [floating_mana + int(obs["untapped_land_count"][0])])
+                # v5: producible mana by color (observer-own is exact; the
+                # opponent value is the public estimate from its untapped
+                # lands).
+                obs["my_producible_mana"] = self._get_producible_mana(
+                    agent_player_obj)
+                obs["opp_producible_mana"] = self._get_producible_mana(opp)
                 # ``turn`` is the global alternating turn number. Compare
                 # land development with turns actually received by this
                 # observer, otherwise an on-curve player trends toward 0.5.
@@ -7236,6 +7266,37 @@ class AlphaZeroMTGEnv(gym.Env):
                         composition[color_base + color_offset] += 1.0
         composition[total_base] = float(len(library))
         return composition
+
+    def _get_producible_mana(self, player):
+        """Per-color (WUBRG) mana the player can produce right now (v5).
+
+        Counts each visible untapped land toward every color it can produce
+        (a dual counts for both -- color access, not simultaneous
+        availability) and adds floating mana of that color.  Tapped and
+        hidden sources are excluded, so the opponent's value is the public
+        estimate from its face-up untapped lands and never leaks hidden
+        information.
+        """
+        producible = np.zeros(5, dtype=np.float32)
+        gs = self.game_state
+        tapped = player.get("tapped_permanents", set()) if player else set()
+        for card_id in (player.get("battlefield", []) if player else []):
+            if card_id in tapped:
+                continue
+            card = gs._safe_get_card(card_id)
+            if not card:
+                continue
+            if "land" not in str(getattr(card, "type_line", "") or "").lower():
+                continue
+            colors = getattr(card, "colors", None)
+            if isinstance(colors, (list, tuple)):
+                for color_index in range(min(5, len(colors))):
+                    if colors[color_index]:
+                        producible[color_index] += 1.0
+        pool = player.get("mana_pool", {}) if player else {}
+        for color_index, color in enumerate("WUBRG"):
+            producible[color_index] += float(pool.get(color, 0) or 0)
+        return producible
 
     def _get_threat_assessment(self, opp_bf_ids, threat_list=None):
         """Assess threat level of opponent's board."""

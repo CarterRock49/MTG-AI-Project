@@ -7,6 +7,7 @@ therefore cannot change which deck, seat, or opponent profile it sees next.
 
 from __future__ import annotations
 
+from collections import defaultdict
 from copy import deepcopy
 import hashlib
 import random
@@ -543,7 +544,11 @@ def resolve_curriculum(name, decks):
 class CurriculumScheduler:
     """Stateless-cycle scheduler with commit-on-success episode counters."""
 
-    def __init__(self, spec, matchup_seed):
+    # Minimum sampling weight so a deck the agent already wins with is never
+    # fully starved of training games under matchup weighting.
+    _MATCHUP_WEIGHT_FLOOR = 0.15
+
+    def __init__(self, spec, matchup_seed, matchup_weighting=False):
         if spec is None:
             raise ValueError("CurriculumScheduler requires a resolved spec")
         self.spec = deepcopy(spec)
@@ -551,6 +556,33 @@ class CurriculumScheduler:
         self.timestep = 0
         self._stage_override = None
         self._episode_counts = [0] * len(self.spec["stages"])
+        # Opt-in matchup weighting oversamples the agent piloting the decks it
+        # is losing with (the reactive-deck collapse lever). Off by default:
+        # peek() then does the original even round-robin over deck pairs.
+        self.matchup_weighting = bool(matchup_weighting)
+        self._agent_deck_wins = defaultdict(int)
+        self._agent_deck_games = defaultdict(int)
+
+    def record_agent_result(self, agent_deck, decisive_win):
+        """Record a training game's outcome for the deck the agent piloted.
+
+        Only consulted when matchup weighting is enabled; harmless to call
+        otherwise. Decisive wins raise a deck's win rate and therefore lower
+        its future sampling weight.
+        """
+        if agent_deck is None:
+            return
+        self._agent_deck_games[agent_deck] += 1
+        if decisive_win:
+            self._agent_deck_wins[agent_deck] += 1
+
+    def _agent_deck_weight(self, deck):
+        games = self._agent_deck_games.get(deck, 0)
+        wins = self._agent_deck_wins.get(deck, 0)
+        # Laplace-smoothed win rate so unseen decks start near 0.5 and a single
+        # game cannot swing the weight to an extreme.
+        smoothed_win_rate = (wins + 1) / (games + 2)
+        return max(self._MATCHUP_WEIGHT_FLOOR, 1.0 - smoothed_win_rate)
 
     def set_timestep(self, timestep):
         self.timestep = max(0, int(timestep))
@@ -581,20 +613,42 @@ class CurriculumScheduler:
         rng.shuffle(values)
         return values
 
+    def _weighted_matchup(self, decks, stage, episode):
+        """Sample the agent deck inversely to its win rate; opponent uniform.
+
+        Deterministic given the episode and the current win/loss counts (the
+        counts evolve as games are recorded, so exposure adapts). A per-episode
+        seed keeps two workers on the same seed reproducible for a fixed
+        history.
+        """
+        rng = random.Random(_stable_seed(
+            self.matchup_seed, "weighted-matchup", stage["name"], episode))
+        weights = [self._agent_deck_weight(deck) for deck in decks]
+        agent_deck = rng.choices(decks, weights=weights, k=1)[0]
+        opponent_pool = [
+            deck for deck in decks
+            if self.spec.get("allow_mirrors", False) or deck != agent_deck]
+        opponent_deck = rng.choice(opponent_pool or decks)
+        return agent_deck, opponent_deck
+
     def peek(self, agent_is_p1):
         index = self.stage_index()
         stage = self.spec["stages"][index]
         episode = self._episode_counts[index]
         decks = list(stage["decks"])
-        pairs = [
-            (agent, opponent)
-            for agent in decks for opponent in decks
-            if self.spec.get("allow_mirrors", False) or agent != opponent
-        ]
-        pair_cycle, pair_offset = divmod(episode, len(pairs))
-        ordered_pairs = self._shuffled_cycle(
-            pairs, "pairs", stage, pair_cycle)
-        agent_deck, opponent_deck = ordered_pairs[pair_offset]
+        if self.matchup_weighting:
+            agent_deck, opponent_deck = self._weighted_matchup(
+                decks, stage, episode)
+        else:
+            pairs = [
+                (agent, opponent)
+                for agent in decks for opponent in decks
+                if self.spec.get("allow_mirrors", False) or agent != opponent
+            ]
+            pair_cycle, pair_offset = divmod(episode, len(pairs))
+            ordered_pairs = self._shuffled_cycle(
+                pairs, "pairs", stage, pair_cycle)
+            agent_deck, opponent_deck = ordered_pairs[pair_offset]
 
         bag = list(stage["profile_bag"])
         profile_cycle, profile_offset = divmod(episode, len(bag))

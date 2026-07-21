@@ -1,17 +1,25 @@
 # Playersim policy observation schema
 
-Current contract: **Observation v4**, frozen July 20, 2026.
+Current contract: **Observation v5**, frozen July 20, 2026.
 
 Current schema hash:
+`cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16`.
+
+Observation v5 adds producible mana by color (`my_producible_mana`,
+`opp_producible_mana`): each card's cost was already broken out by color, but
+what the observer could produce was only a single color-blind
+`total_available_mana` scalar. Own producible mana is exact; the opponent's is
+the public estimate from its face-up untapped lands (no hidden information).
+The prior v4 hash was
 `15783924c36af23cf9dffb2700894f21d4c15343d0dc1fb353d351eae2f5d19f`.
 
-Observation v4 adds the observer's own decklist and remaining-library
+Observation v4 added the observer's own decklist and remaining-library
 composition (see `my_deck_card_identity` and `my_library_composition` below)
-and changes `deck_composition_estimate` to summarize the full starting deck
+and changed `deck_composition_estimate` to summarize the full starting deck
 rather than only already-revealed cards. All decklist-derived features are
 observer-own only; the opponent's decklist and library are never exposed, and
 the list is an order-free multiset (the cards you own), never your hidden
-library draw order. The prior v3 hash was
+library draw order. The v3 hash was
 `6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137`.
 
 The executable version and hash live in
@@ -179,6 +187,8 @@ Mana vectors use color order `W,U,B,R,G,C` and saturate at 100 per entry.
 | `opponent_archetype` | `(6)`, `0..1` | Opponent deck/archetype summary inferred from **observed cards only**; the opponent's decklist is never exposed. |
 | `my_deck_card_identity` | `(60)`, `0..65535` | v4: the observer's full starting decklist as canonical categorical identities, sorted (an order-free multiset — the cards you own, not your hidden draw order). Padded with 0; shared categorical-embedding route. Observer-own only. |
 | `my_library_composition` | `(21)`, `0..count_max` | v4: the observer's **remaining** library — 8 card-type counts, 7 mana-curve buckets (cmc 0..6+), 5 color counts (WUBRG), and the total remaining count. The live "what's left to draw" signal for draw planning and keep/mulligan decisions. Observer-own only. |
+| `my_producible_mana` | `(5)`, `0..100` | v5: mana the observer can produce now by color (W, U, B, R, G) — each visible untapped land counts toward every color it can make (a dual counts for both), plus floating mana. Observer-own is exact. |
+| `opp_producible_mana` | `(5)`, `0..100` | v5: the opponent's producible mana by color from its **visible untapped** lands — public information (lands are face-up), the estimate of what colored responses it can pay for. No hidden information. |
 | `future_state_projections` | `(7)`, `-1..1` | Observer-antisymmetric planner projection; symmetric public states are exactly neutral. |
 | `multi_turn_plan`, `win_condition_viability` | `(6)`, `0..1` | Deterministic expected-value plan and win-condition summary. Plans use live untapped lands and spendable floating mana, respect every remaining land-drop allowance, and do not invent a current-turn draw. Nonviable paths have zero viability; viable damage paths increase monotonically as their projected win approaches. |
 | `win_condition_timings` | `(6)`, `0..max_turns+1` | Estimated turns to each win condition. |
@@ -272,10 +282,9 @@ printed card.
 
 ## Compatibility rule
 
-Observation v4 is checkpoint-incompatible with every earlier model, including
-v3: it adds observation fields (a wider policy input) and changes
-`deck_composition_estimate` semantics. Consumers must reject or isolate runs
-when `lineage.observation_schema.sha256` differs. The canonical registry hash
-determines the identity embedding namespace; the card feature-schema hash
-determines `F`; both must match as well. Resuming a v3 checkpoint into a v4
-run fails closed.
+Observation v5 is checkpoint-incompatible with every earlier model, including
+v4: it adds observation fields (a wider policy input). Consumers must reject or
+isolate runs when `lineage.observation_schema.sha256` differs. The canonical
+registry hash determines the identity embedding namespace; the card
+feature-schema hash determines `F`; both must match as well. Resuming any
+earlier-schema checkpoint into a v5 run fails closed.

@@ -55,6 +55,49 @@ player-relative turns, draw-aware rates, and atomic per-file persistence.
 Evaluator caches retain only static characteristics, while live state and
 perspective are recomputed for each decision.
 
+### Batched levers — cast-path hardening, opt-in matchup weighting, Observation v5 — July 20, 2026
+
+Three changes land together on top of the v4 work, in response to the round-7.96
+diagnosis (below) that the reactive-deck collapse is a piloting problem and to
+the recurring dormant mask/execution divergences that keep stopping runs.
+
+- **Cast-path legality hardening.** Two successive runs died on dormant
+  mask/execution divergences (a Tiered spell flashed back with no affordable
+  mode; a counterspell cast from exile with an empty stack). Root cause: the
+  alternative cast paths offered a spell on affordability alone, without the
+  target and modal-mode legality the hand path enforces. A single shared
+  `_cast_is_legal_for_mask` predicate (targets available plus a selectable
+  Tiered/Spree mode) now gates every cast generator — hand, graveyard
+  (flashback, Harmonize), exile, and the hand alternative-cost mechanics
+  (Jump-start, Escape, Madness, Emerge, Delve, Warp). Overload is exempt
+  because it replaces "target" with "each". Pinned by
+  `tests/alt_cast_target_mask_regression_test.py` plus the flashback/exile
+  regressions.
+- **Opt-in matchup weighting.** `--matchup-weighting` (off by default) biases
+  training deck selection to oversample the decks the agent is losing with
+  (adaptive inverse-win-rate weighting fed by decisive-win outcomes), the lever
+  the diagnosis points to for the reactive-deck collapse. Without the flag the
+  scheduler keeps its even round-robin; fixed evaluation is unaffected. It is
+  deliberately excluded from the named-canary contract. Pinned by
+  `tests/curriculum_test.py::MatchupWeightingTest`.
+- **Observation v5: producible mana by color.** The policy saw each card's cost
+  broken out by color but only a color-blind `total_available_mana` scalar for
+  what it could produce — a real gap for reactive decks deciding whether to hold
+  up a colored answer. `my_producible_mana` / `opp_producible_mana` add per-color
+  (WUBRG) access from visible untapped lands plus floating mana; own is exact,
+  the opponent's is the public estimate from its face-up lands (no hidden-info
+  leak). Schema hash
+  `cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16`; the
+  `round-7.97` canary re-pins the unchanged reward/curriculum over v5. Pinned by
+  `tests/producible_mana_observation_test.py`.
+
+The observation change is a hard lineage boundary; the cast-path and matchup
+changes are not. Launch the next candidate with `--canary-config round-7.97`,
+adding `--matchup-weighting` to enable the scheduling lever. Because two levers
+land in one round, attribute the result carefully: matchup weighting is the
+change expected to move the reactive decks; Observation v5 is a genuine
+information upgrade whose effect the diagnosis expects to be secondary.
+
 ### Round 7.95 verdict, plateau diagnosis, and the Observation v4 response — July 20, 2026
 
 The `round-7.95-combat-v7-v1` canary completed all 2M steps. Its finer 0.10
@@ -106,12 +149,50 @@ the information to learn a good keep, instead of legislating one.
 This is a hard lineage boundary. The `round-7.96` canary re-pins the unchanged
 `tempo-graded-potential-v1` reward and `combat-v7` curriculum over Observation
 v4; the v3-pinned canaries (7.92–7.95) fail closed against v4 runtime by
-design, and v2/v3 checkpoints cannot resume into it. The delivery gate is
-green at 806 discovered unit tests, 9/9 runtime smoke, 13/13 training smoke,
-and all eight default invariant-fuzz seeds plus the phase-boundary check. The
-next training run is a fresh `round-7.96` candidate from the v4 boundary; the
-mulligan death-spiral and reactive-deck win rates are its primary success
-signals.
+design, and v2/v3 checkpoints cannot resume into it. The next training run is a
+fresh `round-7.96` candidate from the v4 boundary; the mulligan death-spiral
+and reactive-deck win rates are its primary success signals.
+
+The first `round-7.96-obs-v4-v1` run died at ~400k on a strict fidelity
+failure — a pre-existing dormant mask/execution divergence the v4 policy
+reached because it plays differently, not a v4 or card-fidelity regression.
+The graveyard flashback mask offered Thunder Magic (a Tiered instant granted
+flashback for {R}) because the base cost was affordable and the coarse
+`_targets_available` check passed, but `cast_spell` rejected it: the only
+affordable tier had no legal creature target and the higher tiers were
+unaffordable. The graveyard-cast mask now shares `cast_spell`'s CR 601.2b
+modal gate (`tiered_mode_is_selectable`/`spree_mode_is_selectable`) through a
+`_graveyard_modal_cast_castable` predicate, so a modal graveyard cast is
+offered only when a mode is actually castable
+(`tests/flashback_tiered_mask_regression_test.py`, verified against the
+retained 227-action failure replay).
+
+The relaunched `round-7.96-obs-v4-v2` run reached 700k and died on a second,
+distinct instance of the same class: the exile-cast mask offered No More Lies
+(a counterspell exiled with an ordinary cast permission) because it was
+affordable, but the stack was empty so `cast_spell` fizzled it for lack of a
+target. Root pattern: the alternative cast paths (graveyard flashback,
+Harmonize, exile) were built without the full hand-cast legality contract, so
+they offer casts the engine then rejects. The exile-cast and both Harmonize
+graveyard branches now apply the same `_targets_available` and modal-mode gate
+the hand path uses (`tests/exile_cast_target_mask_regression_test.py`, verified
+against the retained evaluation replay); a proactive audit closed the latent
+Harmonize instance before it could stop a run.
+
+The delivery gate is green at 812 discovered unit tests, 9/9 runtime smoke,
+13/13 training smoke, and all eight default invariant-fuzz seeds plus the
+phase-boundary check. Relaunch a fresh `round-7.96` candidate from the v4
+boundary.
+
+The v2 run's early evidence updated the diagnosis: the mulligan behavior was
+unstable rather than fixed (it oscillated between keeping seven and
+mulliganing to zero across evals), and the reactive decks (4c/Dimir/Jeskai)
+stayed at ~0% regardless of mulligan depth while the proactive decks climbed
+to ~48%. Mulligan behavior and reactive win rate are therefore decoupled: the
+reactive collapse is a piloting problem (one policy collapsing onto the aggro
+strategy across eight archetypes), not a mulligan or information deficit, so
+the next lever after this run is matchup-weighted scheduling rather than
+another observation or reward change.
 
 ### Room/Exhaust evidence replay — July 19, 2026
 
@@ -488,24 +569,27 @@ only from independent exact-state scenarios.
 
 ### Non-negotiable lineage rules
 
-- **Start every new policy from the Round 7.96 Observation v4 boundary, using
+- **Start every new policy from the Round 7.97 Observation v5 boundary, using
   the current `tempo-graded-potential-v1` reward and `combat-v7` curriculum
-  contract.** Observation v4 adds the observer's own decklist
-  (`my_deck_card_identity`) and remaining-library composition
-  (`my_library_composition`), and changes `deck_composition_estimate` to
-  summarize the full starting deck; all decklist-derived features are
-  observer-own only and the opponent's decklist is never exposed. Observation
-  v3's corrected mana, land-development, resource-advantage, and
+  contract.** Observation v5 adds producible mana by color
+  (`my_producible_mana`, `opp_producible_mana`) on top of the v4 decklist
+  features (`my_deck_card_identity`, `my_library_composition`, full-deck
+  `deck_composition_estimate`). Own producible mana is exact; the opponent's
+  is the public estimate from its face-up untapped lands, and all
+  decklist-derived features remain observer-own only. Observation v3's
+  corrected mana, land-development, resource-advantage, and
   strategic-viability semantics carry forward. Adaptive card/deck history is
   recorded but excluded from live evaluator advice by default so worker-local
   histories cannot make the same public state nonstationary. Recorded
   archetypes are canonical and play-turn analytics are player-relative;
   targetable observations match the active target instruction. Do not resume
-  an Observation v2 or v3 checkpoint into this lineage; the v4 schema hash is
-  `15783924c36af23cf9dffb2700894f21d4c15343d0dc1fb353d351eae2f5d19f` and
-  earlier-schema resumes fail closed. Fresh Round 7.96 training uses
+  an Observation v2/v3/v4 checkpoint into this lineage; the v5 schema hash is
+  `cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16` and
+  earlier-schema resumes fail closed. Fresh Round 7.97 training uses
   `tempo-graded-potential-v1` and `combat-v7`; do not resume an older
-  curriculum or reward checkpoint.
+  curriculum or reward checkpoint. Matchup weighting is an opt-in training
+  lever (`--matchup-weighting`, off by default) and is not part of the named
+  canary contract.
 - Resume now verifies the companion manifest's reward contract and Observation
   version/hash. Curriculum continuation is intentionally rejected until its
   per-worker scheduler counters can be checkpointed; launch a fresh
@@ -912,34 +996,37 @@ v3 throughput and memory alongside behavior telemetry.
 
 ## Current execution plan
 
-### Now — run the Round 7.96 Observation v4 canary
+### Now — run the Round 7.97 Observation v5 canary
 
-The 7.95 diagnosis (above) attributes the plateau to a reactive-deck collapse
-driven by the policy being blind to its own deck. Observation v4 is the
-response; stop tuning the curriculum ratchet.
+The round-7.96 runs (below) showed the reactive-deck collapse is a piloting
+problem decoupled from mulligans and information, so this round leads with the
+matchup-weighting lever and rides Observation v5 (color mana) alongside. Stop
+tuning the curriculum ratchet.
 
 1. Keep the now-green delivery gate mandatory: golden scenarios, discovered
-   unit tests (806), runtime and training smoke, default invariant fuzz, and
-   canary validation. The v4 observation schema hash is
-   `15783924c36af23cf9dffb2700894f21d4c15343d0dc1fb353d351eae2f5d19f`. Do not
+   unit tests, runtime and training smoke, default invariant fuzz, and canary
+   validation. The v5 observation schema hash is
+   `cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16`. Do not
    launch if the gate regresses.
 2. Launch a fresh Standard candidate with
-   `--canary-config round-7.96 --run-name round-7.96-obs-v4-v1`. The named
-   configuration re-pins the unchanged `tempo-graded-potential-v1` reward
-   (with its 0.005 per-step time cost), the full resolved `combat-v7` hash,
-   feature width/device class, 2M timesteps, eight environments, 100k periodic
-   evaluation with 64 games (32 seat-swapped pairs), 50k checkpoints, training
-   seed `20260715`, and evaluation seed `21260715` — over Observation v4. This
-   is a hard schema boundary: v2/v3 checkpoints and the 7.92–7.95 canaries
-   fail closed against v4 runtime by design.
+   `--canary-config round-7.97 --run-name round-7.97-obs-v5-v1
+   --matchup-weighting`. The named configuration re-pins the unchanged
+   `tempo-graded-potential-v1` reward (with its 0.005 per-step time cost), the
+   full resolved `combat-v7` hash, feature width/device class, 2M timesteps,
+   eight environments, 100k periodic evaluation with 64 games (32 seat-swapped
+   pairs), 50k checkpoints, training seed `20260715`, and evaluation seed
+   `21260715` — over Observation v5. This is a hard schema boundary: earlier-
+   schema checkpoints and the 7.92–7.96 canaries fail closed against v5 runtime
+   by design. `--matchup-weighting` is intentionally outside the canary
+   contract; include it to enable the scheduling lever.
 3. The primary success signals are the diagnosis targets, not the ratchet.
    Watch the per-deck eval win rates (`evaluations.json` grouped by the agent's
-   deck) and the agent's mulligan depth per deck (MULLIGAN actions in the eval
-   traces). Success means the reactive decks (4c Control, Dimir Excruciator,
-   Jeskai Lessons) move off the ~0% floor and the mulligan death-spiral on
-   those decks shrinks toward the aggro decks' near-zero rate — that is the
-   direct test of whether decklist visibility let the policy learn to pilot
-   control and to keep informed opening hands.
+   deck). Success means the reactive decks (4c Control, Dimir Excruciator,
+   Jeskai Lessons) move off the ~0% floor. Because two levers land together,
+   attribute carefully: matchup weighting is the change expected to move the
+   reactive decks (it oversamples them in training), while Observation v5's
+   color mana is a genuine information upgrade whose effect the diagnosis
+   expects to be secondary.
 4. At each 100k boundary, compare checkpoints through `evaluations.json`.
    Require balanced case/seat exposure, zero reward-sign failures, zero strict
    fidelity counters (including effect-continuation failures and lost-spell
@@ -1154,8 +1241,8 @@ The project is complete only when all of these are true:
 ## Checkpoint and schema boundaries
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
-mistake. The practical rule is: **start fresh from the Round 7.96 Observation
-v4 boundary using the current `tempo-graded-potential-v1` reward and
+mistake. The practical rule is: **start fresh from the Round 7.97 Observation
+v5 boundary using the current `tempo-graded-potential-v1` reward and
 `combat-v7` curriculum contract.**
 
 | Minimum round | Incompatible change |
@@ -1182,6 +1269,7 @@ v4 boundary using the current `tempo-graded-potential-v1` reward and
 | 7.94 | `tempo-graded-potential-v1` reward contract: graded win speed and stall penalties, negative draws, per-step time cost, offense-dominant potential |
 | 7.95 | `combat-v7` halved scripted ratchet step (0.10 rungs) and the 2M-timestep canary horizon |
 | 7.96 | Observation v4: the observer's own decklist (`my_deck_card_identity`) and remaining-library composition (`my_library_composition`), full-deck `deck_composition_estimate`; reward/curriculum carry over from 7.95 |
+| 7.97 | Observation v5: producible mana by color (`my_producible_mana`, `opp_producible_mana`); reward/curriculum carry over from 7.96. Opt-in `--matchup-weighting` and cast-path legality hardening ride along (neither breaks lineage) |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing
