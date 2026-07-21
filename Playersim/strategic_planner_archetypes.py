@@ -57,13 +57,18 @@ class ArchetypeAnalysisMixin:
             
         return archetype_changed
 
-    def identify_win_conditions(self):
+    def identify_win_conditions(self, include_private_cards=True):
         """
         Comprehensively identify and evaluate potential win conditions for the current game.
         
         This advanced analysis identifies multiple viable paths to victory based on
         current board state, hand, and deck archetype.
         
+        Args:
+            include_private_cards: Whether identities in the current player's
+                hidden hand may contribute. Disable this when analyzing an
+                opponent from public information; hand sizes remain public.
+
         Returns:
             dict: Win condition analysis with viability scores and projected turns to win
         """
@@ -71,6 +76,10 @@ class ArchetypeAnalysisMixin:
         me = gs.p1 if gs.agent_is_p1 else gs.p2
         opp = gs.p2 if gs.agent_is_p1 else gs.p1
         
+        strategic_cards = list(me["battlefield"])
+        if include_private_cards:
+            strategic_cards = list(me["hand"]) + strategic_cards
+
         win_conditions = {
             "combat_damage": {
                 "viable": False,
@@ -192,8 +201,8 @@ class ArchetypeAnalysisMixin:
         direct_damage_sources = []
         total_direct_damage = 0
         
-        # Check hand and battlefield for damage sources
-        for card_id in me["hand"] + me["battlefield"]:
+        # Check every identity the caller is permitted to inspect.
+        for card_id in strategic_cards:
             card = gs._safe_get_card(card_id)
             if not card or not hasattr(card, 'oracle_text'):
                 continue
@@ -228,7 +237,7 @@ class ArchetypeAnalysisMixin:
             win_conditions["card_advantage"]["score"] = 0.6
             
             # Find key card draw/advantage sources
-            for card_id in me["hand"] + me["battlefield"]:
+            for card_id in strategic_cards:
                 card = gs._safe_get_card(card_id)
                 if not card or not hasattr(card, 'oracle_text'):
                     continue
@@ -238,7 +247,7 @@ class ArchetypeAnalysisMixin:
                     win_conditions["card_advantage"]["key_cards"].append(card_id)
         
         # Combo win condition
-        combo_pieces = self._identify_combo_pieces(me["hand"] + me["battlefield"])
+        combo_pieces = self._identify_combo_pieces(strategic_cards)
         if combo_pieces:
             win_conditions["combo"]["viable"] = True
             pieces_needed = combo_pieces.get("needed", 3)
@@ -256,7 +265,7 @@ class ArchetypeAnalysisMixin:
             win_conditions["control"]["score"] = 0.5
             
             # Look for removal spells and countermagic
-            for card_id in me["hand"] + me["battlefield"]:
+            for card_id in strategic_cards:
                 card = gs._safe_get_card(card_id)
                 if not card or not hasattr(card, 'oracle_text'):
                     continue
@@ -266,7 +275,7 @@ class ArchetypeAnalysisMixin:
                     win_conditions["control"]["key_cards"].append(card_id)
         
         # Check for alternate win conditions
-        for card_id in me["hand"] + me["battlefield"]:
+        for card_id in strategic_cards:
             card = gs._safe_get_card(card_id)
             if not card or not hasattr(card, 'oracle_text'):
                 continue

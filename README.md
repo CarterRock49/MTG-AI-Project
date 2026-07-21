@@ -13,10 +13,11 @@ Out of scope permanently: multiplayer, Commander, Planechase, and match play
 (best-of-three is a possible late add only if a target format demands it).
 
 The agent is trained with mask-aware PPO (Stable-Baselines3 + SB3-Contrib). The
-current `combat-v5` training default progresses from passive goldfish through
-novice/scripted mixtures; fixed evaluation remains scripted. The Harvest
-protocol supports checkpoint-vs-checkpoint evaluation and promotion once a
-checkpoint beats scripted play.
+current `combat-v7` training default progresses from passive goldfish through
+novice/scripted mixtures. Round 7.98 adds an opt-in, resource-bounded
+checkpoint league for training while fixed evaluation remains scripted. The
+Harvest protocol supports checkpoint-vs-checkpoint evaluation and promotion
+once a checkpoint beats scripted play.
 
 ---
 
@@ -164,7 +165,7 @@ python tests/train_smoke_test.py
 python tests/invariant_fuzz_test.py --profile default
 ```
 
-For the current working tree, those gates are green at 736/736 discovered unit
+For the current working tree, those gates are green at 848/848 discovered unit
 tests, 409/409 scenarios, 9/9 runtime smoke, 13/13 training smoke, and all 8
 default fuzz seeds x 1,000 valid actions plus the phase-boundary check. The
 previously recorded long-fuzz result remains historical until that
@@ -238,7 +239,7 @@ append new cards without renumbering existing IDs; a card that would widen the
 frozen subtype vocabulary is rejected (that requires a new schema version, and
 therefore a new checkpoint lineage).
 
-The separate global policy-input contract is Observation v3, documented in
+The separate global policy-input contract is Observation v5, documented in
 [OBSERVATION_SCHEMA.md](OBSERVATION_SCHEMA.md) and self-hashed by
 `Playersim/observation_schema.py`.
 
@@ -313,10 +314,13 @@ is hard-disabled and any nonempty `verified` override is rejected. The 96
 former name-only claims are retained as `legacy_verified_claims` for audit
 only and cannot change card status.
 
-The July 19 ledger has 4,702 cards: 0 semantically verified, 4,702 unverified;
-static status is 119 observed-clean, 3,417 unseen-clean, 833 partial, and 333
-unparsed (75.2% static-clean). Its canonical SHA-256 is
-`ab98966df91afa68995a3f1dc08101cd955b2197920b8e4969f20e53f9401b70`.
+The current ledger, audited July 21, has 4,702 cards: 0 semantically verified,
+4,702 unverified;
+static status is 119 observed-clean, 3,420 unseen-clean, 833 partial, and 330
+unparsed (75.3% static-clean). Its canonical SHA-256 is
+`4ed2dce764032d9cfdfa7e2f9721bc0514ac6bef0b514daaa15a58f1db5b7e14`
+(physical SHA-256
+`17a74dae77ba533a8d3ef745790ceeb217f3f6777470142b58e5d17db0dea7f7`).
 
 ### Dynamic card-pool probe
 
@@ -342,6 +346,45 @@ discovered surface or branch was not independently exercised. Even
 `execution_passed` is bounded mechanical evidence only: every card remains
 `semantic_status=unverified` until permanent scenarios assert its exact rules
 outcomes across all abilities, modes, and choices.
+
+The current local, Git-ignored Room/Exhaust refresh is
+`probe_runs/standard-room-exhaust-evidence-2026-07-21-v4/card_probe_report.json`,
+pinned to the final 49-file `Playersim/**/*.py` engine SHA-256
+`15e3006bc51e200b94b042139ca532b690a8eef4560c2994470809e65824c931`.
+Across the exact 43-card selector it reports 41 `coverage_gap`, 2 `failed`
+(Charred Foyer // Warped Space and Pit Automaton), and 0
+`execution_passed`; an exact `--resume` reused all 43 artifacts. Independent
+audit validated the complete artifact set, every self-hash and report/card
+link, and current report/run/input identities. Report SHA-256 is
+`e933b32699548d39e933d503888e3a5e78c8e4e1058d8841a0b13fdb58a2e062`
+canonical and
+`f32b845e84237f0cea58bbc2a3e49fdffa8cda661bd3e8ad3442fc0d79094bd2`
+physical; run SHA-256 is
+`df52c3a8fe6bd34917352d4e4308bce01e39d8df72f1eefe883bf824ebb29aa6`
+canonical and
+`354083d37220af88f524ad23fa64cfba83c08cac41968562bd1cf2d7bbce6164`
+physical.
+
+The scoped residual replay is
+`probe_runs/standard-room-exhaust-expanded-2026-07-21-v4/card_probe_report.json`.
+Charred Foyer, Fell Gravship, and Pit Automaton all fail closed; its exact
+resume reused all 3 artifacts and the same independent audit passed. Charred
+Foyer emits 5 identical warnings and one manifest issue recorded 5 times for
+its unsupported `{0}` exile alternative cost; Fell Gravship emits 24 warnings
+across four unique Station and `8+ | Flying, lifelink` layer diagnostics; Pit
+Automaton is rejected by ledger evidence for its unsupported source-coupled
+copy instruction. Report
+SHA-256 is
+`d4a7218dc326e8b5b52e6749590f40a8a1ef041d518412ee2e237574c2a5953d`
+canonical and
+`8487ee985b15f07e1b92ec265bc455ee6551c441b380cdb116c6bb4dd81bf04d`
+physical; run SHA-256 is
+`e17b7e5e042f032062aa078f50b7e3d85c3bb70fcb4997882c2c4b2546fcab2b`
+canonical and
+`b959f0eec2a12c51831151012c5dd5ae37aee4424f80894d5a7c3a5ac316b2f2`
+physical. All 46 card artifacts remain `semantic_status=unverified`; the
+expected fresh/resume exit code is 2 because the probe deliberately surfaces
+failures.
 
 The first schema-v2 affected replay is
 `probe_runs/standard-affected-evidence-2026-07-19-v1/card_probe_report.json`.
@@ -427,8 +470,8 @@ cards remain `semantic_status=unverified`.
 ## Training
 
 ```bash
-python main.py --canary-config round-7.92 \
-  --run-name round-7.92-combat-v5-v2
+python main.py --canary-config round-7.98 --timesteps 2000000 \
+  --checkpoint-pool-self-play --run-name round-7.98-self-play-v1
 ```
 
 No format or deck flags are required for the pinned Standard default. Custom
@@ -436,14 +479,26 @@ corpora are available through `--decks`, `--format`, and `--format-dir`.
 The named canary fails closed on its enumerated CLI and complete PPO setting
 tree, reward contract version/scalars, the full resolved curriculum hash,
 Observation/registry/feature/corpus identities, feature-output width, CUDA
-device class, and evaluation-schedule hash. It checks one million timesteps,
+device class, evaluation-schedule hash, and the complete checkpoint-pool
+contract. Round 7.98 checks two million timesteps,
 learning rate `2e-4`, batch 256, rollout 1024, eight training environments,
 100k evaluation cadence with 64 games (32 seat-swapped pairs), 50k
-checkpoints, `combat-v5`, training seed `20260715`, and independent evaluation
-seed `21260715`. Git/working-tree provenance, runtime libraries, and the specific
-GPU model are recorded in `training_run.json` for comparison; the canary
-selector does not constrain those audit variables or claim to hash every
-implementation detail.
+checkpoints, `combat-v7`, training seed `20260715`, and independent evaluation
+seed `21260715`. It also pins matchup weighting off and checkpoint self-play on:
+every 100k steps the learner atomically publishes a hashed snapshot into a
+four-checkpoint FIFO disk pool, each worker eagerly validates and holds one
+frozen CPU policy, and each episode chooses that resident checkpoint or the
+scripted curriculum with probability 0.5. A lease changes only at a pool
+refresh and commits only on reset; fixed evaluation receives no pool policy.
+Opponent action/reward histories follow the learned and frozen roles even when
+physical seats alternate. Each physical seat receives a private planner profile
+derived only from its own deck, and emergency fallback resets rebuild the agent
+layer and clear episode histories instead of retaining stale state. Public
+threat scoring cannot use identities from the other seat's hidden hand.
+Outside the named canary the league is off by default. Git/working-tree
+provenance, runtime libraries, and the specific GPU model are recorded in
+`training_run.json` for comparison; the canary selector does not constrain
+those audit variables or claim to hash every implementation detail.
 
 **Throughput.** Training is CPU-bound (the GPU learner needs seconds per
 multi-minute rollout). Since Round 7.76 periodic evaluation runs
@@ -580,9 +635,9 @@ count, rather than deck names or the engine's alternating global turn.
 > stage deadlines distinguish forced progression from mastery and guarantee
 > entry into `full_pool` by approximately 375k timesteps. `combat-v2` remains
 > available only to reproduce the earlier schedule.
-> Round 7.92 makes `combat-v5` the fresh-run default. Goldfish receives 25
-> turns, and the full-pool scripted profile anneals from epsilon `0.40` to
-> full strength. Its qualifying scripted outcomes use their own rolling
+> At that time, Round 7.92 made `combat-v5` the fresh-run default. Goldfish
+> received 25 turns, and the full-pool scripted profile annealed from epsilon
+> `0.40` to full strength. Its qualifying scripted outcomes use their own rolling
 > window, so the pool's interleaved novice games cannot starve the 24-sample
 > ratchet. The pool is 80% scripted and 20% novice; both profiles were 100%
 > active full-strength before this new scripted handicap. Round 7.92 also
@@ -600,6 +655,14 @@ count, rather than deck names or the engine's alternating global turn.
 > **Do not resume any pre-Round 7.89 checkpoint into this Observation v3
 > lineage, including the failed `reward-v7`, `round-7.85-reward-v8`, or
 > `round-7.86-combat-v4` artifacts.** Start fresh without `--resume`.
+
+> **Current boundary (Rounds 7.97-7.98 / Observation v5).** Observation v4
+> added the observer's own decklist and remaining-library composition;
+> Observation v5 added producible mana by color. Its schema SHA-256 is
+> `cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16`.
+> Round 7.98 keeps that observation, reward, and `combat-v7` lineage but starts
+> a fresh experiment for checkpoint-league attribution; its named canary
+> rejects `--resume` and `--matchup-weighting`.
 
 ### Hyperparameter optimization
 
@@ -619,7 +682,8 @@ python main.py --resume models/<run>/final_model --timesteps 10000 \
 (Only for manifest-verified, lineage-compatible checkpoints — see the boundary
 note above. This command is only valid when the source run also recorded no
 curriculum. Curriculum resume is rejected because per-worker matchup counters
-are not checkpointed; current Observation v3 curriculum runs must start fresh.)
+are not checkpointed; the named Round 7.98 Observation v5 experiment must
+start fresh.)
 
 ---
 
@@ -716,7 +780,7 @@ artifacts for 14 days.
 | `--timesteps` | Total training timesteps | `1000000` |
 | `--seed` | Training seed (Python, NumPy, Torch, workers) | `20260715` |
 | `--eval-seed` | Independent fixed-evaluation schedule seed | `21260715` |
-| `--canary-config` | Validate the named, enumerated Round 7.92 launch contract | none |
+| `--canary-config` | Validate a named, enumerated experiment contract (current: Round 7.98) | none |
 | `--resume` | Path to a lineage-compatible checkpoint to continue | — |
 | `--learning-rate` | Initial learning rate | `2e-4` |
 | `--batch-size` | Batch size | `256` |
@@ -724,7 +788,11 @@ artifacts for 14 days.
 | `--n-envs` | Parallel training environments (`0` = auto when explicitly supplied) | `8` |
 | `--eval-freq` / `--eval-episodes` | Periodic cadence / games in fixed seat-swapped pairs | `100000` / `64` (32 pairs) |
 | `--checkpoint-freq` | Checkpoint cadence (timesteps) | `50000` |
-| `--curriculum` | Training opponent schedule (`combat-v5`, older reproducibility versions, or `none`) | `combat-v5` |
+| `--checkpoint-pool-self-play` | Opt in to frozen-checkpoint opponents for training only | off |
+| `--checkpoint-pool-snapshot-freq` | Learner cadence for checkpoint-pool refresh | `100000` |
+| `--checkpoint-pool-size` | Maximum frozen checkpoints retained on disk | `4` |
+| `--checkpoint-pool-probability` | Per-episode resident-checkpoint probability | `0.5` |
+| `--curriculum` | Training opponent schedule (`combat-v7`, older reproducibility versions, or `none`) | `combat-v7` |
 | `--format` / `--decks` / `--format-dir` | Format legality + corpus / deck dir / frozen namespace | pinned Standard |
 | `--optimize-hp` | Run Optuna hyperparameter search | off |
 | `--record-network` / `--record-freq` | Record network parameters / cadence | off / `5000` |

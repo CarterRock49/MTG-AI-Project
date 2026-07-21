@@ -204,12 +204,14 @@ class ThreatSynergyMixin:
                         hasattr(gs._safe_get_card(cid), 'card_types') and 
                         'creature' in gs._safe_get_card(cid).card_types]
 
-        # Threats should be boosted by the opponent's win conditions, not by
-        # our own. Compute that perspective once instead of per permanent.
+        # Threats should be boosted by the opponent's public win conditions,
+        # not by our own or by identities in the opponent's hidden hand.
+        # Compute that perspective once instead of per permanent.
         original_perspective = gs.agent_is_p1
         try:
             gs.agent_is_p1 = not original_perspective
-            opponent_win_conditions = self.identify_win_conditions()
+            opponent_win_conditions = self.identify_win_conditions(
+                include_private_cards=False)
         finally:
             gs.agent_is_p1 = original_perspective
         

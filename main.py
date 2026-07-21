@@ -52,6 +52,7 @@ import torch.nn as nn
 from Playersim.card import Card, load_decks_and_card_db
 from Playersim.environment import AlphaZeroMTGEnv
 from Playersim.curriculum import (
+    derive_checkpoint_lease_seed, derive_checkpoint_pool_seed,
     derive_matchup_seed, resolve_curriculum,
 )
 from Playersim.observation_schema import SEMANTIC_IDENTITY_FIELDS
@@ -956,6 +957,73 @@ EVALUATION_SEED_OFFSET = 1_000_000
 DEFAULT_TRAINING_SEED = 20_260_715
 DEFAULT_EVALUATION_SEED = 21_260_715
 DEFAULT_TRAINING_ENVIRONMENTS = 8
+DEFAULT_CHECKPOINT_POOL_SNAPSHOT_FREQUENCY = 100_000
+DEFAULT_CHECKPOINT_POOL_SIZE = 4
+DEFAULT_CHECKPOINT_POOL_PROBABILITY = 0.5
+
+
+def _checkpoint_pool_contract(
+        *, enabled, snapshot_frequency, max_checkpoints,
+        self_play_probability, base_seed, num_envs):
+    """Normalize the resource-bounded checkpoint-league experiment contract."""
+    frequency = int(snapshot_frequency)
+    pool_size = int(max_checkpoints)
+    probability = float(self_play_probability)
+    environment_count = int(num_envs)
+    if frequency <= 0:
+        raise ValueError("checkpoint pool snapshot frequency must be positive")
+    if pool_size <= 0:
+        raise ValueError("checkpoint pool size must be positive")
+    if not math.isfinite(probability) or not 0.0 <= probability <= 1.0:
+        raise ValueError(
+            "checkpoint pool probability must be between 0 and 1")
+    if bool(enabled) and probability <= 0.0:
+        raise ValueError(
+            "enabled checkpoint pool self-play requires positive probability")
+    if environment_count <= 0:
+        raise ValueError("checkpoint pool requires at least one training worker")
+    worker_seeds = [
+        derive_checkpoint_pool_seed(int(base_seed), worker_index)
+        for worker_index in range(environment_count)
+    ]
+    return {
+        "schema_version": 1,
+        "enabled": bool(enabled),
+        "snapshot_frequency_timesteps": frequency,
+        "max_checkpoints": pool_size,
+        "self_play_probability": probability,
+        "base_seed": int(base_seed),
+        "worker_seeds": worker_seeds,
+        "storage": "bounded_on_disk_fifo",
+        "sampling": "resident_checkpoint_vs_scripted_per_episode",
+        "lease_assignment": "deterministic_seeded_uniform",
+        "lease_refresh": "pool_snapshot",
+        "resident_policies_per_worker": 1,
+        # Eager compatibility validation briefly holds active+pending during a
+        # refresh; reset atomically promotes pending and releases the old one.
+        "maximum_resident_policies_per_worker_during_refresh": 2,
+        "estimated_resident_policy_copies": (
+            environment_count if bool(enabled) else 0),
+        "checkpoint_loader_device": "cpu",
+        "evaluation_opponent": "scripted_unchanged",
+    }
+
+
+def resolve_checkpoint_pool_config(args, *, num_envs):
+    """Resolve CLI settings into a manifest-safe self-play contract."""
+    return _checkpoint_pool_contract(
+        enabled=getattr(args, "checkpoint_pool_self_play", False),
+        snapshot_frequency=getattr(
+            args, "checkpoint_pool_snapshot_freq",
+            DEFAULT_CHECKPOINT_POOL_SNAPSHOT_FREQUENCY),
+        max_checkpoints=getattr(
+            args, "checkpoint_pool_size", DEFAULT_CHECKPOINT_POOL_SIZE),
+        self_play_probability=getattr(
+            args, "checkpoint_pool_probability",
+            DEFAULT_CHECKPOINT_POOL_PROBABILITY),
+        base_seed=getattr(args, "seed", DEFAULT_TRAINING_SEED),
+        num_envs=num_envs,
+    )
 
 # A named canary is an experiment contract, not merely a convenient collection
 # of defaults.  Supplying --canary-config makes launch fail closed if a CLI,
@@ -976,6 +1044,11 @@ ROUND_7_92_CANARY = {
         "curriculum": "combat-v5",
         "format": DEFAULT_FORMAT_NAME,
         "cpu_only": False,
+        "checkpoint_pool_self_play": False,
+        "checkpoint_pool_snapshot_freq":
+            DEFAULT_CHECKPOINT_POOL_SNAPSHOT_FREQUENCY,
+        "checkpoint_pool_size": DEFAULT_CHECKPOINT_POOL_SIZE,
+        "checkpoint_pool_probability": DEFAULT_CHECKPOINT_POOL_PROBABILITY,
     },
     "training_config": {
         "learning_rate": 2e-4,
@@ -1098,10 +1171,40 @@ ROUND_7_97_CANARY = {
             "cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16"),
     },
 }
+# Round 7.98 changes exactly one structural training lever: a resource-bounded
+# checkpoint league. Four frozen snapshots live on disk, while each worker
+# eagerly validates and leases exactly one CPU policy at pool-refresh cadence.
+# Episodes independently choose that resident policy or the unchanged scripted
+# curriculum at probability 0.5. Fixed evaluation remains scripted-only.
+ROUND_7_98_CANARY = {
+    **ROUND_7_97_CANARY,
+    "id": "round-7.98",
+    "cli": {
+        **ROUND_7_97_CANARY["cli"],
+        "checkpoint_pool_self_play": True,
+        "checkpoint_pool_snapshot_freq":
+            DEFAULT_CHECKPOINT_POOL_SNAPSHOT_FREQUENCY,
+        "checkpoint_pool_size": DEFAULT_CHECKPOINT_POOL_SIZE,
+        "checkpoint_pool_probability": DEFAULT_CHECKPOINT_POOL_PROBABILITY,
+        "matchup_weighting": False,
+    },
+    "runtime": {
+        **ROUND_7_97_CANARY["runtime"],
+        "checkpoint_pool_config": _checkpoint_pool_contract(
+            enabled=True,
+            snapshot_frequency=DEFAULT_CHECKPOINT_POOL_SNAPSHOT_FREQUENCY,
+            max_checkpoints=DEFAULT_CHECKPOINT_POOL_SIZE,
+            self_play_probability=DEFAULT_CHECKPOINT_POOL_PROBABILITY,
+            base_seed=DEFAULT_TRAINING_SEED,
+            num_envs=DEFAULT_TRAINING_ENVIRONMENTS,
+        ),
+    },
+}
 CANARY_CONFIGS = {
     config["id"]: config
     for config in (ROUND_7_92_CANARY, ROUND_7_93_CANARY, ROUND_7_94_CANARY,
-                   ROUND_7_95_CANARY, ROUND_7_96_CANARY, ROUND_7_97_CANARY)
+                   ROUND_7_95_CANARY, ROUND_7_96_CANARY, ROUND_7_97_CANARY,
+                   ROUND_7_98_CANARY)
 }
 
 
@@ -1319,7 +1422,8 @@ def validate_canary_cli(args):
 
 
 def validate_canary_runtime(config, *, lineage, training_config, curriculum,
-                             schedule_sha256, num_envs, selected_device):
+                             schedule_sha256, num_envs, selected_device,
+                             checkpoint_pool_config=None):
     """Validate resolved code/data identities after the corpus is loaded."""
     if config is None:
         return
@@ -1345,6 +1449,8 @@ def validate_canary_runtime(config, *, lineage, training_config, curriculum,
         "feature_output_dim": FEATURE_OUTPUT_DIM,
         "selected_device": str(selected_device),
     })
+    if "checkpoint_pool_config" in expected_runtime:
+        actual["checkpoint_pool_config"] = json_safe(checkpoint_pool_config)
     expected = {
         **expected_training,
         **expected_lineage,
@@ -1662,6 +1768,17 @@ def training_artifacts(run_model_dir, run_id):
             identity = artifact_identity(os.path.join(checkpoint_dir, filename))
             if identity is not None:
                 checkpoints.append(identity)
+    checkpoint_pool_dir = os.path.join(run_model_dir, "checkpoint_pool")
+    checkpoint_pool_snapshots = []
+    if os.path.isdir(checkpoint_pool_dir):
+        for filename in sorted(
+                os.listdir(checkpoint_pool_dir), key=str.casefold):
+            if not filename.casefold().endswith(".zip"):
+                continue
+            identity = artifact_identity(os.path.join(
+                checkpoint_pool_dir, filename))
+            if identity is not None:
+                checkpoint_pool_snapshots.append(identity)
     return {
         "final_model": artifact_identity(os.path.join(run_model_dir, "final_model")),
         "interrupted_model": artifact_identity(os.path.join(
@@ -1681,6 +1798,11 @@ def training_artifacts(run_model_dir, run_id):
         "runtime_log": artifact_identity(os.path.join(
             LOG_DIR, run_id, "training.log")),
         "checkpoints": checkpoints,
+        "checkpoint_pool": {
+            "manifest": artifact_identity(os.path.join(
+                checkpoint_pool_dir, "checkpoint_pool.json")),
+            "snapshots_on_disk": checkpoint_pool_snapshots,
+        },
     }
 
 
@@ -3408,6 +3530,440 @@ class TrainingProvenanceCallback(BaseCallback):
             "set_training_timestep", int(self.num_timesteps))
 
 
+class CheckpointPoolSelfPlayCallback(BaseCallback):
+    """Freeze and lease a bounded policy pool to training workers.
+
+    Checkpoints are large (the Round 7.97 policy is roughly 512 MB), so the
+    callback owns a bounded on-disk pool and assigns exactly one steady-state
+    resident policy to each worker. A lease changes only when a new snapshot
+    refreshes the pool. The environment then samples resident-checkpoint versus
+    scripted play independently per episode and commits a staged lease only at
+    reset, never in the middle of a game.
+
+    ``num_timesteps`` advances by the VecEnv worker count, so an exact cadence
+    boundary may never be observed. A crossing takes one snapshot of the real
+    learner state at the first callback after the boundary; it never backdates
+    or emits multiple byte-identical snapshots for skipped boundaries. The
+    snapshot manifest records the first/last crossed boundary and their count.
+    """
+
+    MANIFEST_SCHEMA_VERSION = 1
+
+    def __init__(self, *, run_id, pool_directory, config, lineage, verbose=0):
+        super().__init__(verbose)
+        self.run_id = str(run_id)
+        self.pool_directory = os.path.abspath(pool_directory)
+        self.manifest_path = os.path.join(
+            self.pool_directory, "checkpoint_pool.json")
+        self.config = json_safe(config)
+        if not self.config.get("enabled"):
+            raise ValueError(
+                "CheckpointPoolSelfPlayCallback requires enabled config")
+        self.lineage = json_safe(lineage)
+        self.snapshot_frequency = int(
+            self.config["snapshot_frequency_timesteps"])
+        self.max_checkpoints = int(self.config["max_checkpoints"])
+        self.self_play_probability = float(
+            self.config["self_play_probability"])
+        self.worker_seeds = [int(value) for value in (
+            self.config.get("worker_seeds") or ())]
+        self._next_snapshot_timestep = self.snapshot_frequency
+        self._active_pool = []
+        self._snapshot_history = []
+        self._lease_history = []
+        os.makedirs(self.pool_directory, exist_ok=True)
+
+    @staticmethod
+    def _response_payload(result, *, operation, worker_index):
+        if not isinstance(result, (list, tuple)) or len(result) != 1:
+            result_count = (
+                len(result) if isinstance(result, (list, tuple)) else None)
+            raise RuntimeError(
+                f"Checkpoint opponent {operation} worker {worker_index} "
+                "returned malformed env_method response "
+                f"type={type(result).__name__} count={result_count!r}")
+        payload = result[0]
+        if not isinstance(payload, dict):
+            raise RuntimeError(
+                f"Checkpoint opponent {operation} worker {worker_index} "
+                "returned non-mapping status "
+                f"type={type(payload).__name__}")
+        return payload
+
+    @staticmethod
+    def _manifest_status_response(payload):
+        """Persist status attribution without worker-local checkpoint paths."""
+        allowed = (
+            "status", "pending_policy_id", "pending_checkpoint_sha256",
+            "probability", "seed", "pending_clear", "current_policy_id",
+            "current_sha256", "using_checkpoint", "last_error",
+        )
+        return {
+            key: json_safe(payload[key])
+            for key in allowed if key in payload
+        }
+
+    @staticmethod
+    def _status_error(payload):
+        nested = payload.get("status")
+        if isinstance(nested, dict):
+            nested_error = CheckpointPoolSelfPlayCallback._status_error(nested)
+            if nested_error:
+                return nested_error
+        elif str(nested or "").casefold() in {
+                "error", "failed", "rejected", "incompatible"}:
+            return payload.get("reason") or nested
+        return (payload.get("last_load_error") or payload.get("last_error")
+                or payload.get("error"))
+
+    def _validate_clear_response(self, payload, *, worker_index):
+        error = self._status_error(payload)
+        mismatches = []
+        expected = {
+            "status": "clear_staged",
+            "pending_clear": True,
+            "pending": None,
+            "probability": 0.0,
+        }
+        for key, value in expected.items():
+            if key not in payload:
+                mismatches.append(f"{key}=<missing> (expected {value!r})")
+                continue
+            actual = payload[key]
+            if key == "probability":
+                try:
+                    matches = math.isclose(
+                        float(actual), 0.0, rel_tol=0.0, abs_tol=1e-12)
+                except (TypeError, ValueError, OverflowError):
+                    matches = False
+            elif key == "pending_clear":
+                matches = actual is True
+            else:
+                matches = actual == value
+            if not matches:
+                mismatches.append(
+                    f"{key}={actual!r} (expected {value!r})")
+        if error:
+            mismatches.append(f"error={error!r}")
+        if mismatches:
+            raise RuntimeError(
+                f"Checkpoint opponent clear rejected for worker "
+                f"{worker_index}: " + "; ".join(mismatches))
+
+    def _clear_worker_record(self, worker_index):
+        record = {
+            "worker_index": int(worker_index),
+            "status": "error",
+            "response": None,
+            "error": None,
+        }
+        try:
+            result = self.training_env.env_method(
+                "clear_checkpoint_opponent", indices=worker_index)
+            payload = self._response_payload(
+                result, operation="clear", worker_index=worker_index)
+            record["response"] = self._manifest_status_response(payload)
+            self._validate_clear_response(
+                payload, worker_index=worker_index)
+            record["status"] = "cleared"
+        except Exception as error:
+            record["error"] = {
+                "type": type(error).__name__,
+                "message": str(error),
+            }
+        return record
+
+    def _clear_workers(self):
+        environment_count = int(getattr(self.training_env, "num_envs", 1))
+        if len(self.worker_seeds) != environment_count:
+            raise RuntimeError(
+                "Checkpoint pool worker seed count does not match the "
+                f"training VecEnv: {len(self.worker_seeds)} != "
+                f"{environment_count}")
+        for worker_index in range(environment_count):
+            record = self._clear_worker_record(worker_index)
+            if record["error"] is not None:
+                raise RuntimeError(
+                    f"Checkpoint opponent clear rejected for worker "
+                    f"{worker_index}: {record['error']['message']}")
+
+    def _rollback_staged_leases(self):
+        """Best-effort stage scripted play for every worker after failure."""
+        workers = [
+            self._clear_worker_record(worker_index)
+            for worker_index in range(len(self.worker_seeds))
+        ]
+        return {
+            "status": (
+                "complete"
+                if all(worker["error"] is None for worker in workers)
+                else "partial_failure"),
+            "workers": workers,
+        }
+
+    def _public_entry(self, entry):
+        return {
+            key: json_safe(value)
+            for key, value in entry.items()
+            if key != "absolute_path"
+        }
+
+    def _resources_manifest(self):
+        latest_leases = (
+            self._lease_history[-1].get("leases")
+            if self._lease_history else ()) or ()
+        return {
+            "active_disk_checkpoint_count": len(self._active_pool),
+            "active_disk_checkpoint_bytes": sum(
+                int(entry.get("size_bytes", 0))
+                for entry in self._active_pool),
+            "resident_policies_per_worker": 1,
+            "maximum_resident_policies_per_worker_during_refresh": 2,
+            "estimated_resident_policy_copies": len(latest_leases),
+            # This is an auditable compressed-file-size equivalent, not a
+            # claim about allocator/RAM overhead after PyTorch deserialization.
+            "estimated_resident_checkpoint_file_bytes": sum(
+                int(lease.get("checkpoint_size_bytes", 0))
+                for lease in latest_leases),
+        }
+
+    def progress_manifest(self):
+        return {
+            "schema_version": self.MANIFEST_SCHEMA_VERSION,
+            "kind": "playersim_checkpoint_pool",
+            "run_id": self.run_id,
+            "config": json_safe(self.config),
+            "lineage": json_safe(self.lineage),
+            "active_pool": [
+                self._public_entry(entry) for entry in self._active_pool],
+            "snapshot_history": [
+                self._public_entry(entry)
+                for entry in self._snapshot_history],
+            "lease_history": json_safe(self._lease_history),
+            "resources": self._resources_manifest(),
+            "next_snapshot_timestep": int(self._next_snapshot_timestep),
+            "updated_at": utc_timestamp(),
+        }
+
+    def _persist(self):
+        write_json_atomic(self.manifest_path, self.progress_manifest())
+
+    def _portable_path(self, path):
+        try:
+            display_path = os.path.relpath(path, BASE_DIR)
+        except ValueError:
+            display_path = os.path.abspath(path)
+        return display_path.replace(os.sep, "/")
+
+    def _save_frozen_snapshot(self, timestep, cadence):
+        stem = f"opponent_{int(timestep):012d}"
+        final_path = os.path.join(self.pool_directory, f"{stem}.zip")
+        if os.path.exists(final_path):
+            raise RuntimeError(
+                f"Checkpoint pool snapshot already exists: {final_path}")
+        temporary_base = os.path.join(
+            self.pool_directory,
+            f".{stem}.{os.getpid()}.{time.time_ns()}.tmp")
+        temporary_actual = None
+        try:
+            self.model.save(temporary_base)
+            temporary_actual = resolve_artifact_path(temporary_base)
+            if temporary_actual is None:
+                raise RuntimeError(
+                    "Learner did not publish a checkpoint-pool snapshot")
+            os.replace(temporary_actual, final_path)
+        finally:
+            for candidate in (temporary_base, f"{temporary_base}.zip"):
+                if os.path.isfile(candidate):
+                    os.remove(candidate)
+        entry = {
+            "policy_id": f"{self.run_id}@{int(timestep)}",
+            "path": self._portable_path(final_path),
+            "absolute_path": os.path.abspath(final_path),
+            "size_bytes": os.path.getsize(final_path),
+            "sha256": sha256_file(final_path),
+            "snapshot_timestep": int(timestep),
+            "cadence_boundary_timestep": int(
+                cadence["first_crossed_boundary_timestep"]),
+            "last_crossed_boundary_timestep": int(
+                cadence["last_crossed_boundary_timestep"]),
+            "crossed_boundary_count": int(
+                cadence["crossed_boundary_count"]),
+            "cadence_semantics": "single_snapshot_after_crossing",
+            "created_at": utc_timestamp(),
+            "status": "active",
+            "lineage": json_safe(self.lineage),
+        }
+        return entry
+
+    def _stage_worker_lease(self, worker_index, entry, lease_seed):
+        checkpoint = {
+            "path": entry["absolute_path"],
+            "policy_id": entry["policy_id"],
+            "sha256": entry["sha256"],
+        }
+        result = self.training_env.env_method(
+            "stage_checkpoint_opponent",
+            checkpoint, self.self_play_probability, int(lease_seed),
+            indices=worker_index)
+        payload = self._response_payload(
+            result, operation="stage", worker_index=worker_index)
+        error = self._status_error(payload)
+        expected = {
+            "status": "staged",
+            "pending_policy_id": entry["policy_id"],
+            "pending_checkpoint_sha256": entry["sha256"],
+            "probability": self.self_play_probability,
+            "seed": int(lease_seed),
+        }
+        mismatches = []
+        if error:
+            mismatches.append(f"error={error!r}")
+        for key, value in expected.items():
+            actual = payload.get(key)
+            matches = (
+                math.isclose(float(actual), float(value), rel_tol=0.0,
+                             abs_tol=1e-12)
+                if key == "probability" and actual is not None
+                else actual == value)
+            if not matches:
+                mismatches.append(
+                    f"{key}={actual!r} (expected {value!r})")
+        if mismatches:
+            raise RuntimeError(
+                f"Checkpoint opponent staging rejected for worker "
+                f"{worker_index}: " + "; ".join(mismatches))
+        return payload
+
+    def _refresh_pool(self, timestep, cadence):
+        new_entry = self._save_frozen_snapshot(timestep, cadence)
+        prospective_pool = [*self._active_pool, new_entry]
+        evicted = prospective_pool[:-self.max_checkpoints]
+        prospective_pool = prospective_pool[-self.max_checkpoints:]
+        leases = []
+        attempted_leases = []
+        try:
+            for worker_index in range(len(self.worker_seeds)):
+                lease_seed = derive_checkpoint_lease_seed(
+                    self.worker_seeds[worker_index], int(timestep),
+                    worker_index)
+                selection = random.Random(lease_seed).randrange(
+                    len(prospective_pool))
+                entry = prospective_pool[selection]
+                lease = {
+                    "worker_index": worker_index,
+                    "lease_seed": int(lease_seed),
+                    "policy_id": entry["policy_id"],
+                    "checkpoint_sha256": entry["sha256"],
+                    "checkpoint_size_bytes": int(entry["size_bytes"]),
+                    "snapshot_timestep": int(entry["snapshot_timestep"]),
+                }
+                attempted_leases.append(dict(lease))
+                response = self._stage_worker_lease(
+                    worker_index, entry, lease_seed)
+                successful = dict(lease)
+                successful["response"] = self._manifest_status_response(
+                    response)
+                leases.append(successful)
+        except Exception as error:
+            new_entry["status"] = "staging_failed"
+            self._snapshot_history.append(new_entry)
+            rollback = self._rollback_staged_leases()
+            self._lease_history.append({
+                "status": "staging_failed",
+                "pool_refresh_timestep": int(timestep),
+                "cadence": json_safe(cadence),
+                "attempted_at": utc_timestamp(),
+                "attempted_leases": attempted_leases,
+                "successful_leases": leases,
+                "failure": {
+                    "type": type(error).__name__,
+                    "message": str(error),
+                },
+                "rollback": rollback,
+            })
+            self._persist()
+            raise
+
+        for entry in evicted:
+            entry["status"] = "evicted"
+            entry["evicted_at_timestep"] = int(timestep)
+        self._active_pool = prospective_pool
+        self._snapshot_history.append(new_entry)
+        self._lease_history.append({
+            "status": "staged",
+            "pool_refresh_timestep": int(timestep),
+            "cadence": json_safe(cadence),
+            "leased_at": utc_timestamp(),
+            "leases": leases,
+        })
+        # Workers eagerly loaded/validated their pending lease before the old
+        # disk entry is removed. Existing active policies are already resident.
+        for entry in evicted:
+            evicted_path = os.path.abspath(entry["absolute_path"])
+            if os.path.commonpath(
+                    (self.pool_directory, evicted_path)) \
+                    != self.pool_directory:
+                raise RuntimeError(
+                    f"Refusing to evict checkpoint outside pool: {evicted_path}")
+            if os.path.isfile(evicted_path):
+                os.remove(evicted_path)
+        self._persist()
+        self.logger.record(
+            "self_play/checkpoint_pool_size", len(self._active_pool))
+        self.logger.record(
+            "self_play/checkpoint_snapshot_bytes",
+            int(new_entry["size_bytes"]))
+        self.logger.record(
+            "self_play/estimated_resident_policy_copies", len(leases))
+        logging.info(
+            "Checkpoint pool refreshed at timestep %s: %s on disk, %s "
+            "single-policy worker leases",
+            timestep, len(self._active_pool), len(leases))
+
+    def _on_training_start(self):
+        initial_timestep = int(self.num_timesteps)
+        self._next_snapshot_timestep = (
+            (initial_timestep // self.snapshot_frequency) + 1
+        ) * self.snapshot_frequency
+        self._clear_workers()
+        self._persist()
+
+    def _on_step(self):
+        timestep = int(self.num_timesteps)
+        if timestep < self._next_snapshot_timestep:
+            return True
+        first_boundary = int(self._next_snapshot_timestep)
+        crossed_count = (
+            (timestep - first_boundary) // self.snapshot_frequency) + 1
+        last_boundary = (
+            first_boundary
+            + (crossed_count - 1) * self.snapshot_frequency)
+        cadence = {
+            "semantics": "single_snapshot_after_crossing",
+            "first_crossed_boundary_timestep": first_boundary,
+            "last_crossed_boundary_timestep": int(last_boundary),
+            "crossed_boundary_count": int(crossed_count),
+            "observed_snapshot_timestep": timestep,
+        }
+        self._refresh_pool(timestep, cadence)
+        self._next_snapshot_timestep = int(
+            last_boundary + self.snapshot_frequency)
+        self._persist()
+        return True
+
+    def _on_training_end(self):
+        self._persist()
+
+
+def checkpoint_pool_progress_manifest(callbacks):
+    """Return final callback state for complete, failed, or interrupted runs."""
+    for callback in callbacks or ():
+        if isinstance(callback, CheckpointPoolSelfPlayCallback):
+            return callback.progress_manifest()
+    return None
+
+
 def curriculum_progress_manifest(model, curriculum):
     """Return auditable runtime curriculum progress for a run manifest."""
     if curriculum is None:
@@ -4402,7 +4958,8 @@ def cancel_async_evaluations(callbacks, reason):
 
 def create_callbacks(eval_env_factory, run_id, args, num_train_envs=1,
                      tb_run_dir=None, evaluation_schedule=None,
-                     curriculum=None):
+                     curriculum=None, checkpoint_pool_config=None,
+                     checkpoint_pool_lineage=None):
     """Create a comprehensive set of callbacks"""
     # BaseCallback.n_calls counts VecEnv steps, not individual transitions.
     # Keep CLI frequencies expressed in total training timesteps as documented.
@@ -4458,6 +5015,17 @@ def create_callbacks(eval_env_factory, run_id, args, num_train_envs=1,
 
     callbacks = [eval_callback, checkpoint_callback, progress_callback]
     callbacks.append(TrainingProvenanceCallback())
+    if (checkpoint_pool_config or {}).get("enabled"):
+        if checkpoint_pool_lineage is None:
+            raise ValueError(
+                "Enabled checkpoint pool requires explicit policy lineage")
+        callbacks.append(CheckpointPoolSelfPlayCallback(
+            run_id=run_id,
+            pool_directory=os.path.join(
+                run_model_dir, "checkpoint_pool"),
+            config=checkpoint_pool_config,
+            lineage=checkpoint_pool_lineage,
+        ))
     if curriculum is not None:
         callbacks.append(CurriculumProgressCallback(curriculum))
     if args.record_network:
@@ -4596,6 +5164,27 @@ def main():
         help=("Fixed paired deck/seat/seed cases per periodic evaluation "
               "(use an even count; 64+ recommended)"))
     parser.add_argument("--checkpoint-freq", type=int, default=50000, help="Checkpoint frequency")
+    parser.add_argument(
+        "--checkpoint-pool-self-play", action="store_true",
+        help=("Opt in to Round 7.98 checkpoint-league training. Frozen "
+              "opponents are used only by training workers; fixed evaluation "
+              "remains scripted."))
+    parser.add_argument(
+        "--checkpoint-pool-snapshot-freq", type=int,
+        default=DEFAULT_CHECKPOINT_POOL_SNAPSHOT_FREQUENCY,
+        help=("Learner timesteps between frozen checkpoint-pool snapshots "
+              f"(default: {DEFAULT_CHECKPOINT_POOL_SNAPSHOT_FREQUENCY})"))
+    parser.add_argument(
+        "--checkpoint-pool-size", type=int,
+        default=DEFAULT_CHECKPOINT_POOL_SIZE,
+        help=("Maximum frozen checkpoints retained on disk "
+              f"(default: {DEFAULT_CHECKPOINT_POOL_SIZE})"))
+    parser.add_argument(
+        "--checkpoint-pool-probability", type=float,
+        default=DEFAULT_CHECKPOINT_POOL_PROBABILITY,
+        help=("Per-episode probability of using a worker's one resident "
+              "checkpoint instead of scripted play "
+              f"(default: {DEFAULT_CHECKPOINT_POOL_PROBABILITY})"))
     parser.add_argument("--learning-rate", type=float, default=2e-4, help="Initial learning rate")
     parser.add_argument("--batch-size", type=int, default=256, help="Batch size for training")
     parser.add_argument("--n-steps", type=int, default=1024, help="Number of steps to collect before training")
@@ -4645,12 +5234,23 @@ def main():
     args = parser.parse_args()
     if args.resume and args.optimize_hp:
         parser.error("--resume and --optimize-hp cannot be used together")
+    if args.checkpoint_pool_self_play and args.optimize_hp:
+        parser.error(
+            "--checkpoint-pool-self-play is not wired into hyperparameter "
+            "trials; run one explicit training experiment instead")
     if args.timesteps <= 0:
         parser.error("--timesteps must be positive")
     if args.eval_episodes <= 0:
         parser.error("--eval-episodes must be positive")
     if args.eval_episodes % 2:
         parser.error("--eval-episodes must be even for paired-seat evaluation")
+    try:
+        # Validate scalar settings before creating a run directory. The exact
+        # worker-seed list is resolved again after --n-envs auto-selection.
+        resolve_checkpoint_pool_config(
+            args, num_envs=max(int(args.n_envs), 1))
+    except ValueError as error:
+        parser.error(str(error))
     resume_lineage = None
     if args.resume:
         try:
@@ -4790,6 +5390,7 @@ def main():
     model = None
     callbacks = None
     resolved_curriculum = None
+    checkpoint_pool_config = None
     exit_code = 1
     start_time = time.time()
     initial_num_timesteps = 0
@@ -4831,6 +5432,8 @@ def main():
             args.n_envs if args.n_envs > 0
             else max(1, min(6, detected_cpus // 2))
         )
+        checkpoint_pool_config = resolve_checkpoint_pool_config(
+            args, num_envs=num_envs)
         # A single alternating-seat evaluator avoids global random/NumPy stream
         # coupling between multiple environments inside DummyVecEnv.
         eval_env_count = 1
@@ -4849,6 +5452,7 @@ def main():
             schedule_sha256=fixed_evaluation_schedule_hash,
             num_envs=num_envs,
             selected_device=selected_device,
+            checkpoint_pool_config=checkpoint_pool_config,
         )
         subproc_start_method = "spawn" if os.name == "nt" else None
         learner_threads = (
@@ -4891,8 +5495,14 @@ def main():
             "selected_device": selected_device,
             "alternate_agent_seat": True,
             "opponent_policy": (
-                "scripted-curriculum"
+                "checkpoint-lease+scripted-curriculum"
+                if checkpoint_pool_config["enabled"]
+                and resolved_curriculum is not None
+                else "checkpoint-lease+scripted"
+                if checkpoint_pool_config["enabled"]
+                else "scripted-curriculum"
                 if resolved_curriculum is not None else "scripted"),
+            "checkpoint_pool": json_safe(checkpoint_pool_config),
             "curriculum": json_safe(resolved_curriculum),
             "train_matchup_seeds": [
                 derive_matchup_seed(args.seed, index)
@@ -4910,6 +5520,7 @@ def main():
                 fixed_evaluation_schedule_hash),
             "fixed_evaluation_schedule": fixed_evaluation_schedule,
             "evaluation_opponent_profile": "scripted",
+            "evaluation_checkpoint_pool": None,
             "evaluation_curriculum": None,
             "evaluation_adaptive_decision_history": False,
             "training_stats_persistence_interval_games": 10,
@@ -4998,11 +5609,39 @@ def main():
         manifest["resolved"]["assigned_evaluation_worker_seeds"] = json_safe(
             [eval_seed + index for index in range(eval_env_count)])
 
+        checkpoint_pool_lineage = {
+            "source_run_id": run_id,
+            "project_version": VERSION,
+            "algorithm": "sb3_contrib.MaskablePPO",
+            "policy_class": (
+                f"{FixedDimensionMaskableActorCriticPolicy.__module__}."
+                f"{FixedDimensionMaskableActorCriticPolicy.__qualname__}"),
+            "observation_schema_version":
+                AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION,
+            "observation_schema_sha256":
+                AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256,
+            "action_space_size": AlphaZeroMTGEnv.ACTION_SPACE_SIZE,
+            "feature_output_dim": FEATURE_OUTPUT_DIM,
+            "training_config_sha256": configuration_sha256(
+                training_config),
+            "reward_contract_version": training_config[
+                "reward_contract_version"],
+            "curriculum_id": (resolved_curriculum or {}).get("id"),
+            "curriculum_sha256": configuration_sha256(
+                resolved_curriculum),
+            "format_lineage": json_safe(lineage),
+            "loader_device": "cpu",
+        }
+        manifest["resolved"]["checkpoint_pool_lineage"] = json_safe(
+            checkpoint_pool_lineage)
+
         callbacks = create_callbacks(
             make_evaluation_vec_env, run_id, args, num_train_envs=num_envs,
             tb_run_dir=tb_run_dir,
             evaluation_schedule=fixed_evaluation_schedule,
-            curriculum=resolved_curriculum)
+            curriculum=resolved_curriculum,
+            checkpoint_pool_config=checkpoint_pool_config,
+            checkpoint_pool_lineage=checkpoint_pool_lineage)
 
         current_phase = "model_setup"
         manifest["phase"] = current_phase
@@ -5128,6 +5767,7 @@ def main():
             "evaluation": evaluation_history_summary(run_id),
             "curriculum_progress": curriculum_progress_manifest(
                 model, resolved_curriculum),
+            "checkpoint_pool": checkpoint_pool_progress_manifest(callbacks),
         }
         manifest["status"] = "complete"
         manifest["phase"] = "complete"
@@ -5189,6 +5829,7 @@ def main():
             "evaluation": evaluation_history_summary(run_id),
             "curriculum_progress": curriculum_progress_manifest(
                 model, resolved_curriculum),
+            "checkpoint_pool": checkpoint_pool_progress_manifest(callbacks),
         }
         manifest["status"] = "interrupted" if was_interrupted else "failed"
         manifest["phase"] = current_phase

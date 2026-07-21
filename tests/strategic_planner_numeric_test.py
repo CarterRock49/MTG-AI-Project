@@ -201,11 +201,13 @@ class StrategicPlannerNumericSafetyTest(unittest.TestCase):
     def test_threat_win_conditions_use_opponent_perspective_once(self):
         game_state = self._state()
         planner = MTGStrategicPlanner(game_state)
-        observed_perspectives = []
+        observed_calls = []
 
-        def fake_win_conditions(current_planner):
-            observed_perspectives.append(
-                current_planner.game_state.agent_is_p1)
+        def fake_win_conditions(
+                current_planner, include_private_cards=True):
+            observed_calls.append((
+                current_planner.game_state.agent_is_p1,
+                include_private_cards))
             return {
                 "combat_damage": {
                     "viable": False, "key_cards": [],
@@ -217,7 +219,7 @@ class StrategicPlannerNumericSafetyTest(unittest.TestCase):
                 fake_win_conditions):
             planner.assess_threats()
 
-        self.assertEqual(observed_perspectives, [False])
+        self.assertEqual(observed_calls, [(False, False)])
         self.assertTrue(game_state.agent_is_p1)
 
     def test_specialized_archetypes_keep_detected_strategy_parameters(self):

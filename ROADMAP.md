@@ -1,4 +1,4 @@
-# Playersim roadmap — current as of July 19, 2026
+# Playersim roadmap — current as of July 21, 2026
 
 ## Mission and scope
 
@@ -39,9 +39,9 @@ The current working tree is green at the following delivery gates:
 | Golden scenarios | 409/409 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
-| Discovered unit tests | 736/736 |
+| Discovered unit tests | 848/848 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
-| Observation schema | v3 / `6e29a94e3443881681afd794185f061133f24ff72350a7df27f48524f00d4137` |
+| Observation schema | v5 / `cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16` |
 
 Standing broader gates last recorded green: fixture Harvest 18/18, production
 Harvest protocol 17/17, card registry 19/19, deck ingestion 13/13, and
@@ -54,6 +54,80 @@ closed. Card and deck analytics now preserve canonical card identity,
 player-relative turns, draw-aware rates, and atomic per-file persistence.
 Evaluator caches retain only static characteristics, while live state and
 perspective are recomputed for each decision.
+
+### Round 7.98 checkpoint-league foundation — July 21, 2026
+
+The structural self-play lever is implemented and gated, but no Round 7.98
+training result exists yet. `--checkpoint-pool-self-play` is off by default;
+the named `round-7.98` canary pins it on, pins matchup weighting off, and keeps
+the Round 7.97 Observation v5, `tempo-graded-potential-v1`, and `combat-v7`
+lineage unchanged for one-lever attribution.
+
+Training now publishes a hashed learner snapshot every 100k timesteps into a
+four-checkpoint FIFO disk pool. Each worker eagerly verifies SHA-256 and exact
+observation/action-space compatibility, retains only one frozen CPU policy in
+steady state, and samples that resident checkpoint versus scripted play with
+probability 0.5 per episode. Lease replacement is staged synchronously and
+commits only on reset; a bad checkpoint or worker rejection aborts training,
+records partial attempts, and best-effort rolls every worker back to scripted
+play. Fixed evaluation never receives the pool callback. Pool and run manifests
+together record full lineage, actual checkpoint bytes and hashes, deterministic
+lease seeds, assignment history, bounded-resource estimates, cadence crossings,
+rollback details, and final run state.
+
+Opponent inference now builds an explicit observer-private observation and
+legal mask, restores environment, ActionHandler, diagnostics, planner analysis,
+and archetype caches on success or failure, and installs the opponent mask and
+contexts only for the atomic opponent action. Learned-seat hand/library changes
+cannot affect the opponent view. Degraded fallback masks, incompatible models,
+and mask-invalid predictions fail closed; direct checkpoint opponents used by
+Harvest remain persistent across resets. Action/reward histories follow logical
+roles when seats alternate, each physical seat gets a private planner profile
+derived only from its own deck, and emergency fallback rebuilds the agent layer
+and clears episode histories. Public threat scores cannot depend on identities
+in the other seat's hidden hand.
+
+Non-blocking checkpoint hardening remains: test rollback when worker clearing
+itself fails, remove/account for a newly written snapshot after staging rejects
+it, and cap retained policy references if a custom refresh cadence is shorter
+than an episode. The named Round 7.98 contract is outside that last edge case:
+its 100k refresh cadence exceeds the 2,000-step episode cap.
+
+### Final Room/Exhaust evidence refresh — July 21, 2026
+
+The final-source 43-card replay lives at
+`probe_runs/standard-room-exhaust-evidence-2026-07-21-v4/card_probe_report.json`
+and is pinned to engine SHA-256
+`15e3006bc51e200b94b042139ca532b690a8eef4560c2994470809e65824c931`.
+It records 41 coverage gaps, 2 failures (Charred Foyer // Warped Space and Pit
+Automaton), and 0 bounded mechanical passes. Exact resume reused all 43
+artifacts. Report SHA-256 is
+`e933b32699548d39e933d503888e3a5e78c8e4e1058d8841a0b13fdb58a2e062`
+canonical /
+`f32b845e84237f0cea58bbc2a3e49fdffa8cda661bd3e8ad3442fc0d79094bd2`
+physical; run SHA-256 is
+`df52c3a8fe6bd34917352d4e4308bce01e39d8df72f1eefe883bf824ebb29aa6`
+canonical /
+`354083d37220af88f524ad23fa64cfba83c08cac41968562bd1cf2d7bbce6164`
+physical.
+
+The residual three-card replay at
+`probe_runs/standard-room-exhaust-expanded-2026-07-21-v4/card_probe_report.json`
+fails Charred Foyer, Fell Gravship, and Pit Automaton closed. Charred's `{0}`
+exile alternative cost creates five identical warnings and one manifest issue
+recorded five times; Fell Gravship creates 24 warnings across four unique
+Station/layer diagnostics; Pit is rejected by static evidence for source-coupled
+copying. Exact resume reused all three artifacts. Report SHA-256 is
+`d4a7218dc326e8b5b52e6749590f40a8a1ef041d518412ee2e237574c2a5953d`
+canonical /
+`8487ee985b15f07e1b92ec265bc455ee6551c441b380cdb116c6bb4dd81bf04d`
+physical; run SHA-256 is
+`e17b7e5e042f032062aa078f50b7e3d85c3bb70fcb4997882c2c4b2546fcab2b`
+canonical /
+`b959f0eec2a12c51831151012c5dd5ae37aee4424f80894d5a7c3a5ac316b2f2`
+physical. Independent audit returned `AUDIT_OK=true` across all 46 v4 card
+artifacts; every card remains semantically unverified. These probe directories
+are local and Git-ignored.
 
 ### Batched levers — cast-path hardening, opt-in matchup weighting, Observation v5 — July 20, 2026
 
@@ -91,12 +165,12 @@ the recurring dormant mask/execution divergences that keep stopping runs.
   `round-7.97` canary re-pins the unchanged reward/curriculum over v5. Pinned by
   `tests/producible_mana_observation_test.py`.
 
-The observation change is a hard lineage boundary; the cast-path and matchup
-changes are not. Launch the next candidate with `--canary-config round-7.97`,
-adding `--matchup-weighting` to enable the scheduling lever. Because two levers
-land in one round, attribute the result carefully: matchup weighting is the
-change expected to move the reactive decks; Observation v5 is a genuine
-information upgrade whose effect the diagnosis expects to be secondary.
+The observation change was a hard lineage boundary; the cast-path and matchup
+changes were not. That candidate launched with `--canary-config round-7.97` and
+`--matchup-weighting` to enable the scheduling lever. Because two levers landed
+in one round, its result requires careful attribution: matchup weighting was
+expected to move the reactive decks, while Observation v5 was the secondary
+information upgrade.
 
 ### Round 7.95 verdict, plateau diagnosis, and the Observation v4 response — July 20, 2026
 
@@ -569,9 +643,10 @@ only from independent exact-state scenarios.
 
 ### Non-negotiable lineage rules
 
-- **Start every new policy from the Round 7.97 Observation v5 boundary, using
-  the current `tempo-graded-potential-v1` reward and `combat-v7` curriculum
-  contract.** Observation v5 adds producible mana by color
+- **Start the next policy as the fresh Round 7.98 experiment on the Round 7.97
+  Observation v5 boundary, using the current `tempo-graded-potential-v1`
+  reward, `combat-v7` curriculum, and pinned checkpoint-league contract.**
+  Observation v5 adds producible mana by color
   (`my_producible_mana`, `opp_producible_mana`) on top of the v4 decklist
   features (`my_deck_card_identity`, `my_library_composition`, full-deck
   `deck_composition_estimate`). Own producible mana is exact; the opponent's
@@ -585,11 +660,11 @@ only from independent exact-state scenarios.
   targetable observations match the active target instruction. Do not resume
   an Observation v2/v3/v4 checkpoint into this lineage; the v5 schema hash is
   `cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16` and
-  earlier-schema resumes fail closed. Fresh Round 7.97 training uses
-  `tempo-graded-potential-v1` and `combat-v7`; do not resume an older
-  curriculum or reward checkpoint. Matchup weighting is an opt-in training
-  lever (`--matchup-weighting`, off by default) and is not part of the named
-  canary contract.
+  earlier-schema resumes fail closed. Round 7.98 keeps the v5 observation and
+  reward/curriculum lineage, but its named canary requires checkpoint self-play,
+  rejects resume, and pins matchup weighting off so exactly one structural
+  training lever changes. Generic runs still leave both checkpoint self-play
+  and matchup weighting off by default.
 - Resume now verifies the companion manifest's reward contract and Observation
   version/hash. Curriculum continuation is intentionally rejected until its
   per-worker scheduler counters can be checkpointed; launch a fresh
@@ -651,7 +726,8 @@ deliberately rejected to keep the policy deck- and opponent-agnostic):
    has been eliminated.
 
 `combat-v4` was the Round 7.91 default and `combat-v3` remains resolvable for
-reproducibility. Round 7.92 supersedes both for fresh runs with `combat-v5`.
+reproducibility. At that time, Round 7.92 superseded both for fresh runs with
+`combat-v5`.
 Fixed evaluation continues to use full-strength scripted opponents and the
 engine-default turn limit.
 
@@ -719,9 +795,10 @@ The pooled diagnostics were:
 | Beating token swarms | 1-54 vs Azorius Momo, 4-52 vs Selesnya as opponents |
 | Closing against durdle | 30 and 34 of 56 games vs 4c Control / Jeskai hit the 31-turn limit |
 
-Round 7.92 implements the two stage-level responses: `combat-v5` (now the
-fresh-run default) gives goldfish 25 turns — runs 1-3 all lost goldfish to its
-deadline at ~71% timeouts under 20 turns — and extends the annealed handicap
+Round 7.92 implemented the two stage-level responses: `combat-v5` (the
+fresh-run default at that time) gave goldfish 25 turns — runs 1-3 all lost
+goldfish to its deadline at ~71% timeouts under 20 turns — and extended the
+annealed handicap
 to the scripted portion of `full_pool` (epsilon 0.40 → 0 by ratchet). The
 full-pool bag is 80% scripted and 20% novice, but before v5 both active
 profiles began at full strength; it was therefore 100% active full-strength,
@@ -1070,29 +1147,17 @@ piloting ceiling, invariant to observation and reward changes. Stop adding
 observation fields and reward terms for this failure. Three structural levers,
 sequenced cheapest-first, one new lever per round for clean attribution:
 
-1. **Self-play / checkpoint league (lead lever).** The environment hook already
-   exists: `AlphaZeroMTGEnv.set_opponent_policy(policy)` installs any object
-   exposing `predict(obs, action_masks, deterministic)` as the opponent, and
-   `_get_opponent_policy_action` already fetches the opponent observation, runs
-   the net, and enforces mask-legality (raises on a mask-invalid action). The
-   scripted profiles (`passive`, `novice`, `scripted`) leave `opponent_policy =
-   None`; nothing in `main.py` or Harvest yet installs a neural opponent. What
-   is missing is orchestration only: (a) snapshot the training policy into a
-   frozen pool on a cadence, (b) sample a pool opponent per episode via
-   `set_opponent_policy`, added as a new curriculum source alongside the
-   scripted profiles, (c) gate behind an off-by-default CLI flag in the style of
-   `--matchup-weighting`. **Known blocker:** `_get_obs()` builds "me" as
-   `p1 if agent_is_p1 else p2`, i.e. it is hardwired to the agent seat, so the
-   existing hook would feed the opponent net the agent's own view (including the
-   agent's hidden hand). The hook validates mask-legality but has never been
-   exercised (`opponent_policy` is always `None`). Lever 1 must first add an
-   opponent-perspective observation path — either an `observer_is_p1` argument
-   to `_get_obs()` (cleaner, no state mutation) or a flip-`agent_is_p1`-and-
-   restore around the call (smaller, but must confirm nothing else caches
-   perspective). Rationale: the
-   scripted bots had to be handicap-ratcheted down to 0.20 to stay competitive,
-   so the agent was never pressured to learn the patient control game; self-play
-   supplies full-strength, self-scaling sparring the scripts cannot.
+1. **Self-play / checkpoint league (lead lever; foundation delivered).** The
+   Round 7.98 implementation is complete: explicit perspective-safe opponent
+   observation/mask generation, strict hidden-information and cache isolation,
+   mask-valid atomic opponent dispatch, eager fail-closed checkpoint staging,
+   a bounded four-snapshot disk pool, deterministic one-policy worker leases,
+   per-episode checkpoint-versus-scripted sampling, rollback/provenance
+   manifests, and a scripted-only fixed evaluator. The steady-state resource
+   contract is one frozen CPU policy per worker; only a safe lease refresh may
+   temporarily hold the active and pending policies together. The next action
+   is to launch the fresh named canary below and measure whether this training
+   signal moves control decks off 0%, not to add another lever.
 2. **Archetype-conditioned capacity.** The agent observes `opponent_archetype`
    (6-dim) but **not its own** — there is no `my_archetype` field. Add it
    (Observation v6, hard lineage boundary) and/or a light policy conditioning
@@ -1112,6 +1177,14 @@ default invariant fuzz, canary validation); any observation change (lever 2)
 mints a new schema hash, canary, and checkpoint lineage and retrains from
 scratch. Promotion to `best_model.zip` still requires the pair-aware 95%
 qualification lower bound to reach 55% with zero fidelity counters.
+
+```bash
+python main.py --canary-config round-7.98 --timesteps 2000000 \
+  --checkpoint-pool-self-play --run-name round-7.98-self-play-v1
+```
+
+Do not add `--matchup-weighting` or `--resume`; the canary rejects both so the
+checkpoint league remains the only changed experimental lever.
 
 ### Next — qualify and calibrate Standard
 
@@ -1174,7 +1247,7 @@ persists them beside statistics. Worst severity sticks per card. The builder
 must exclude crash/unparsed cards and distrust or down-weight partial-card
 statistics.
 
-Standard's pinned 4,702-card schema-v2 ledger, measured July 19, contains:
+Standard's pinned 4,702-card schema-v2 ledger, measured July 21, contains:
 
 | Evidence class | Cards |
 | --- | ---: |
@@ -1182,11 +1255,14 @@ Standard's pinned 4,702-card schema-v2 ledger, measured July 19, contains:
 | Semantic unverified | 4,702 |
 | Legacy name-only claims (overlapping audit metadata) | 96 |
 | Static observed clean | 119 |
-| Static unseen/clean | 3,417 |
+| Static unseen/clean | 3,420 |
 | Static partial | 833 |
-| Static unparsed | 333 |
+| Static unparsed | 330 |
 
-That is 75.2% static-clean and 0% semantically verified. A clean manifest for
+That is 75.3% static-clean and 0% semantically verified. The ledger's canonical
+SHA-256 is
+`4ed2dce764032d9cfdfa7e2f9721bc0514ac6bef0b514daaa15a58f1db5b7e14`.
+A clean manifest for
 the representative corpus does not prove unseen cards are faithful, and the 96
 legacy claims confer no qualification.
 
@@ -1257,7 +1333,7 @@ missing automated builder consumer.
 - ✅ Shared foundation: canonical append-only registry, frozen self-hashed
   feature schema, explicit format/deck configuration, legality checks, and
   lineage-stamped manifests.
-- ◐ Standard: corpus, namespace, and Observation v3 exist; qualification,
+- ◐ Standard: corpus, namespace, and Observation v5 exist; qualification,
   calibration, and production Harvest remain.
 - ▢ Modern: no representative training corpus yet.
 - ▢ Pioneer: no representative training corpus yet.
@@ -1320,9 +1396,11 @@ The project is complete only when all of these are true:
 ## Checkpoint and schema boundaries
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
-mistake. The practical rule is: **start fresh from the Round 7.97 Observation
-v5 boundary using the current `tempo-graded-potential-v1` reward and
-`combat-v7` curriculum contract.**
+mistake. The practical rule is: **launch Round 7.98 fresh on the Round 7.97
+Observation v5 boundary using `tempo-graded-potential-v1`, `combat-v7`, and the
+pinned checkpoint-league contract.** Round 7.98 does not change the observation
+schema, but its named canary rejects resume and matchup weighting so the league
+is the only changed experimental lever.
 
 | Minimum round | Incompatible change |
 | --- | --- |
@@ -1349,6 +1427,7 @@ v5 boundary using the current `tempo-graded-potential-v1` reward and
 | 7.95 | `combat-v7` halved scripted ratchet step (0.10 rungs) and the 2M-timestep canary horizon |
 | 7.96 | Observation v4: the observer's own decklist (`my_deck_card_identity`) and remaining-library composition (`my_library_composition`), full-deck `deck_composition_estimate`; reward/curriculum carry over from 7.95 |
 | 7.97 | Observation v5: producible mana by color (`my_producible_mana`, `opp_producible_mana`); reward/curriculum carry over from 7.96. Opt-in `--matchup-weighting` and cast-path legality hardening ride along (neither breaks lineage) |
+| 7.98 | Resource-bounded checkpoint self-play: explicit opponent-private observation/mask boundary, one frozen CPU policy per worker, four-snapshot FIFO disk pool, reset-scoped deterministic leases, fail-closed staging/rollback provenance, and scripted-only fixed evaluation. Observation v5, reward, and curriculum remain unchanged |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing

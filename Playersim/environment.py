@@ -1,14 +1,17 @@
 
 import os
+import copy
 import json
 import random
 import logging
 import re
 import math
+import hashlib
 import tempfile
 import threading
 import uuid
 import weakref
+from contextlib import contextmanager
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -175,6 +178,22 @@ class AlphaZeroMTGEnv(gym.Env):
         self._reset_evaluation_capture_telemetry()
         self.reset_seed = None
         self.opponent_policy = None
+        self._direct_opponent_policy = None
+        # Round 7.98 self-play keeps at most one committed checkpoint policy
+        # per worker.  A replacement is loaded and validated synchronously at
+        # the staging boundary (so an env_method failure aborts training), but
+        # does not become active until reset.  This prevents a callback from
+        # changing the opponent halfway through an episode.
+        self._resident_checkpoint_opponent_policy = None
+        self._active_checkpoint_opponent = None
+        self._pending_checkpoint_opponent_policy = None
+        self._pending_checkpoint_opponent = None
+        self._checkpoint_opponent_pending_set = False
+        self._checkpoint_opponent_probability = 0.0
+        self._checkpoint_opponent_seed = 0
+        self._checkpoint_opponent_rng = random.Random(0)
+        self._current_checkpoint_opponent = None
+        self._checkpoint_opponent_last_error = None
         if opponent_profile not in OPPONENT_PROFILES:
             raise ValueError(f"Unknown opponent profile: {opponent_profile}")
         self.default_opponent_profile = opponent_profile
@@ -210,6 +229,7 @@ class AlphaZeroMTGEnv(gym.Env):
         # Training can alternate the learned policy between seats without
         # changing the default behavior used by fixtures and direct callers.
         self.initial_agent_is_p1 = bool(agent_is_p1)
+        self._episode_agent_is_p1 = self.initial_agent_is_p1
         self.alternate_agent_seat = bool(alternate_agent_seat)
         self._successful_reset_count = 0
         self.current_analysis = None
@@ -556,6 +576,13 @@ class AlphaZeroMTGEnv(gym.Env):
         # Add memory for actions and rewards
         self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32) # Use -1 for padding
         self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32)
+        # Checkpoint opponents must never inherit the learned policy's private
+        # reward/action history.  Keep an independent role-local stream while
+        # preserving the legacy learned-role attributes above.
+        self.opponent_last_n_actions = np.full(
+            self.action_memory_size, -1, dtype=np.int32)
+        self.opponent_last_n_rewards = np.zeros(
+            self.action_memory_size, dtype=np.float32)
 
         self.invalid_action_limit = 150  # Max invalid actions before episode termination
         self.max_episode_steps = 2000
@@ -610,6 +637,7 @@ class AlphaZeroMTGEnv(gym.Env):
     def action_mask(self, env=None):
         """Return the current action mask as boolean array. NO CACHING."""
         # Regenerate the mask on every call
+        self.last_action_mask_error = None
         try:
             # Ensure ActionHandler exists and is linked to the current GameState
             if not hasattr(self, 'action_handler') or self.action_handler is None or self.action_handler.game_state != self.game_state:
@@ -632,9 +660,17 @@ class AlphaZeroMTGEnv(gym.Env):
                 raise ValueError(f"generate_valid_actions returned invalid mask: shape {getattr(self.current_valid_actions, 'shape', 'None')}, type {type(self.current_valid_actions)}")
 
         except Exception as e:
+            self.last_action_mask_error = f"{type(e).__name__}: {e}"
             logging.error(f"Error generating valid actions in action_mask: {str(e)}")
             import traceback
             logging.error(f"{traceback.format_exc()}")
+            # Preserve the degraded-mask signal for strict policy boundaries.
+            # Returning PASS/CONCEDE remains a compatibility fallback for
+            # ordinary diagnostic callers, but checkpoint self-play must not
+            # mistake it for a real legal mask and silently skip a turn.
+            if getattr(self, "action_handler", None) is not None:
+                self.action_handler.last_mask_error = (
+                    f"{type(e).__name__}: {e}")
             # Fallback to basic action mask if generation fails
             self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
             self.current_valid_actions[11] = True # Enable PASS_PRIORITY
@@ -735,6 +771,12 @@ class AlphaZeroMTGEnv(gym.Env):
                 self, "active_opponent_profile", "scripted"),
             "opponent_handicap": float(getattr(
                 self, "active_opponent_handicap", 0.0) or 0.0),
+            "opponent_policy_id": (
+                (getattr(self, "_current_checkpoint_opponent", None) or {})
+                .get("policy_id")),
+            "opponent_checkpoint_sha256": (
+                (getattr(self, "_current_checkpoint_opponent", None) or {})
+                .get("sha256")),
             "max_turns": int(getattr(
                 getattr(self, "game_state", None), "max_turns", None)
                 or getattr(self, "max_turns", 0) or 0) or None,
@@ -830,10 +872,19 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.current_analysis = None
                 self.last_n_actions = np.full(self.action_memory_size, -1, dtype=np.int32)
                 self.last_n_rewards = np.zeros(self.action_memory_size, dtype=np.float32)
+                self.opponent_last_n_actions = np.full(
+                    self.action_memory_size, -1, dtype=np.int32)
+                self.opponent_last_n_rewards = np.zeros(
+                    self.action_memory_size, dtype=np.float32)
                 self._observed_phase_history = []
                 if hasattr(self, '_phase_history_counts'): self._phase_history_counts = defaultdict(int)
                 if hasattr(self, '_last_phase_progressed'): self._last_phase_progressed = -1
                 if hasattr(self, '_phase_stuck_count'): self._phase_stuck_count = 0
+
+                # Commit a fully validated frozen checkpoint only at this
+                # episode boundary, then independently choose checkpoint or
+                # scripted play for the complete episode.
+                self._commit_checkpoint_opponent_for_reset()
 
                 # Resolve the learned seat before selecting semantic agent and
                 # opponent decks. Selecting P1/P2 decks first silently swaps a
@@ -936,6 +987,7 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.game_state.reset(self.original_p1_deck, self.original_p2_deck, seed)
                 gs = self.game_state # Alias
                 gs.agent_is_p1 = seat_is_p1
+                self._episode_agent_is_p1 = bool(seat_is_p1)
                 gs.deck_archetypes = {
                     0: self._stats_archetype_label(self.original_p1_deck),
                     1: self._stats_archetype_label(self.original_p2_deck),
@@ -1045,15 +1097,44 @@ class AlphaZeroMTGEnv(gym.Env):
             dummy_card_id = next(iter(self.card_db.keys())) if self.card_db else "dummy"
             self.game_state.reset([dummy_card_id]*60, [dummy_card_id]*60)
             self.game_state.agent_is_p1 = self.initial_agent_is_p1
-            
-            # Ensure ActionHandler exists
-            self.action_handler = ActionHandler(self.game_state)
-            self.game_state.action_handler = self.action_handler
-            
+            self._episode_agent_is_p1 = self.initial_agent_is_p1
+
+            # A fallback is still a new episode boundary. Never expose action,
+            # reward, or phase history retained from the failed prior reset.
+            self.last_n_actions = np.full(
+                self.action_memory_size, -1, dtype=np.int32)
+            self.last_n_rewards = np.zeros(
+                self.action_memory_size, dtype=np.float32)
+            self.opponent_last_n_actions = np.full(
+                self.action_memory_size, -1, dtype=np.int32)
+            self.opponent_last_n_rewards = np.zeros(
+                self.action_memory_size, dtype=np.float32)
+            self._observed_phase_history = []
+            if hasattr(self, '_phase_history_counts'):
+                self._phase_history_counts = defaultdict(int)
+            if hasattr(self, '_last_phase_progressed'):
+                self._last_phase_progressed = -1
+            if hasattr(self, '_phase_stuck_count'):
+                self._phase_stuck_count = 0
+
+            # Never carry an agent-layer object or deck-derived observer cache
+            # across a failed reset. Rebuild every reference against the fresh
+            # emergency GameState before constructing its observation.
+            self.action_handler = None
+            self.card_evaluator = None
+            self.combat_resolver = None
+            self.strategic_planner = None
+            self.current_analysis = None
+            self._observer_strategy_profiles = {}
+
             # Set pointers
             self.game_state.turn = 1
             self.game_state.phase = self.game_state.PHASE_MAIN_PRECOMBAT
             self.game_state.mulligan_in_progress = False
+            self._build_agents()
+            if self.action_handler is None:
+                raise RuntimeError(
+                    "Emergency reset could not rebuild ActionHandler")
             
             # Basic Mask (Pass/Concede)
             self.current_valid_actions = np.zeros(self.ACTION_SPACE_SIZE, dtype=bool)
@@ -1358,6 +1439,53 @@ class AlphaZeroMTGEnv(gym.Env):
             except Exception as save_e:
                 logging.error(f"Error persisting stats after game record: {save_e}")
                  
+    def _refresh_observer_strategy_profiles(self):
+        """Cache deck-derived planner inputs independently for P1 and P2.
+
+        The planner's archetype detector reads its current seat's complete
+        hand/library.  A shared learned-seat profile therefore cannot cross an
+        observer boundary: doing so encodes the other deck's hidden contents
+        into threat and planning features.  Profiles are derived once per
+        reset, reduced to the planner's strategy inputs, and copied on use.
+        """
+        planner = getattr(self, "strategic_planner", None)
+        gs = self.game_state
+        profiles = {}
+        if planner is None:
+            self._observer_strategy_profiles = profiles
+            return
+
+        strategy_attributes = (
+            "strategy_type", "strategy_params",
+            "aggression_level", "risk_tolerance")
+        original_perspective = bool(getattr(gs, "agent_is_p1", True))
+        original_values = {
+            attribute: copy.deepcopy(getattr(planner, attribute, None))
+            for attribute in strategy_attributes
+        }
+        original_strategies = copy.deepcopy(
+            getattr(planner, "strategies", {}))
+        try:
+            for seat_is_p1 in (True, False):
+                gs.agent_is_p1 = seat_is_p1
+                planner._detect_deck_archetype()
+                profiles[seat_is_p1] = {
+                    attribute: copy.deepcopy(
+                        getattr(planner, attribute, None))
+                    for attribute in strategy_attributes
+                }
+        except Exception as error:
+            logging.error(
+                "Could not derive observer-private strategy profiles: %s",
+                error, exc_info=True)
+            profiles = {}
+        finally:
+            gs.agent_is_p1 = original_perspective
+            planner.strategies = original_strategies
+            for attribute, value in original_values.items():
+                setattr(planner, attribute, value)
+        self._observer_strategy_profiles = profiles
+
     def _build_agents(self):
         """Construct and attach the agent layer for the current GameState.
 
@@ -1401,9 +1529,12 @@ class AlphaZeroMTGEnv(gym.Env):
                 self.strategic_planner.strategy_memory = gs.strategy_memory
             if hasattr(self.strategic_planner, 'init_after_reset'):
                 self.strategic_planner.init_after_reset()
+            self._refresh_observer_strategy_profiles()
             logging.debug("StrategicPlanner built and linked to GameState.")
         except Exception as e:
             logging.error(f"Failed to initialize StrategicPlanner: {e}")
+            self.strategic_planner = None
+            self._observer_strategy_profiles = {}
             gs.strategic_planner = None
 
     def set_agent_version(self, version):
@@ -2431,14 +2562,13 @@ class AlphaZeroMTGEnv(gym.Env):
                     break # Agent needs to act next, exit loop
 
                 # --- b. Get Opponent's Valid Actions ---
-                # Set perspective to opponent for mask generation
-                gs.agent_is_p1 = (opponent_player == gs.p1)
                 try:
-                     opponent_mask = self.action_mask().astype(bool)
+                     opponent_mask = self.action_mask_for(opponent_player)
                 except Exception as opp_mask_e:
-                     logging.error(f"Error generating opponent mask: {opp_mask_e}. Opponent skips turn.", exc_info=True)
-                     gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective before breaking
-                     break
+                     gs.agent_is_p1 = initial_agent_is_p1
+                     raise RuntimeError(
+                         "Opponent action mask generation failed; refusing "
+                         "to skip the opponent turn") from opp_mask_e
                 # --- PERSPECTIVE RESTORED LATER ---
 
                 # --- c. Choose Scripted Opponent Action ---
@@ -2459,11 +2589,41 @@ class AlphaZeroMTGEnv(gym.Env):
                      gs.agent_is_p1 = initial_agent_is_p1 # Restore perspective
                      break # Exit opponent loop
 
+                # Action application is the only portion that must execute as
+                # the opponent. Observation and prediction establish their
+                # own state-safe perspective and never depend on this mutation.
+                gs.agent_is_p1 = (opponent_player is gs.p1)
+                installed_opponent_mask = \
+                    self._strict_action_mask_for_current_perspective(
+                        "Opponent")
+                if not np.array_equal(installed_opponent_mask, opponent_mask):
+                    raise RuntimeError(
+                        "Opponent legal mask changed between prediction and "
+                        "action application")
+                # ActionHandler.apply_action validates its own cache before
+                # dispatch. The state-safe prediction boundary intentionally
+                # restored the learned seat's cache, so explicitly install the
+                # matching opponent mask and contexts for this atomic action.
+                self.action_handler.current_valid_actions = (
+                    installed_opponent_mask.copy())
                 opponent_pre_state = (
                     self._safe_evaluation_state_snapshot(
                         "opponent_pre_state", valid_mask=opponent_mask)
                     if self._evaluation_trace_enabled() else None)
-                _, opp_done, opp_truncated, opp_handler_info = self.action_handler.apply_action(opponent_action_idx, context=opponent_action_context)
+                opponent_reward, opp_done, opp_truncated, opp_handler_info = self.action_handler.apply_action(opponent_action_idx, context=opponent_action_context)
+                if not opp_handler_info.get("execution_failed"):
+                    self.opponent_last_n_actions = np.roll(
+                        self.opponent_last_n_actions, 1)
+                    self.opponent_last_n_actions[0] = opponent_action_idx
+                    self.opponent_last_n_rewards = np.roll(
+                        self.opponent_last_n_rewards, 1)
+                    # Match the learned history's action-component scale.
+                    # State-potential/time/terminal shaping spans the complete
+                    # external transition and cannot be attributed to one
+                    # atomic opponent action without leaking learned telemetry.
+                    self.opponent_last_n_rewards[0] = (
+                        self.action_reward_scale
+                        * float(opponent_reward or 0.0))
                 if opponent_pre_state is not None:
                     self._record_evaluation_atomic_action(
                         actor="opponent",
@@ -3123,29 +3283,376 @@ class AlphaZeroMTGEnv(gym.Env):
         if opponent_mask[224]: return 224, {}
         return opponent_mask[12] if opponent_mask[12] else None, {} # Concede last resort
 
-    def set_opponent_policy(self, policy):
-        """Install a checkpoint/self-play policy exposing ``predict``."""
-        self.opponent_policy = policy
+    @contextmanager
+    def _observer_policy_boundary(self, observer):
+        """Temporarily expose one player's policy view without cache leaks.
 
-    def _get_opponent_policy_action(self, opponent_player, opponent_mask, opponent_context):
-        policy = getattr(self, 'opponent_policy', None)
-        if policy is None:
-            return self._get_scripted_opponent_action(
-                opponent_player, opponent_mask, opponent_context)
-        obs = self._get_obs()
+        Legal-mask generation and strategic observation construction mutate
+        environment/handler caches.  Saving only ``agent_is_p1`` therefore
+        left a direct opponent prediction with the other seat's action
+        contexts and planner analysis.  This boundary restores every mutable
+        policy cache on success and on failure while leaving real game-rule
+        mutations untouched.
+        """
+        gs = self.game_state
+        if observer is not gs.p1 and observer is not gs.p2:
+            raise ValueError("Observer must be the live P1 or P2 object")
+
+        snapshots = []
+
+        def remember(obj, attribute):
+            if obj is None:
+                return
+            exists = hasattr(obj, attribute)
+            snapshots.append((obj, attribute, exists,
+                              getattr(obj, attribute, None)))
+
+        for attribute in (
+                "current_valid_actions", "current_analysis",
+                "last_observation_error", "last_observation_traceback",
+                "last_action_mask_error"):
+            remember(self, attribute)
+        handler = getattr(self, "action_handler", None)
+        for attribute in (
+                "current_valid_actions", "action_reasons",
+                "action_reasons_with_context", "last_mask_error"):
+            remember(handler, attribute)
+        planner = getattr(self, "strategic_planner", None)
+        for attribute in (
+                "current_analysis", "opponent_archetype",
+                "strategy_type", "strategy_params",
+                "aggression_level", "risk_tolerance"):
+            remember(planner, attribute)
+        original_perspective = bool(gs.agent_is_p1)
+        try:
+            observer_is_p1 = observer is gs.p1
+            gs.agent_is_p1 = observer_is_p1
+            if (planner is not None
+                    and observer_is_p1 != bool(getattr(
+                        self, "_episode_agent_is_p1",
+                        self.initial_agent_is_p1))):
+                profile = getattr(
+                    self, "_observer_strategy_profiles", {}).get(
+                        observer_is_p1)
+                if not profile:
+                    raise RuntimeError(
+                        "Observer-private strategic profile unavailable")
+                for attribute, value in profile.items():
+                    setattr(planner, attribute, copy.deepcopy(value))
+            yield
+        finally:
+            gs.agent_is_p1 = original_perspective
+            for obj, attribute, existed, value in reversed(snapshots):
+                if existed:
+                    setattr(obj, attribute, value)
+                elif hasattr(obj, attribute):
+                    delattr(obj, attribute)
+
+    def _strict_action_mask_for_current_perspective(self, label):
+        """Return a real policy mask, rejecting diagnostic fallbacks."""
+        mask = self.action_mask().astype(bool)
+        mask_error = (
+            getattr(self, "last_action_mask_error", None)
+            or getattr(
+                getattr(self, "action_handler", None),
+                "last_mask_error", None))
+        if mask_error:
+            raise RuntimeError(
+                f"{label} action mask degraded: {mask_error}")
+        return mask.copy()
+
+    def action_mask_for(self, player):
+        """Return a fresh legal mask for ``player`` without changing caller state."""
+        with self._observer_policy_boundary(player):
+            return self._strict_action_mask_for_current_perspective(
+                "Opponent")
+
+    def _policy_observation_for_current_perspective(self):
+        """Build a strict observation isolated from prior-seat diagnostics."""
+        self.last_observation_error = None
+        self.last_observation_traceback = None
+        observation = self._get_obs()
         if self.last_observation_error is not None:
             raise RuntimeError(
                 "Opponent checkpoint observation degraded: "
                 f"{self.last_observation_error}")
-        result = policy.predict(
-            obs, action_masks=opponent_mask, deterministic=True)
-        action = result[0] if isinstance(result, tuple) else result
-        action = int(np.asarray(action).reshape(-1)[0])
-        if 0 <= action < self.ACTION_SPACE_SIZE and opponent_mask[action]:
-            return action, self.action_handler.action_reasons_with_context.get(
-                action, {}).get('context', {})
-        raise RuntimeError(
-            f"Opponent checkpoint returned mask-invalid action {action}")
+        mask_error = (
+            getattr(self, "last_action_mask_error", None)
+            or getattr(
+                getattr(self, "action_handler", None),
+                "last_mask_error", None))
+        if mask_error:
+            raise RuntimeError(
+                "Opponent checkpoint observation degraded: action mask: "
+                f"{mask_error}")
+        return observation
+
+    def set_opponent_policy(self, policy):
+        """Immediately install a direct policy (legacy tests/direct callers).
+
+        Production checkpoint rotation uses ``stage_checkpoint_opponent`` so
+        a worker can never change policies in the middle of an episode.
+        """
+        if policy is not None and not callable(getattr(policy, "predict", None)):
+            raise TypeError("Opponent policy must expose callable predict")
+        self._direct_opponent_policy = policy
+        self.opponent_policy = policy
+        self._current_checkpoint_opponent = None
+
+    def _get_opponent_policy_action(
+            self, opponent_player, opponent_mask=None, opponent_context=None):
+        """Choose from an explicit opponent view and restore the caller view."""
+        with self._observer_policy_boundary(opponent_player):
+            live_mask = self._strict_action_mask_for_current_perspective(
+                "Opponent")
+            if opponent_mask is not None:
+                supplied = np.asarray(opponent_mask, dtype=bool)
+                if supplied.shape != live_mask.shape:
+                    raise RuntimeError(
+                        "Opponent mask has an invalid shape: "
+                        f"{supplied.shape}")
+                if not np.array_equal(supplied, live_mask):
+                    logging.warning(
+                        "Discarding a stale caller-supplied opponent mask; "
+                        "using the live perspective-correct mask")
+            policy = getattr(self, 'opponent_policy', None)
+            if policy is None:
+                return self._get_scripted_opponent_action(
+                    opponent_player, live_mask, opponent_context or {})
+            observation = self._policy_observation_for_current_perspective()
+            # _get_obs regenerates the same live mask and leaves the matching
+            # dispatch contexts in ActionHandler for extraction below.
+            policy_mask = np.asarray(
+                observation["action_mask"], dtype=bool)
+            if not np.array_equal(policy_mask, live_mask):
+                raise RuntimeError(
+                    "Opponent observation mask changed during prediction")
+            result = policy.predict(
+                observation, action_masks=policy_mask, deterministic=True)
+            action = result[0] if isinstance(result, tuple) else result
+            action = int(np.asarray(action).reshape(-1)[0])
+            if 0 <= action < self.ACTION_SPACE_SIZE and policy_mask[action]:
+                return action, getattr(
+                    self.action_handler, "action_reasons_with_context", {}
+                ).get(action, {}).get('context', {})
+            raise RuntimeError(
+                f"Opponent checkpoint returned mask-invalid action {action}")
+
+    @staticmethod
+    def _checkpoint_sha256(path):
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    def _normalize_checkpoint_opponent(self, checkpoint):
+        if not isinstance(checkpoint, dict):
+            raise TypeError("Checkpoint opponent must be a manifest dictionary")
+        policy_id = str(checkpoint.get("policy_id", "")).strip()
+        if not policy_id or len(policy_id) > 256:
+            raise ValueError("Checkpoint policy_id must contain 1-256 characters")
+        raw_path = checkpoint.get("path")
+        if not isinstance(raw_path, (str, os.PathLike)):
+            raise TypeError("Checkpoint path must be path-like")
+        path = os.path.abspath(os.fspath(raw_path))
+        if not os.path.isfile(path):
+            raise ValueError(f"Checkpoint path is not a file: {path}")
+        expected_sha256 = str(checkpoint.get("sha256", "")).lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha256):
+            raise ValueError("Checkpoint SHA-256 must be 64 hexadecimal characters")
+        actual_sha256 = self._checkpoint_sha256(path)
+        if actual_sha256 != expected_sha256:
+            raise ValueError(
+                "Checkpoint SHA-256 mismatch: "
+                f"expected {expected_sha256}, got {actual_sha256}")
+        return {
+            "path": path,
+            "policy_id": policy_id,
+            "sha256": actual_sha256,
+        }
+
+    def _validate_checkpoint_opponent_policy(self, policy):
+        if not callable(getattr(policy, "predict", None)):
+            raise ValueError("Checkpoint policy does not expose callable predict")
+        policy_observation_space = getattr(policy, "observation_space", None)
+        if (policy_observation_space is not None
+                and policy_observation_space != self.observation_space):
+            raise ValueError(
+                "Checkpoint policy observation space is incompatible with "
+                "this environment")
+        policy_action_space = getattr(policy, "action_space", None)
+        if (policy_action_space is not None
+                and policy_action_space != self.action_space):
+            raise ValueError(
+                "Checkpoint policy action space is incompatible with this "
+                "environment")
+        return policy
+
+    @staticmethod
+    def _freeze_checkpoint_opponent_policy(policy):
+        set_training_mode = getattr(policy, "set_training_mode", None)
+        if callable(set_training_mode):
+            set_training_mode(False)
+        eval_mode = getattr(policy, "eval", None)
+        if callable(eval_mode):
+            eval_mode()
+        parameters = getattr(policy, "parameters", None)
+        if callable(parameters):
+            for parameter in parameters():
+                requires_grad = getattr(parameter, "requires_grad_", None)
+                if callable(requires_grad):
+                    requires_grad(False)
+                elif hasattr(parameter, "requires_grad"):
+                    parameter.requires_grad = False
+        if hasattr(policy, "optimizer"):
+            # Prediction needs no optimizer; dropping it releases the largest
+            # avoidable part of the PPO checkpoint in every worker.
+            policy.optimizer = None
+        return policy
+
+    def _load_checkpoint_opponent_policy(self, path):
+        """Load one CPU policy and discard PPO rollout/optimizer state."""
+        from sb3_contrib import MaskablePPO
+
+        algorithm = MaskablePPO.load(path, device="cpu")
+        try:
+            if algorithm.observation_space != self.observation_space:
+                raise ValueError(
+                    "Checkpoint algorithm observation space is incompatible "
+                    "with this environment")
+            if algorithm.action_space != self.action_space:
+                raise ValueError(
+                    "Checkpoint algorithm action space is incompatible with "
+                    "this environment")
+            policy = self._validate_checkpoint_opponent_policy(
+                algorithm.policy)
+            return self._freeze_checkpoint_opponent_policy(policy)
+        finally:
+            # The returned policy has its own reference. The algorithm and its
+            # rollout/training state can be reclaimed after this call.
+            del algorithm
+
+    def stage_checkpoint_opponent(
+            self, checkpoint, probability=1.0, seed=0):
+        """Load and stage one frozen checkpoint for the next episode.
+
+        This method is safe for ``VecEnv.env_method``: all arguments and the
+        returned status are serializable, and corrupt/incompatible checkpoints
+        raise synchronously before any pending assignment changes.
+        """
+        try:
+            probability = float(probability)
+            if (not math.isfinite(probability)
+                    or not 0.0 <= probability <= 1.0):
+                raise ValueError(
+                    "Checkpoint opponent probability must be within [0, 1]")
+            seed = int(seed)
+            normalized = self._normalize_checkpoint_opponent(checkpoint)
+            active = self._active_checkpoint_opponent
+            pending = self._pending_checkpoint_opponent
+            if active == normalized:
+                loaded_policy = self._resident_checkpoint_opponent_policy
+            elif pending == normalized:
+                loaded_policy = self._pending_checkpoint_opponent_policy
+            else:
+                loaded_policy = self._load_checkpoint_opponent_policy(
+                    normalized["path"])
+            loaded_policy = self._validate_checkpoint_opponent_policy(
+                loaded_policy)
+        except Exception as error:
+            self._checkpoint_opponent_last_error = (
+                f"{type(error).__name__}: {error}")
+            raise
+
+        self._pending_checkpoint_opponent = normalized
+        self._pending_checkpoint_opponent_policy = loaded_policy
+        self._checkpoint_opponent_pending_set = True
+        self._checkpoint_opponent_probability = probability
+        self._checkpoint_opponent_seed = seed
+        self._checkpoint_opponent_rng = random.Random(seed)
+        self._checkpoint_opponent_last_error = None
+        return self.checkpoint_opponent_status()
+
+    def clear_checkpoint_opponent(self):
+        """Stage a return to the scripted opponent at the next reset."""
+        self._direct_opponent_policy = None
+        self._pending_checkpoint_opponent = None
+        self._pending_checkpoint_opponent_policy = None
+        self._checkpoint_opponent_pending_set = True
+        self._checkpoint_opponent_probability = 0.0
+        self._checkpoint_opponent_last_error = None
+        return self.checkpoint_opponent_status()
+
+    def _commit_checkpoint_opponent_for_reset(self):
+        if self._checkpoint_opponent_pending_set:
+            self._resident_checkpoint_opponent_policy = (
+                self._pending_checkpoint_opponent_policy)
+            self._active_checkpoint_opponent = (
+                dict(self._pending_checkpoint_opponent)
+                if self._pending_checkpoint_opponent is not None else None)
+            self._pending_checkpoint_opponent_policy = None
+            self._pending_checkpoint_opponent = None
+            self._checkpoint_opponent_pending_set = False
+
+        use_checkpoint = (
+            self._resident_checkpoint_opponent_policy is not None
+            and self._checkpoint_opponent_rng.random()
+            < self._checkpoint_opponent_probability)
+        if use_checkpoint:
+            self.opponent_policy = self._resident_checkpoint_opponent_policy
+            self._current_checkpoint_opponent = dict(
+                self._active_checkpoint_opponent)
+        else:
+            # Directly installed policies (notably checkpoint-vs-checkpoint
+            # fixture harvests) persist across reset when no resident lease
+            # owns opponent selection. A configured resident deliberately
+            # overrides direct play even on its scripted-probability episodes.
+            self.opponent_policy = (
+                self._direct_opponent_policy
+                if self._resident_checkpoint_opponent_policy is None
+                else None)
+            self._current_checkpoint_opponent = None
+
+    def checkpoint_opponent_status(self):
+        """Return serializable worker status for orchestration diagnostics."""
+        pending = (
+            dict(self._pending_checkpoint_opponent)
+            if self._pending_checkpoint_opponent is not None else None)
+        if self._checkpoint_opponent_pending_set:
+            status = "staged" if pending is not None else "clear_staged"
+        elif self._active_checkpoint_opponent is not None:
+            status = "active"
+        else:
+            status = "scripted"
+        return {
+            "status": status,
+            "active": (
+                dict(self._active_checkpoint_opponent)
+                if self._active_checkpoint_opponent is not None else None),
+            "pending": pending,
+            "pending_policy_id": (
+                (pending or {}).get("policy_id")),
+            "pending_checkpoint_sha256": (
+                (pending or {}).get("sha256")),
+            "pending_clear": bool(
+                self._checkpoint_opponent_pending_set
+                and self._pending_checkpoint_opponent is None),
+            "probability": float(self._checkpoint_opponent_probability),
+            "seed": int(self._checkpoint_opponent_seed),
+            "current_policy_id": (
+                (self._current_checkpoint_opponent or {}).get("policy_id")),
+            "current_sha256": (
+                (self._current_checkpoint_opponent or {}).get("sha256")),
+            "using_checkpoint": bool(
+                self._current_checkpoint_opponent is not None),
+            "direct_policy_installed": bool(
+                self._direct_opponent_policy is not None),
+            "last_error": self._checkpoint_opponent_last_error,
+        }
 
     def _evaluation_trace_enabled(self):
         """Whether this episode belongs to an attributable evaluation."""
@@ -5860,8 +6367,23 @@ class AlphaZeroMTGEnv(gym.Env):
                 phase_hist_arr = np.full(5, -1, dtype=np.int32)
                 if phase_hist_len > 0: phase_hist_arr[-min(phase_hist_len, 5):] = phase_hist[-min(phase_hist_len, 5):] # Fill from end
                 obs["phase_history"] = phase_hist_arr
-                obs["previous_actions"] = np.array(self.last_n_actions if hasattr(self, 'last_n_actions') else [-1]*self.action_memory_size, dtype=np.int32)
-                obs["previous_rewards"] = np.array(self.last_n_rewards if hasattr(self, 'last_n_rewards') else [0.0]*self.action_memory_size, dtype=np.float32)
+                observer_is_learned_role = (
+                    bool(gs.agent_is_p1)
+                    == bool(getattr(
+                        self, "_episode_agent_is_p1",
+                        self.initial_agent_is_p1)))
+                history_actions = (
+                    self.last_n_actions
+                    if observer_is_learned_role
+                    else self.opponent_last_n_actions)
+                history_rewards = (
+                    self.last_n_rewards
+                    if observer_is_learned_role
+                    else self.opponent_last_n_rewards)
+                obs["previous_actions"] = np.array(
+                    history_actions, dtype=np.int32)
+                obs["previous_rewards"] = np.array(
+                    history_rewards, dtype=np.float32)
 
                 # Planning Features
                 obs["strategic_metrics"] = np.zeros(7, dtype=np.float32) # Default
@@ -6105,14 +6627,9 @@ class AlphaZeroMTGEnv(gym.Env):
             return self._get_obs_fallback()
 
     def observation_for(self, player):
-        """Build an observation from one player's information boundary."""
-        gs = self.game_state
-        original = gs.agent_is_p1
-        try:
-            gs.agent_is_p1 = player is gs.p1
-            return self._get_obs()
-        finally:
-            gs.agent_is_p1 = original
+        """Build one strict player observation without perspective/cache leaks."""
+        with self._observer_policy_boundary(player):
+            return self._policy_observation_for_current_perspective()
 
     def _get_planeswalker_activation_flags(self, battlefield_ids, player):
         """Helper for planeswalker activation flags."""

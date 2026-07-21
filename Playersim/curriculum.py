@@ -376,6 +376,18 @@ def derive_matchup_seed(base_seed: int, worker_index: int) -> int:
     return _stable_seed(base_seed, "training-matchups", worker_index)
 
 
+def derive_checkpoint_pool_seed(base_seed: int, worker_index: int) -> int:
+    """Return an isolated per-worker seed for checkpoint/scripted selection."""
+    return _stable_seed(base_seed, "checkpoint-pool", worker_index)
+
+
+def derive_checkpoint_lease_seed(
+        base_seed: int, snapshot_timestep: int, worker_index: int) -> int:
+    """Return a stable seed for one worker's pool-refresh lease assignment."""
+    return _stable_seed(
+        base_seed, "checkpoint-lease", snapshot_timestep, worker_index)
+
+
 def resolve_curriculum(name, decks):
     """Resolve and strictly validate a named curriculum for this corpus."""
     if name in (None, "none"):

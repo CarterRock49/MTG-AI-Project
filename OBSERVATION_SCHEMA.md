@@ -118,7 +118,7 @@ Identity fields are:
 | `my_total_power`, `my_total_toughness`, `opp_total_power`, `opp_total_toughness` | `(1)`, `±1000000` | Aggregate live creature stats. |
 | `creature_advantage` | `(1)`, `±1000` | Relative creature-count difference. |
 | `power_advantage`, `toughness_advantage` | `(1)`, `±1000000` | Relative aggregate-stat differences. |
-| `threat_assessment` | `(B)`, `0..10` | Planner score for opposing battlefield slots. |
+| `threat_assessment` | `(B)`, `0..10` | Planner score for opposing battlefield slots, derived from public opposing state only; hidden hand identities cannot boost a threat. |
 | `card_synergy_scores` | `(B,B)`, `-1..1` | Pairwise synergy across observer permanents. |
 
 ### Mana, libraries, and player state
@@ -175,8 +175,8 @@ Mana vectors use color order `W,U,B,R,G,C` and saturate at 100 per entry.
 | `ability_timing` | `(5)`, boolean | Current broad activation-timing context. |
 | `planeswalker_activations` | `(B)`, boolean | Planeswalker activation availability. |
 | `planeswalker_activation_counts` | `(B)`, `0..10` | Activations used/available as represented by the engine. |
-| `previous_actions` | `(80)`, `-1..A` | Recent action history, padded with `-1`. |
-| `previous_rewards` | `(80)`, `-1000..1000` | Recent reward history. |
+| `previous_actions` | `(80)`, `-1..A` | Observer-role-local recent policy actions, padded with `-1`. |
+| `previous_rewards` | `(80)`, `-1000..1000` | Role-local history: full transition rewards for the learned role; scaled accepted atomic-action rewards for a frozen opponent (without learned-seat shaping/terminal telemetry). |
 | `phase_history` | `(5)`, `-1..phase_max` | Last observed phase transitions. |
 | `optimal_attackers` | `(B)`, boolean | Deterministic bounded-combination recommendation during the live declare-attackers decision. |
 | `attacker_values` | `(B)`, `-10..10` | Per-attacker evaluator score during the live declare-attackers decision. |

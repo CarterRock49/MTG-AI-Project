@@ -1383,7 +1383,10 @@ class ActionSpaceMixin:
                     ability = entry[0]
                     card = gs._safe_get_card(getattr(ability, 'card_id', None))
                     name = getattr(card, 'name', getattr(ability, 'card_id', '?'))
-                    set_valid_action(353 + i, f"ORDER_TRIGGER {name} onto stack next")
+                    set_valid_action(
+                        353 + i,
+                        f"ORDER_TRIGGER {name} onto stack next",
+                        context={"option_index": i})
 
             elif choice_type == "copy_retarget_slots":
                 index = int(context.get("slot_index", 0))
