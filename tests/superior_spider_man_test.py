@@ -18,6 +18,7 @@ from scenario_test import (  # noqa: E402
     get_env,
     inject_into_zone,
     inject_real_card,
+    replace_hand,
 )
 from Playersim.ability_types import BoundExileTriggeredAbility  # noqa: E402
 
@@ -48,7 +49,8 @@ class SuperiorSpiderManTest(unittest.TestCase):
         handler.game_state = game_state
         return handler
 
-    def _cast_to_mind_swap_choice(self, game_state, controller):
+    def _cast_to_mind_swap_choice(
+            self, game_state, controller, *, mana_pool=None):
         game_state.phase = game_state.PHASE_MAIN_PRECOMBAT
         game_state.previous_priority_phase = None
         game_state.priority_player = controller
@@ -57,9 +59,9 @@ class SuperiorSpiderManTest(unittest.TestCase):
             game_state, controller, "Superior Spider-Man", "hand")
         original_printed = copy.deepcopy(
             game_state._safe_get_card(spider_id)._printed)
-        controller["mana_pool"] = {
+        controller["mana_pool"] = dict(mana_pool or {
             "W": 0, "U": 3, "B": 3, "R": 0, "G": 0, "C": 10,
-        }
+        })
         self.assertTrue(game_state.cast_spell(
             spider_id, controller, {
                 "source_zone": "hand",
@@ -80,6 +82,22 @@ class SuperiorSpiderManTest(unittest.TestCase):
         result = handler.apply_action(action_index)
         self.assertFalse(result[3].get("execution_failed", False), result[3])
         return result
+
+    def _choose_real_copy(
+            self, game_state, controller, card_name, *, mana_pool=None):
+        target_id = inject_real_card(
+            game_state, game_state.p2, card_name, "graveyard")
+        spider_id, _ = self._cast_to_mind_swap_choice(
+            game_state, controller, mana_pool=mana_pool)
+        options = list(game_state.choice_context["options"])
+        self.assertIn(target_id, options)
+        handler = self._handler_for(game_state, controller)
+        self._apply_action(handler, 353 + options.index(target_id))
+        spider = game_state._safe_get_card(spider_id)
+        self.assertEqual(spider.name, "Superior Spider-Man")
+        self.assertEqual(
+            game_state.copy_overrides[spider_id]["copied_from"], target_id)
+        return spider_id, target_id, handler
 
     def test_decline_enters_as_the_printed_card(self):
         game_state = fresh(12601)
@@ -230,6 +248,124 @@ class SuperiorSpiderManTest(unittest.TestCase):
         self.assertEqual(
             game_state.copy_overrides[spider_id]["copied_from"],
             injected[11])
+
+    def test_copied_colorstorm_opus_resolves_under_retained_spider_name(self):
+        game_state = fresh(12605)
+        controller = game_state.p1
+        fidelity_before = copy.deepcopy(game_state.fidelity_counters)
+        spider_id, target_id, _ = self._choose_real_copy(
+            game_state, controller, "Colorstorm Stallion")
+
+        self.assertEqual(len(game_state.stack), 1)
+        self.assertIsInstance(
+            game_state.stack[-1][3].get("ability"),
+            BoundExileTriggeredAbility)
+        self.assertTrue(game_state.resolve_top_of_stack())
+        self.assertIn(target_id, game_state.p2["exile"])
+
+        instant_id = inject_into_zone(game_state, controller, {
+            "name": "Five-Mana Opus Probe",
+            "mana_cost": "{3}{U}{R}",
+            "cmc": 5,
+            "type_line": "Instant",
+            "card_types": ["instant"],
+            "oracle_text": "",
+            "colors": [0, 1, 0, 1, 0],
+        }, "hand")
+        tokens_before = set(controller.get("tokens", []))
+        self.assertTrue(game_state.trigger_ability(
+            instant_id, "CAST_SPELL", {
+                "cast_card_id": instant_id,
+                "casting_player": controller,
+                "final_paid_details": {
+                    "spent_specific": {"U": 3, "R": 2}},
+            }))
+        queued = game_state.ability_handler.active_triggers
+        self.assertEqual(len(queued), 1, queued)
+        self.assertEqual(queued[0][0].card_id, spider_id)
+        game_state.ability_handler.process_triggered_abilities()
+        self.assertEqual(len(game_state.stack), 1)
+        self.assertTrue(game_state.resolve_top_of_stack())
+        game_state.layer_system.invalidate_cache()
+        game_state.layer_system.apply_all_effects()
+
+        spider = game_state._safe_get_card(spider_id)
+        self.assertEqual((spider.power, spider.toughness), (5, 5))
+        new_tokens = set(controller.get("tokens", [])) - tokens_before
+        self.assertEqual(len(new_tokens), 1)
+        token_id = new_tokens.pop()
+        token = game_state._safe_get_card(token_id)
+        self.assertIn(token_id, controller["battlefield"])
+        self.assertEqual(token.name, "Superior Spider-Man")
+        self.assertEqual((token.power, token.toughness), (4, 4))
+        self.assertEqual(game_state.fidelity_counters, fidelity_before)
+
+    def test_copied_deceit_black_etb_resolves_under_retained_spider_name(self):
+        game_state = fresh(12606)
+        controller = game_state.p1
+        opponent = game_state.p2
+        creature_id, land_id, instant_id = replace_hand(
+            game_state, opponent, [
+                creature_data("Mind Swap Hand Creature"),
+                {
+                    "name": "Mind Swap Hand Land",
+                    "mana_cost": "",
+                    "cmc": 0,
+                    "type_line": "Land",
+                    "card_types": ["land"],
+                    "oracle_text": "",
+                    "colors": [0, 0, 0, 0, 0],
+                },
+                {
+                    "name": "Mind Swap Hand Instant",
+                    "mana_cost": "{1}{U}",
+                    "cmc": 2,
+                    "type_line": "Instant",
+                    "card_types": ["instant"],
+                    "oracle_text": "Draw a card.",
+                    "colors": [0, 1, 0, 0, 0],
+                },
+            ])
+        fidelity_before = copy.deepcopy(game_state.fidelity_counters)
+        spider_id, target_id, handler = self._choose_real_copy(
+            game_state, controller, "Deceit", mana_pool={
+                "W": 0, "U": 1, "B": 3, "R": 0, "G": 0, "C": 0,
+            })
+
+        self.assertEqual(
+            game_state.choice_context.get("type"), "order_triggers")
+        ordered = game_state.choice_context["pending"]
+        bound_index = next(
+            index for index, entry in enumerate(ordered)
+            if isinstance(entry[0], BoundExileTriggeredAbility))
+        self.assertTrue(
+            game_state.ability_handler.order_trigger_chosen(bound_index))
+
+        self.assertEqual(game_state.phase, game_state.PHASE_TARGETING)
+        candidates = handler._get_target_selection_candidates(
+            controller, game_state.targeting_context)
+        self.assertEqual(candidates, ["p2"])
+        _, selected = handler._handle_select_target(0, {})
+        self.assertTrue(selected)
+        self.assertTrue(game_state.resolve_top_of_stack())
+
+        choice = game_state.choice_context
+        self.assertIsNotNone(choice)
+        self.assertEqual(choice["type"], "hand_selection")
+        self.assertIn(creature_id, choice["options"])
+        self.assertIn(instant_id, choice["options"])
+        self.assertNotIn(land_id, choice["options"])
+        _, chosen = handler._handle_choose_mode(
+            choice["options"].index(creature_id), {})
+        self.assertTrue(chosen)
+        self.assertIn(creature_id, opponent["graveyard"])
+        self.assertNotIn(creature_id, opponent["hand"])
+
+        self.assertEqual(len(game_state.stack), 1)
+        self.assertTrue(game_state.resolve_top_of_stack())
+        self.assertIn(target_id, opponent["exile"])
+        self.assertIn(spider_id, controller["battlefield"])
+        self.assertEqual(game_state.fidelity_counters, fidelity_before)
 
 
 if __name__ == "__main__":

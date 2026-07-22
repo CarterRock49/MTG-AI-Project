@@ -61,6 +61,7 @@ class CheckpointPoolConfigTests(unittest.TestCase):
 
     def test_round_798_canary_pins_the_lever_and_old_canaries_reject_it(self):
         contract = m.ROUND_7_98_CANARY
+        self.assertEqual(contract["cli"]["checkpoint_freq"], 50_000)
         self.assertTrue(contract["cli"]["checkpoint_pool_self_play"])
         self.assertEqual(
             contract["cli"]["checkpoint_pool_snapshot_freq"], 100_000)
@@ -93,6 +94,31 @@ class CheckpointPoolConfigTests(unittest.TestCase):
             m.validate_canary_cli(SimpleNamespace(
                 **old, canary_config="round-7.97",
                 resume=None, optimize_hp=False))
+
+    def test_round_799_changes_only_permanent_checkpoint_cadence(self):
+        contract = m.ROUND_7_99_CANARY
+        self.assertEqual(contract["cli"]["checkpoint_freq"], 500_000)
+        self.assertEqual(
+            contract["cli"]["checkpoint_pool_snapshot_freq"], 100_000)
+        self.assertEqual(
+            contract["runtime"]["checkpoint_pool_config"]
+            ["snapshot_frequency_timesteps"], 100_000)
+
+        accepted = m.validate_canary_cli(SimpleNamespace(
+            **contract["cli"], canary_config="round-7.99",
+            resume=None, optimize_hp=False))
+        self.assertEqual(accepted["id"], "round-7.99")
+
+        for key, value in (
+                ("checkpoint_freq", 50_000),
+                ("checkpoint_pool_snapshot_freq", 500_000)):
+            with self.subTest(key=key):
+                drifted = dict(contract["cli"])
+                drifted[key] = value
+                with self.assertRaisesRegex(ValueError, key):
+                    m.validate_canary_cli(SimpleNamespace(
+                        **drifted, canary_config="round-7.99",
+                        resume=None, optimize_hp=False))
 
     def test_round_798_runtime_rejects_resolved_pool_drift(self):
         contract = m.ROUND_7_98_CANARY

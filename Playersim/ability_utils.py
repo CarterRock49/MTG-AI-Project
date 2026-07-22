@@ -695,16 +695,26 @@ class EffectFactory:
                           else text_to_number(draw_word))
             return [ScryEffect(scry_count), DrawCardEffect(draw_count)]
 
-        if (source_key == "deceit"
-                and "target opponent reveals their hand" in lowered
-                and "choose a nonland card" in lowered):
+        # Copy effects can retain an object's rules text while changing its
+        # name (Superior Spider-Man is the live Standard example). These
+        # bounded Oracle templates therefore key off the complete executable
+        # text, not the current name of the object carrying that text.
+        deceit_hand_disruption = re.fullmatch(
+            r"\s*target opponent reveals their hand\s*\.\s*"
+            r"you choose a nonland card from it\s*\.\s*"
+            r"that player discards that card\s*\.?\s*",
+            sequence_surface, re.IGNORECASE)
+        if deceit_hand_disruption:
             from .ability_types import HandSelectionEffect
             return [HandSelectionEffect(excluded_types={"land"})]
 
-        if (source_key == "colorstorm stallion"
-                and re.search(r"this creature gets \+1/\+1 until end of turn",
-                              lowered)
-                and re.search(r"five or more mana was spent", lowered)):
+        colorstorm_opus = re.fullmatch(
+            r"\s*this creature gets \+1/\+1 until end of turn\s*\.\s*"
+            r"if five or more mana was spent to cast that spell\s*,\s*"
+            r"create a token that(?:['\u2019]s|\s+is) a copy of this creature"
+            r"\s*\.?\s*",
+            sequence_surface, re.IGNORECASE)
+        if colorstorm_opus:
             from .ability_types import (
                 BuffEffect, CreateTokenCopyOfSourceEffect,
                 ManaSpentConditionalEffect)

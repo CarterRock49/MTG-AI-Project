@@ -1,4 +1,4 @@
-# Playersim roadmap — current as of July 21, 2026
+# Playersim roadmap — current as of July 22, 2026
 
 ## Mission and scope
 
@@ -23,9 +23,10 @@ Status legend: ✅ complete, ◐ active/partially complete, ▢ not started.
 
 The engine, policy boundary, replay/fuzz infrastructure, format lineage, and
 Harvest orchestration are operational. The representative Standard corpus does
-not currently carry a severe support-ledger entry, but that is not a clean-
-runtime guarantee; the new strict recovery counters must remain zero in a fresh
-run. The project is **not production-ready** because
+not currently carry a severe support-ledger entry, but Round 7.98 proved that
+static `observed_clean` evidence does not cover cross-card copy interactions;
+strict recovery counters must remain zero in every fresh run. The project is
+**not production-ready** because
 no trained checkpoint has passed the paired-seat strength gate, matchup
 calibration has not run, format-wide card support remains incomplete, and the
 deck-builder feedback loop is not connected.
@@ -39,7 +40,7 @@ The current working tree is green at the following delivery gates:
 | Golden scenarios | 409/409 |
 | Runtime smoke | 9/9 |
 | Training smoke | 13/13 |
-| Discovered unit tests | 848/848 |
+| Discovered unit tests | 851/851 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
 | Observation schema | v5 / `cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16` |
 
@@ -55,16 +56,22 @@ player-relative turns, draw-aware rates, and atomic per-file persistence.
 Evaluator caches retain only static characteristics, while live state and
 perspective are recomputed for each decision.
 
-### Round 7.98 checkpoint-league foundation — July 21, 2026
+### Round 7.98 result and Round 7.99 repaired boundary — July 22, 2026
 
-The structural self-play lever is implemented and gated, but no Round 7.98
-training result exists yet. `--checkpoint-pool-self-play` is off by default;
-the named `round-7.98` canary pins it on, pins matchup weighting off, and keeps
-the Round 7.97 Observation v5, `tempo-graded-potential-v1`, and `combat-v7`
-lineage unchanged for one-lever attribution.
+`round-7.98-self-play-v1` launched the structural self-play lever and failed
+strictly at 705,456 of 2,000,000 timesteps (35.27%). The failure was not a
+checkpoint-pool or observation-boundary fault: Superior Spider-Man copied
+Colorstorm Stallion, retained the name `Superior Spider-Man`, and later fired
+the copied Opus trigger. Its otherwise supported effect was gated on the
+printed source name, so resolution produced one `UnsupportedEffect` and the
+strict fidelity callback stopped training with
+`unparsed_cards=["Superior Spider-Man"]`. No checkpoint qualified for
+publication; the best periodic qualification point score was 0.203 and the
+best 95% lower bound was 0.0832, both far below the 0.550 gate.
 
-Training now publishes a hashed learner snapshot every 100k timesteps into a
-four-checkpoint FIFO disk pool. Each worker eagerly verifies SHA-256 and exact
+The checkpoint-league implementation publishes a hashed learner snapshot every
+100k timesteps into a four-checkpoint FIFO disk pool. Each worker eagerly
+verifies SHA-256 and exact
 observation/action-space compatibility, retains only one frozen CPU policy in
 steady state, and samples that resident checkpoint versus scripted play with
 probability 0.5 per episode. Lease replacement is staged synchronously and
@@ -87,11 +94,44 @@ derived only from its own deck, and emergency fallback rebuilds the agent layer
 and clears episode histories. Public threat scores cannot depend on identities
 in the other seat's hidden hand.
 
-Non-blocking checkpoint hardening remains: test rollback when worker clearing
-itself fails, remove/account for a newly written snapshot after staging rejects
-it, and cap retained policy references if a custom refresh cadence is shorter
-than an episode. The named Round 7.98 contract is outside that last edge case:
-its 100k refresh cadence exceeds the 2,000-step episode cap.
+The repair replaces the Colorstorm and Deceit printed-name gates with bounded,
+complete executable-Oracle templates, so copied rules text keeps its semantics
+when the object's name changes. Permanent runtime scenarios now cover
+Superior-copy-Colorstorm through a five-mana Opus buff/token-copy resolution
+and Superior-copy-Deceit through trigger ordering, opponent targeting, nonland
+hand selection, discard, and bound exile; both assert unchanged fidelity
+counters. The source-hashed three-card replay at
+`probe_runs/standard-superior-copy-repair-2026-07-22-v1/card_probe_report.json`
+reports 0 failures and 3 explicit coverage gaps, correctly leaving every card
+semantically unverified. Its report SHA-256 is
+`7ccd221cfa1fcdba6c37c323612da72d508d0fed73d78766bb2fcc6f968a2ed6`
+canonical /
+`0d9d3127ec61239e12d7853f65c7748f30d32d13ec68a311f12e30590f7ff561`
+physical.
+
+Round 7.99 is the fresh repaired canary. It inherits the complete 7.98
+self-play, Observation v5, reward, curriculum, evaluation, seed, and
+matchup-weighting-off contract, changing only permanent recovery checkpoints
+from every 50k to every 500k timesteps. The independently bounded self-play
+pool still publishes every 100k and retains four snapshots. The global
+non-canary recovery default is also 500k; historical 7.98 remains immutable.
+Named canaries reject resume, and curriculum scheduler state is not
+checkpointed, so the failed run cannot be continued scientifically.
+
+Observed post-activation checkpoint opponents accounted for 52.67% of sampled
+episodes (41.1% over the measured run including the scripted-only warmup), which
+matches the intended 0.5 split. The cost is material: post-100k throughput fell
+to roughly 1,576 steps/min from the prior run's 3,027, and the 100k evaluation
+took 29.51 minutes versus 15.06. Eight resident CPU policies, the evaluation
+process, synchronous rollout stragglers, and roughly 12 GiB of process working
+set explain the slowdown; checkpoint file writes took only seconds. Monitor the
+same resource signals in 7.99 before changing another training lever.
+
+Storage housekeeping recycled 2,004 disposable or superseded log files
+(19.396 MiB) while retaining the failed 7.98 training log, unique warning,
+completed baselines, cited probes, and fuzz replays. The failed run's model
+directory is no longer retained; only `models/baselines/` remains under
+`models/`.
 
 ### Final Room/Exhaust evidence refresh — July 21, 2026
 
@@ -440,7 +480,7 @@ split-layout paths are not yet complete. The report's canonical SHA-256 is
 
 ### Repair-affected schema-v3 replay — July 18, 2026
 
-The repair-surface inventory selected 770 unique cards: 555 broad-parser
+The repair-surface inventory selected 770 unique cards: 555 broad-parser0
 matches, 90 cards across 91 fidelity surfaces, 8 token-count surfaces, and 167
 cards across 174 copy/token lines, with overlaps deduplicated. Its alphabetical
 selection SHA-256 is
@@ -643,7 +683,7 @@ only from independent exact-state scenarios.
 
 ### Non-negotiable lineage rules
 
-- **Start the next policy as the fresh Round 7.98 experiment on the Round 7.97
+- **Start the next policy as the fresh Round 7.99 experiment on the Round 7.97
   Observation v5 boundary, using the current `tempo-graded-potential-v1`
   reward, `combat-v7` curriculum, and pinned checkpoint-league contract.**
   Observation v5 adds producible mana by color
@@ -660,11 +700,13 @@ only from independent exact-state scenarios.
   targetable observations match the active target instruction. Do not resume
   an Observation v2/v3/v4 checkpoint into this lineage; the v5 schema hash is
   `cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16` and
-  earlier-schema resumes fail closed. Round 7.98 keeps the v5 observation and
-  reward/curriculum lineage, but its named canary requires checkpoint self-play,
-  rejects resume, and pins matchup weighting off so exactly one structural
-  training lever changes. Generic runs still leave both checkpoint self-play
-  and matchup weighting off by default.
+  earlier-schema resumes fail closed. Round 7.99 keeps the v5 observation,
+  reward/curriculum, and 7.98 checkpoint-league lineage; its named canary
+  requires checkpoint self-play, rejects resume, and pins matchup weighting
+  off. It changes permanent recovery cadence to 500k while leaving the 100k
+  self-play pool cadence unchanged. Round 7.98 remains an immutable failed
+  diagnostic boundary. Generic runs still leave both checkpoint self-play and
+  matchup weighting off by default.
 - Resume now verifies the companion manifest's reward contract and Observation
   version/hash. Curriculum continuation is intentionally rejected until its
   per-worker scheduler counters can be checkpointed; launch a fresh
@@ -1140,24 +1182,32 @@ signal structurally rather than add features; see the plan below.
 
 ## Current execution plan
 
-### Now — Round 7.98: break the piloting ceiling structurally
+### Now — Round 7.99: rerun the repaired checkpoint-league experiment
 
 The 7.97 post-mortem (above) confirms the reactive-deck 0% is a single-policy
 piloting ceiling, invariant to observation and reward changes. Stop adding
-observation fields and reward terms for this failure. Three structural levers,
-sequenced cheapest-first, one new lever per round for clean attribution:
+observation fields and reward terms for this failure. Round 7.98 confirmed that
+the checkpoint league activates, leases policies, and produces the intended
+approximately 50/50 post-warmup opponent mix, but its fidelity stop at 705,456
+prevents any strength conclusion. Round 7.99 retries the same structural lever
+after the copied-source repair; its 500k permanent-checkpoint cadence is an
+operational storage change, not a second training-signal lever. Three structural
+levers remain sequenced cheapest-first, one new signal lever per round:
 
-1. **Self-play / checkpoint league (lead lever; foundation delivered).** The
-   Round 7.98 implementation is complete: explicit perspective-safe opponent
+1. **Self-play / checkpoint league (lead lever; repaired rerun ready).** The
+   Round 7.98/7.99 implementation is complete: explicit perspective-safe opponent
    observation/mask generation, strict hidden-information and cache isolation,
    mask-valid atomic opponent dispatch, eager fail-closed checkpoint staging,
    a bounded four-snapshot disk pool, deterministic one-policy worker leases,
    per-episode checkpoint-versus-scripted sampling, rollback/provenance
    manifests, and a scripted-only fixed evaluator. The steady-state resource
    contract is one frozen CPU policy per worker; only a safe lease refresh may
-   temporarily hold the active and pending policies together. The next action
-   is to launch the fresh named canary below and measure whether this training
-   signal moves control decks off 0%, not to add another lever.
+   temporarily hold the active and pending policies together. The copied
+   Colorstorm/Deceit source-name defect is scenario-guarded, the complete
+   delivery gate is green, and the targeted probe records no failures. The
+   next action is to launch the fresh named 7.99 canary below and measure
+   whether this training signal moves control decks off 0%, not to add another
+   lever.
 2. **Archetype-conditioned capacity.** The agent observes `opponent_archetype`
    (6-dim) but **not its own** — there is no `my_archetype` field. Add it
    (Observation v6, hard lineage boundary) and/or a light policy conditioning
@@ -1179,8 +1229,8 @@ scratch. Promotion to `best_model.zip` still requires the pair-aware 95%
 qualification lower bound to reach 55% with zero fidelity counters.
 
 ```bash
-python main.py --canary-config round-7.98 --timesteps 2000000 \
-  --checkpoint-pool-self-play --run-name round-7.98-self-play-v1
+python main.py --canary-config round-7.99 --timesteps 2000000 \
+  --checkpoint-pool-self-play --run-name round-7.99-self-play-v1
 ```
 
 Do not add `--matchup-weighting` or `--resume`; the canary rejects both so the
@@ -1221,6 +1271,10 @@ checkpoint league remains the only changed experimental lever.
   treat any schema mismatch or hidden-information leak as a run-stopper.
 - Profile production-sized training and Harvest workloads; land optimizations
   as separately verified changes.
+- During 7.99, track post-warmup self-play share, rollout stragglers, evaluator
+  duration, resident-policy RAM, system free memory, and effective steps/min.
+  Keep permanent checkpoints at 500k and the bounded opponent pool at 100k
+  unless a new measured failure justifies another named experiment.
 - Measure cast transaction cost in the pinned canary before changing rollback:
   a logging-disabled 120-card microbenchmark measured a 15.21 ms median
   constructor-free checkpoint versus 34.30 ms for the canonical clone (12
@@ -1396,11 +1450,12 @@ The project is complete only when all of these are true:
 ## Checkpoint and schema boundaries
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
-mistake. The practical rule is: **launch Round 7.98 fresh on the Round 7.97
+mistake. The practical rule is: **launch Round 7.99 fresh on the Round 7.97
 Observation v5 boundary using `tempo-graded-potential-v1`, `combat-v7`, and the
-pinned checkpoint-league contract.** Round 7.98 does not change the observation
-schema, but its named canary rejects resume and matchup weighting so the league
-is the only changed experimental lever.
+pinned checkpoint-league contract.** Round 7.99 does not change the observation
+schema, reward, curriculum, or opponent mix. Its named canary rejects resume
+and matchup weighting; only copied-source engine fidelity and permanent
+recovery cadence differ from the failed 7.98 run.
 
 | Minimum round | Incompatible change |
 | --- | --- |
@@ -1428,6 +1483,7 @@ is the only changed experimental lever.
 | 7.96 | Observation v4: the observer's own decklist (`my_deck_card_identity`) and remaining-library composition (`my_library_composition`), full-deck `deck_composition_estimate`; reward/curriculum carry over from 7.95 |
 | 7.97 | Observation v5: producible mana by color (`my_producible_mana`, `opp_producible_mana`); reward/curriculum carry over from 7.96. Opt-in `--matchup-weighting` and cast-path legality hardening ride along (neither breaks lineage) |
 | 7.98 | Resource-bounded checkpoint self-play: explicit opponent-private observation/mask boundary, one frozen CPU policy per worker, four-snapshot FIFO disk pool, reset-scoped deterministic leases, fail-closed staging/rollback provenance, and scripted-only fixed evaluation. Observation v5, reward, and curriculum remain unchanged |
+| 7.99 | Fresh repair boundary after 7.98 failed at 705,456: copied Colorstorm and Deceit executable Oracle templates are name-independent; permanent recovery checkpoints move from 50k to 500k while the four-snapshot self-play pool remains at 100k. Observation v5, reward, curriculum, evaluation, seeds, and opponent mix remain unchanged |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing
@@ -1586,6 +1642,18 @@ corpus, registry, both schema identities, policy, and checkpoint provenance.
   totals per turn and classifies the winner's mid-game position (ahead,
   parity, or behind at the middle turn, 5-life margin), making
   snowball-versus-comeback analytics real.
+- **7.96–7.97:** completed the Observation v4/v5 and training-contract
+  transitions, repaired cast-legality and matchup-weighting boundaries, and
+  used the qualification/postmortem evidence to reject another parameter-only
+  retry: the policy still had no publishable strength result and required a
+  structural opponent-distribution change.
+- **7.98–7.99:** activated the checkpoint self-play league. Round 7.98 stopped
+  strictly at 705,456 steps when Superior Spider-Man's copied Colorstorm Opus
+  text exposed a printed-name parser gate. The repair made the complete
+  Colorstorm and Deceit executable templates name-independent, added exact
+  runtime regressions and a source-hashed three-card probe, and defined 7.99 as
+  a fresh lineage with permanent recovery checkpoints every 500k timesteps
+  while preserving the self-play pool's independent 100k publication cadence.
 
 ### Institutional lessons retained from the silent-bug catalog
 

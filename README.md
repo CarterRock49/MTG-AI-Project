@@ -347,6 +347,20 @@ discovered surface or branch was not independently exercised. Even
 `semantic_status=unverified` until permanent scenarios assert its exact rules
 outcomes across all abilities, modes, and choices.
 
+The July 22 copied-source repair replay is
+`probe_runs/standard-superior-copy-repair-2026-07-22-v1/card_probe_report.json`.
+Its source-hashed per-card run reports 0 failures and 3 explicit
+`coverage_gap` results for Superior Spider-Man, Colorstorm Stallion, and
+Deceit; it does not claim that isolated probes cover their composition. The
+composed runtime paths live in `tests/superior_spider_man_test.py`: one casts
+a five-mana spell through copied Colorstorm's Opus, and one resolves copied
+Deceit's black ETB through target choice and nonland discard. Both assert that
+the fidelity counters remain unchanged. The report SHA-256 is
+`7ccd221cfa1fcdba6c37c323612da72d508d0fed73d78766bb2fcc6f968a2ed6`
+canonical and
+`0d9d3127ec61239e12d7853f65c7748f30d32d13ec68a311f12e30590f7ff561`
+physical.
+
 The current local, Git-ignored Room/Exhaust refresh is
 `probe_runs/standard-room-exhaust-evidence-2026-07-21-v4/card_probe_report.json`,
 pinned to the final 49-file `Playersim/**/*.py` engine SHA-256
@@ -470,8 +484,8 @@ cards remain `semantic_status=unverified`.
 ## Training
 
 ```bash
-python main.py --canary-config round-7.98 --timesteps 2000000 \
-  --checkpoint-pool-self-play --run-name round-7.98-self-play-v1
+python main.py --canary-config round-7.99 --timesteps 2000000 \
+  --checkpoint-pool-self-play --run-name round-7.99-self-play-v1
 ```
 
 No format or deck flags are required for the pinned Standard default. Custom
@@ -480,10 +494,10 @@ The named canary fails closed on its enumerated CLI and complete PPO setting
 tree, reward contract version/scalars, the full resolved curriculum hash,
 Observation/registry/feature/corpus identities, feature-output width, CUDA
 device class, evaluation-schedule hash, and the complete checkpoint-pool
-contract. Round 7.98 checks two million timesteps,
+contract. Round 7.99 checks two million timesteps,
 learning rate `2e-4`, batch 256, rollout 1024, eight training environments,
-100k evaluation cadence with 64 games (32 seat-swapped pairs), 50k
-checkpoints, `combat-v7`, training seed `20260715`, and independent evaluation
+100k evaluation cadence with 64 games (32 seat-swapped pairs), 500k permanent
+recovery checkpoints, `combat-v7`, training seed `20260715`, and independent evaluation
 seed `21260715`. It also pins matchup weighting off and checkpoint self-play on:
 every 100k steps the learner atomically publishes a hashed snapshot into a
 four-checkpoint FIFO disk pool, each worker eagerly validates and holds one
@@ -780,14 +794,14 @@ artifacts for 14 days.
 | `--timesteps` | Total training timesteps | `1000000` |
 | `--seed` | Training seed (Python, NumPy, Torch, workers) | `20260715` |
 | `--eval-seed` | Independent fixed-evaluation schedule seed | `21260715` |
-| `--canary-config` | Validate a named, enumerated experiment contract (current: Round 7.98) | none |
+| `--canary-config` | Validate a named, enumerated experiment contract (current: Round 7.99) | none |
 | `--resume` | Path to a lineage-compatible checkpoint to continue | — |
 | `--learning-rate` | Initial learning rate | `2e-4` |
 | `--batch-size` | Batch size | `256` |
 | `--n-steps` | Rollout steps before an update | `1024` |
 | `--n-envs` | Parallel training environments (`0` = auto when explicitly supplied) | `8` |
 | `--eval-freq` / `--eval-episodes` | Periodic cadence / games in fixed seat-swapped pairs | `100000` / `64` (32 pairs) |
-| `--checkpoint-freq` | Checkpoint cadence (timesteps) | `50000` |
+| `--checkpoint-freq` | Permanent recovery-checkpoint cadence (timesteps) | `500000` |
 | `--checkpoint-pool-self-play` | Opt in to frozen-checkpoint opponents for training only | off |
 | `--checkpoint-pool-snapshot-freq` | Learner cadence for checkpoint-pool refresh | `100000` |
 | `--checkpoint-pool-size` | Maximum frozen checkpoints retained on disk | `4` |

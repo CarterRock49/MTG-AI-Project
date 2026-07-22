@@ -957,6 +957,7 @@ EVALUATION_SEED_OFFSET = 1_000_000
 DEFAULT_TRAINING_SEED = 20_260_715
 DEFAULT_EVALUATION_SEED = 21_260_715
 DEFAULT_TRAINING_ENVIRONMENTS = 8
+DEFAULT_RECOVERY_CHECKPOINT_FREQUENCY = 500_000
 DEFAULT_CHECKPOINT_POOL_SNAPSHOT_FREQUENCY = 100_000
 DEFAULT_CHECKPOINT_POOL_SIZE = 4
 DEFAULT_CHECKPOINT_POOL_PROBABILITY = 0.5
@@ -1200,11 +1201,22 @@ ROUND_7_98_CANARY = {
         ),
     },
 }
+# Round 7.99 preserves the failed 7.98 experiment as an immutable historical
+# contract and changes only permanent recovery-checkpoint cadence. The bounded
+# self-play opponent pool continues to refresh independently at 100k.
+ROUND_7_99_CANARY = {
+    **ROUND_7_98_CANARY,
+    "id": "round-7.99",
+    "cli": {
+        **ROUND_7_98_CANARY["cli"],
+        "checkpoint_freq": DEFAULT_RECOVERY_CHECKPOINT_FREQUENCY,
+    },
+}
 CANARY_CONFIGS = {
     config["id"]: config
     for config in (ROUND_7_92_CANARY, ROUND_7_93_CANARY, ROUND_7_94_CANARY,
                    ROUND_7_95_CANARY, ROUND_7_96_CANARY, ROUND_7_97_CANARY,
-                   ROUND_7_98_CANARY)
+                   ROUND_7_98_CANARY, ROUND_7_99_CANARY)
 }
 
 
@@ -5163,10 +5175,14 @@ def main():
         "--eval-episodes", type=int, default=64,
         help=("Fixed paired deck/seat/seed cases per periodic evaluation "
               "(use an even count; 64+ recommended)"))
-    parser.add_argument("--checkpoint-freq", type=int, default=50000, help="Checkpoint frequency")
+    parser.add_argument(
+        "--checkpoint-freq", type=int,
+        default=DEFAULT_RECOVERY_CHECKPOINT_FREQUENCY,
+        help=("Permanent recovery-checkpoint frequency in training timesteps "
+              f"(default: {DEFAULT_RECOVERY_CHECKPOINT_FREQUENCY})"))
     parser.add_argument(
         "--checkpoint-pool-self-play", action="store_true",
-        help=("Opt in to Round 7.98 checkpoint-league training. Frozen "
+        help=("Opt in to checkpoint-league training. Frozen "
               "opponents are used only by training workers; fixed evaluation "
               "remains scripted."))
     parser.add_argument(
