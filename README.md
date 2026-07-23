@@ -30,7 +30,9 @@ scripted play**, so the statistics are not yet strength-grade.
 
 [ROADMAP.md](ROADMAP.md) is the authoritative status and next-work list;
 [STATS_SCHEMA.md](STATS_SCHEMA.md) is the contract for anything that consumes the
-output statistics. `DeckStats_Viewer/` provides a dependency-free local
+output statistics; [ARCHETYPE_SCHEMA.md](ARCHETYPE_SCHEMA.md) defines the
+versioned deck-strategy taxonomy and its hidden-information boundary.
+`DeckStats_Viewer/` provides a dependency-free local
 workbench for run provenance, checkpoint trends, every evaluation case and
 debug replay, DeckStats scopes, canonical-ID CardMemory comparisons, safe
 StrategyMemory diagnostics, game logs, fidelity, and Harvest artifacts. New
@@ -111,6 +113,7 @@ harvest_fixtures.py         Deterministic single-process Harvest + strict artifa
 harvest_protocol.py         Parallel sharded Harvest and paired-seat promotion
 ROADMAP.md                  Authoritative status and next-work list
 STATS_SCHEMA.md             Output-statistics contract for the deck builder
+ARCHETYPE_SCHEMA.md         Versioned deck-strategy profile contract
 
 Playersim/                  The engine + tooling package
   card.py, card_registry.py     Card model; canonical registry + frozen feature schema
@@ -483,14 +486,15 @@ cards remain `semantic_status=unverified`.
 
 ## Training
 
-```bash
-python main.py --canary-config round-7.99 --timesteps 2000000 \
-  --checkpoint-pool-self-play --run-name round-7.99-self-play-v1
-```
+Round 7.99 is complete; do not relaunch or resume it. The next training command
+will be published only after the Observation-v6 strategy encoding and
+archetype-conditioning delivery gate passes. That canary must start fresh while
+holding the 7.99 reward, curriculum, checkpoint-league, evaluation, and seed
+contracts fixed.
 
 No format or deck flags are required for the pinned Standard default. Custom
 corpora are available through `--decks`, `--format`, and `--format-dir`.
-The named canary fails closed on its enumerated CLI and complete PPO setting
+The completed named canary failed closed on its enumerated CLI and complete PPO setting
 tree, reward contract version/scalars, the full resolved curriculum hash,
 Observation/registry/feature/corpus identities, feature-output width, CUDA
 device class, evaluation-schedule hash, and the complete checkpoint-pool
@@ -525,10 +529,14 @@ on a 6-core/12-thread machine (`--n-envs 0` auto-selects only 6; worker count
 is RAM-bounded at ~0.3 MB per rollout-buffer step). If the evaluation cadence
 outruns the evaluator, boundaries are skipped with a warning rather than
 queueing stale snapshots. Skipped/cancelled boundaries are retained in
-`evaluations.json`, and interrupted runs terminate the evaluator and remove
-unpublished snapshots. Training workers batch compressed statistics for ten
-games; close still forces a final flush. Deeper per-step optimizations are
-tracked as the ROADMAP Tier 3 throughput program.
+`evaluations.json`. A cadence boundary reached on the terminal rollout is
+not scored before the last PPO update; it is replaced by one mandatory
+post-update final-model evaluation at the model's actual timestep. Pending
+snapshots are removed on interruption, while exactly one content-addressed
+best-candidate snapshot is retained as bounded evaluation evidence. Training
+workers batch compressed statistics for ten games; close still forces a final
+flush. Deeper per-step optimizations are tracked as the ROADMAP Tier 3
+throughput program.
 
 Every periodic evaluation uses the same paired deck/seat/seed cases, generated
 from `--eval-seed` independently of training RNG. The 64-game Standard schedule
@@ -538,11 +546,17 @@ Promotion is ordered by decisive wins, decisive win-minus-loss score, fewer
 turn limits, then shaped return. A candidate is only promoted to
 `best_model.zip` after the pair-aware 95% lower confidence bound for its
 decisive-win plus half non-timeout-draw score reaches 55%; the point estimate
-alone cannot qualify it, and being merely best-so-far is recorded separately.
+alone cannot qualify it. The exact evaluated best-so-far bytes are retained
+separately under `best_candidate/`; this evidence artifact never bypasses the
+qualification gate and may therefore be newer than `best_model.zip`.
 The bound uses a conservative envelope of the episode-level Wilson interval
 and the paired-case t interval. The interval and exact cases,
 per-game outcomes, checkpoint SHA-256, and promotion decisions are published
-atomically to `logs/<run>/evaluation/evaluations.json`.
+atomically to schema-v4
+`logs/<run>/evaluation/evaluations.json`. The mandatory final record is
+role-tagged `final_model`; its evaluated archive is moved, not re-saved, into
+`final_model.zip`, and validation requires the evaluation, reload, and final
+artifact SHA-256 plus timestep to agree.
 
 Strict training/evaluation fidelity also rejects nonzero effect-continuation
 failure or lost-spell-recovery counters and retains their diagnostic contexts;
@@ -555,6 +569,10 @@ revision and dirty state, CLI and resolved configuration, device and dependency
 inventory, deck/lineage provenance, lifecycle result, and artifact paths. A
 dirty run also stores a hashed `source_worktree.patch` beside the manifest,
 including both tracked changes and untracked files.
+Terminal manifest publication happens only after environments close, the final
+completed/failed/interrupted line is flushed, and the per-run handler is
+detached; the recorded runtime-log size and SHA-256 therefore cover the entire
+immutable run log.
 
 Training workers continue to record card and deck outcomes, but adaptive
 history is analytics-only by default: it does not feed evaluator advice back

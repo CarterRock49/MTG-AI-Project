@@ -55,6 +55,11 @@ from Playersim.curriculum import (
     derive_checkpoint_lease_seed, derive_checkpoint_pool_seed,
     derive_matchup_seed, resolve_curriculum,
 )
+from Playersim.archetypes import (
+    classifier_identity as archetype_classifier_identity,
+    declared_profile_hash,
+    taxonomy_identity as archetype_taxonomy_identity,
+)
 from Playersim.observation_schema import SEMANTIC_IDENTITY_FIELDS
 from Playersim.debug import DEBUG_MODE
 
@@ -895,6 +900,9 @@ def configure_runtime_logging(*, debug=False, worker=False):
     debug_module.DEBUG_ACTION_STEPS = bool(debug)
     environment_module.DEBUG_MODE = bool(debug)
     environment_module.DEBUG_ACTION_STEPS = bool(debug)
+    # A host application or test harness may have globally disabled logging.
+    # Training provenance requires the per-run runtime log to be complete.
+    logging.disable(logging.NOTSET)
 
     # A non-debug worker emits only WARNING+, so its catch-all debug handler
     # otherwise produces a byte-for-byte duplicate of the warning file (and a
@@ -1311,6 +1319,26 @@ def artifact_identity(path):
     }
 
 
+def artifact_identity_from_pointer(pointer):
+    """Resolve and verify an artifact pointer stored in JSON metadata."""
+    if not isinstance(pointer, dict) or not pointer.get("path"):
+        return None
+    pointer_path = str(pointer["path"]).replace("/", os.sep)
+    if not os.path.isabs(pointer_path):
+        pointer_path = os.path.join(BASE_DIR, pointer_path)
+    identity = artifact_identity(os.path.normpath(pointer_path))
+    if identity is None:
+        return None
+    expected_sha256 = pointer.get("sha256")
+    expected_size = pointer.get("size_bytes")
+    if expected_sha256 and identity["sha256"] != expected_sha256:
+        return None
+    if (expected_size is not None
+            and identity["size_bytes"] != int(expected_size)):
+        return None
+    return identity
+
+
 def build_fixed_evaluation_schedule(decks, n_eval_episodes, seed):
     """Build reproducible, exposure-balanced periodic evaluation pairs.
 
@@ -1444,6 +1472,13 @@ def validate_canary_runtime(config, *, lineage, training_config, curriculum,
     expected_runtime = config["runtime"]
     actual_training = json_safe(training_config)
     actual = dict(actual_training)
+    if (lineage or {}).get("strategy_profiles") is not None:
+        try:
+            actual.update(strategy_profile_lineage_contract(lineage))
+        except ValueError as error:
+            raise RuntimeError(
+                "Resolved strategy-profile lineage is invalid: "
+                f"{error}") from error
     actual.update({
         "observation_schema_version":
             AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION,
@@ -1631,6 +1666,14 @@ def validate_resume_lineage(checkpoint_path, requested_curriculum):
             "Curriculum resume is disabled until per-worker scheduler counters "
             "are checkpointed; start this Round 7.89 lineage fresh")
 
+    try:
+        recorded_strategy_lineage = strategy_profile_lineage_contract(
+            source_manifest.get("lineage") or {})
+    except ValueError as error:
+        raise ValueError(
+            "Resume manifest has no valid strategy-profile lineage: "
+            f"{error}") from error
+
     return {
         "run_id": source_manifest.get("run_id"),
         "manifest": artifact_identity(manifest_path),
@@ -1638,6 +1681,7 @@ def validate_resume_lineage(checkpoint_path, requested_curriculum):
         "observation_schema_version": schema_version,
         "observation_schema_sha256": schema_sha256,
         "curriculum": recorded_name,
+        "strategy_profile_lineage": recorded_strategy_lineage,
     }
 
 
@@ -1721,10 +1765,22 @@ def deck_provenance(decks, card_db, decks_dir=DECKS_DIR):
     loaded_decks = []
     for index, deck in enumerate(decks):
         if isinstance(deck, dict):
-            loaded_decks.append({
+            loaded_deck = {
                 "name": deck.get("name"),
                 "card_count": len(deck.get("cards", [])),
-            })
+            }
+            strategy_profile = deck.get("strategy_profile")
+            if strategy_profile is not None:
+                loaded_deck.update({
+                    "strategy_profile_hash":
+                        declared_profile_hash(strategy_profile),
+                    "primary_archetype": strategy_profile.get("primary"),
+                    "secondary_archetype": strategy_profile.get(
+                        "secondary"),
+                    "strategy_tags": list(
+                        strategy_profile.get("tags") or ()),
+                })
+            loaded_decks.append(loaded_deck)
         else:
             loaded_decks.append({
                 "name": f"non-dict-deck-{index}",
@@ -1736,6 +1792,121 @@ def deck_provenance(decks, card_db, decks_dir=DECKS_DIR):
         "loaded_decks": loaded_decks,
         "source_files": source_files,
     }
+
+
+def strategy_profile_lineage(decks):
+    """Pin the taxonomy, classifier, and reviewed profiles used by a run."""
+    reviewed_profiles = []
+    for deck in decks:
+        if not isinstance(deck, dict) or deck.get(
+                "strategy_profile") is None:
+            continue
+        reviewed_profiles.append({
+            "name": deck.get("name"),
+            "sha256": declared_profile_hash(
+                deck["strategy_profile"]),
+        })
+    reviewed_profiles.sort(
+        key=lambda item: str(item.get("name") or "").casefold())
+    aggregate_payload = json.dumps(
+        reviewed_profiles, ensure_ascii=True, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")
+    return {
+        "taxonomy": archetype_taxonomy_identity(),
+        "classifier": archetype_classifier_identity(),
+        "reviewed_profile_count": len(reviewed_profiles),
+        "reviewed_profiles": reviewed_profiles,
+        "reviewed_profiles_sha256": hashlib.sha256(
+            aggregate_payload).hexdigest(),
+    }
+
+
+def strategy_profile_lineage_contract(lineage):
+    """Validate and flatten the strategy identities needed at run boundaries."""
+    if not isinstance(lineage, dict):
+        raise ValueError("strategy-profile lineage must be an object")
+    strategy = (
+        lineage.get("strategy_profiles")
+        if "strategy_profiles" in lineage else lineage)
+    if not isinstance(strategy, dict):
+        raise ValueError("strategy_profiles must be an object")
+    taxonomy = strategy.get("taxonomy")
+    classifier = strategy.get("classifier")
+    if not isinstance(taxonomy, dict) or not isinstance(classifier, dict):
+        raise ValueError("taxonomy and classifier identities are required")
+
+    def require_sha256(value, label):
+        digest = str(value or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(f"{label} must be a lowercase SHA-256 digest")
+        return digest
+
+    taxonomy_sha256 = require_sha256(
+        taxonomy.get("sha256"), "taxonomy.sha256")
+    classifier_sha256 = require_sha256(
+        classifier.get("sha256"), "classifier.sha256")
+    if classifier.get("taxonomy_sha256") != taxonomy_sha256:
+        raise ValueError(
+            "classifier taxonomy hash does not match the taxonomy identity")
+
+    count = strategy.get("reviewed_profile_count")
+    if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+        raise ValueError("reviewed_profile_count must be a nonnegative integer")
+    reviewed_profiles = strategy.get("reviewed_profiles")
+    if not isinstance(reviewed_profiles, list) or len(reviewed_profiles) != count:
+        raise ValueError(
+            "reviewed_profiles must match reviewed_profile_count")
+    canonical_profiles = []
+    for profile in reviewed_profiles:
+        if not isinstance(profile, dict) or not str(
+                profile.get("name") or "").strip():
+            raise ValueError("each reviewed profile requires a deck name")
+        canonical_profiles.append({
+            "name": profile["name"],
+            "sha256": require_sha256(
+                profile.get("sha256"), "reviewed profile sha256"),
+        })
+    if canonical_profiles != sorted(
+            canonical_profiles,
+            key=lambda item: str(item["name"]).casefold()):
+        raise ValueError("reviewed profiles must be sorted by deck name")
+    aggregate_payload = json.dumps(
+        canonical_profiles, ensure_ascii=True, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")
+    computed_aggregate = hashlib.sha256(aggregate_payload).hexdigest()
+    recorded_aggregate = require_sha256(
+        strategy.get("reviewed_profiles_sha256"),
+        "reviewed_profiles_sha256")
+    if recorded_aggregate != computed_aggregate:
+        raise ValueError(
+            "reviewed_profiles_sha256 does not match the per-deck identities")
+    return {
+        "strategy_taxonomy_sha256": taxonomy_sha256,
+        "strategy_classifier_sha256": classifier_sha256,
+        "reviewed_profile_count": count,
+        "reviewed_profiles_sha256": recorded_aggregate,
+    }
+
+
+def validate_resume_strategy_lineage(resume_lineage, current_lineage):
+    """Require the loaded corpus strategy contract to match the source run."""
+    recorded = (resume_lineage or {}).get("strategy_profile_lineage")
+    if not isinstance(recorded, dict):
+        raise ValueError(
+            "Resume metadata is missing its strategy-profile lineage")
+    current = strategy_profile_lineage_contract(current_lineage)
+    mismatches = [
+        f"{key}={current.get(key)!r} (source {value!r})"
+        for key, value in recorded.items()
+        if current.get(key) != value
+    ]
+    if mismatches or set(current) != set(recorded):
+        raise ValueError(
+            "Resume corpus strategy-profile lineage mismatch: "
+            + "; ".join(mismatches or [
+                f"keys={sorted(current)!r} "
+                f"(source {sorted(recorded)!r})"]))
+    return current
 
 
 def load_training_corpus(decks_arg, format_name, format_dir_arg):
@@ -1769,6 +1940,7 @@ def load_training_corpus(decks_arg, format_name, format_dir_arg):
     lineage = format_lineage(
         decks_dir, format_name=format_name,
         card_registry=card_registry, feature_schema=feature_schema)
+    lineage["strategy_profiles"] = strategy_profile_lineage(decks)
     return decks, card_db, decks_dir, lineage
 
 
@@ -1791,6 +1963,17 @@ def training_artifacts(run_model_dir, run_id):
                 checkpoint_pool_dir, filename))
             if identity is not None:
                 checkpoint_pool_snapshots.append(identity)
+    evaluation_history_path = os.path.join(
+        LOG_DIR, run_id, "evaluation", "evaluations.json")
+    best_candidate_model = None
+    if os.path.isfile(evaluation_history_path):
+        try:
+            with open(evaluation_history_path, encoding="utf-8") as handle:
+                evaluation_history = json.load(handle)
+            best_candidate_model = artifact_identity_from_pointer(
+                evaluation_history.get("best_candidate_artifact"))
+        except (OSError, TypeError, ValueError):
+            best_candidate_model = None
     return {
         "final_model": artifact_identity(os.path.join(run_model_dir, "final_model")),
         "interrupted_model": artifact_identity(os.path.join(
@@ -1798,9 +1981,9 @@ def training_artifacts(run_model_dir, run_id):
         "failed_model": artifact_identity(os.path.join(run_model_dir, "failed_model")),
         "best_model": artifact_identity(
             os.path.join(run_model_dir, "best_model", "best_model")),
+        "best_candidate_model": best_candidate_model,
         "evaluation_history": (
-            artifact_identity(os.path.join(
-                LOG_DIR, run_id, "evaluation", "evaluations.json"))
+            artifact_identity(evaluation_history_path)
             or artifact_identity(os.path.join(
                 LOG_DIR, run_id, "evaluation", "evaluations.npz"))),
         "feature_extractor": artifact_identity(
@@ -1829,6 +2012,80 @@ def evaluation_history_summary(run_id):
             evaluations = list(history.get("evaluations") or ())
         except (OSError, TypeError, ValueError) as error:
             return {"status": "unreadable", "error": str(error)}
+        best_candidate_artifact = history.get("best_candidate_artifact")
+        if best_candidate_artifact is not None:
+            candidate_identity = artifact_identity_from_pointer(
+                best_candidate_artifact)
+            candidate_record = next((
+                item for item in evaluations
+                if item.get("evaluation_id")
+                == best_candidate_artifact.get("evaluation_id")
+                or (
+                    best_candidate_artifact.get("evaluation_id") is None
+                    and int(item.get("timesteps", -1))
+                    == int(best_candidate_artifact.get(
+                        "timesteps", -2)))), None)
+            if (candidate_identity is None or candidate_record is None
+                    or candidate_record.get("checkpoint_sha256")
+                    != best_candidate_artifact.get("sha256")):
+                return {
+                    "status": "unreadable",
+                    "error": (
+                        "best-candidate pointer does not resolve to its "
+                        "evaluated checkpoint"),
+                }
+        final_model_evaluation = history.get("final_model_evaluation")
+        if final_model_evaluation is not None:
+            if not isinstance(final_model_evaluation, dict):
+                return {
+                    "status": "unreadable",
+                    "error": "final-model evaluation metadata is not an object",
+                }
+            final_id = final_model_evaluation.get("evaluation_id")
+            matching_final_records = [
+                item for item in evaluations
+                if item.get("checkpoint_role") == "final_model"
+                and item.get("evaluation_id") == final_id
+            ]
+            if len(matching_final_records) != 1:
+                return {
+                    "status": "unreadable",
+                    "error": (
+                        "final-model evaluation does not identify exactly one "
+                        "final checkpoint record"),
+                }
+            final_record = matching_final_records[0]
+            comparable_fields = (
+                "timesteps", "checkpoint_sha256", "checkpoint_size_bytes",
+                "schedule_sha256")
+            if any(
+                    final_record.get(field)
+                    != final_model_evaluation.get(field)
+                    for field in comparable_fields):
+                return {
+                    "status": "unreadable",
+                    "error": (
+                        "final-model evaluation metadata does not match its "
+                        "checkpoint record"),
+                }
+            final_artifact = final_model_evaluation.get("artifact")
+            if final_artifact is not None:
+                final_identity = artifact_identity_from_pointer(final_artifact)
+                published_record = final_record.get("published_artifact")
+                if (final_identity is None
+                        or not isinstance(published_record, dict)
+                        or published_record != final_artifact
+                        or final_identity.get("sha256")
+                        != final_model_evaluation.get("checkpoint_sha256")
+                        or final_identity.get("size_bytes")
+                        != final_model_evaluation.get(
+                            "checkpoint_size_bytes")):
+                    return {
+                        "status": "unreadable",
+                        "error": (
+                            "final-model artifact does not resolve to the "
+                            "evaluated checkpoint record"),
+                    }
         if not evaluations:
             return {
                 "status": "not_run",
@@ -1839,6 +2096,8 @@ def evaluation_history_summary(run_id):
                 "minimum_qualification_score": history.get(
                     "minimum_qualification_score"),
                 "qualification_rule": history.get("qualification_rule"),
+                "best_candidate_artifact": best_candidate_artifact,
+                "final_model_evaluation": final_model_evaluation,
                 "skipped_evaluations": len(
                     history.get("skipped_evaluations") or ()),
                 "cancelled_evaluations": len(
@@ -1847,11 +2106,19 @@ def evaluation_history_summary(run_id):
         summaries = [item.get("summary") or {} for item in evaluations]
         promoted = [item for item in evaluations if item.get("promoted")]
         qualified = [item for item in evaluations if item.get("qualified")]
+        periodic = [
+            item for item in evaluations
+            if item.get("checkpoint_role", "periodic") == "periodic"]
+        final_records = [
+            item for item in evaluations
+            if item.get("checkpoint_role") == "final_model"]
         return {
             "status": (
                 "qualified" if qualified else "evaluated_unqualified"),
             "qualified": bool(qualified),
             "evaluation_points": len(evaluations),
+            "periodic_evaluation_points": len(periodic),
+            "final_evaluation_points": len(final_records),
             "timesteps": [int(item["timesteps"]) for item in evaluations],
             "episodes_per_evaluation": len(
                 history.get("fixed_schedule") or ()),
@@ -1900,6 +2167,9 @@ def evaluation_history_summary(run_id):
                 history.get("cancelled_evaluations") or ()),
             "best_candidate_timestep": history.get(
                 "best_candidate_timestep"),
+            "best_candidate_artifact": best_candidate_artifact,
+            "best_evaluation_id": history.get("best_evaluation_id"),
+            "final_model_evaluation": final_model_evaluation,
             "best_timestep": (
                 int(promoted[-1]["timesteps"]) if promoted else None),
         }
@@ -2059,12 +2329,27 @@ class StrictEvaluationVecEnv(VecEnvWrapper):
         return observations, rewards, dones, infos
 
 
-def validate_training_checkpoint(path, env, *, device, seed):
+def validate_training_checkpoint(
+        path, env, *, device, seed, expected_sha256=None,
+        expected_num_timesteps=None):
     """Reload a checkpoint and prove deterministic rollout progress is clean."""
     checkpoint_path = resolve_artifact_path(path)
     if checkpoint_path is None:
         raise FileNotFoundError(f"Saved checkpoint was not published at {path}")
+    checkpoint_sha256 = sha256_file(checkpoint_path)
+    if (expected_sha256 is not None
+            and checkpoint_sha256 != expected_sha256):
+        raise RuntimeError(
+            "Final checkpoint bytes differ from the archive scored by the "
+            "fixed evaluation suite")
     loaded = MaskablePPO.load(checkpoint_path, env=env, device=device)
+    loaded_num_timesteps = int(getattr(loaded, "num_timesteps", 0))
+    if (expected_num_timesteps is not None
+            and loaded_num_timesteps != int(expected_num_timesteps)):
+        raise RuntimeError(
+            "Reloaded final checkpoint timestep does not match its fixed "
+            "evaluation record: expected %s, loaded %s" % (
+                int(expected_num_timesteps), loaded_num_timesteps))
     if hasattr(loaded, "set_random_seed"):
         loaded.set_random_seed(seed)
     if hasattr(env, "seed"):
@@ -2122,6 +2407,9 @@ def validate_training_checkpoint(path, env, *, device, seed):
         "rollout_steps": validation_steps,
         "episodes_completed": episodes_completed,
         "validated_seed": int(seed),
+        "checkpoint_sha256": checkpoint_sha256,
+        "checkpoint_size_bytes": os.path.getsize(checkpoint_path),
+        "checkpoint_num_timesteps": loaded_num_timesteps,
     }
 
 # Feature Dimension Configuration
@@ -4497,7 +4785,32 @@ def _async_evaluation_worker(request_queue, result_queue, env_factory,
             request = request_queue.get()
             if request is None:
                 break
-            snapshot_path, trigger_timesteps = request
+            if isinstance(request, dict):
+                snapshot_path = request["snapshot_path"]
+                trigger_timesteps = int(request["timesteps"])
+                request_metadata = {
+                    "evaluation_id": request.get("evaluation_id"),
+                    "checkpoint_role": request.get(
+                        "checkpoint_role", "periodic"),
+                    "scheduled_boundary_timesteps": request.get(
+                        "scheduled_boundary_timesteps"),
+                    "replaces_scheduled_boundary_timesteps": request.get(
+                        "replaces_scheduled_boundary_timesteps"),
+                    "retain_snapshot": bool(
+                        request.get("retain_snapshot", False)),
+                }
+            else:
+                # Compatibility for any already-queued request created by the
+                # schema-v3 callback.
+                snapshot_path, trigger_timesteps = request
+                request_metadata = {
+                    "evaluation_id": None,
+                    "checkpoint_role": "periodic",
+                    "scheduled_boundary_timesteps": int(
+                        trigger_timesteps),
+                    "replaces_scheduled_boundary_timesteps": None,
+                    "retain_snapshot": False,
+                }
             install_fixed_evaluation_schedule(eval_env, fixed_schedule)
             snapshot_actual = resolve_artifact_path(snapshot_path)
             if snapshot_actual is None:
@@ -4548,7 +4861,7 @@ def _async_evaluation_worker(request_queue, result_queue, env_factory,
                     case_index, case, outcome, reward, length))
             episodes, summary, promotion_key = \
                 summarize_evaluation_episodes(episodes)
-            result_queue.put({
+            result = {
                 "timesteps": int(trigger_timesteps),
                 "snapshot_path": snapshot_path,
                 "checkpoint_sha256": checkpoint_sha256,
@@ -4557,7 +4870,9 @@ def _async_evaluation_worker(request_queue, result_queue, env_factory,
                 "episodes": episodes,
                 "summary": summary,
                 "promotion_key": list(promotion_key),
-            })
+            }
+            result.update(request_metadata)
+            result_queue.put(result)
     except Exception:
         result_queue.put({"fatal": traceback.format_exc()})
     finally:
@@ -4579,13 +4894,14 @@ class AsyncMaskableEvalCallback(BaseCallback):
     they arrive (``eval/evaluated_at_timesteps`` records the snapshot's
     true step). Qualified checkpoints are promoted to ``best_model.zip`` by
     decisive outcomes, then timeout avoidance, with shaped return only as the
-    final tie-breaker; an unqualified best-so-far candidate is recorded but not
-    published. A worker failure fails the run (strict lifecycle); outstanding
-    evaluations are awaited at training end so the final policy's score still
-    lands in the logs."""
+    final tie-breaker. One exact-byte best-candidate artifact is retained
+    independently of that publication gate. A worker failure fails the run
+    (strict lifecycle), and training end always evaluates an exact archive
+    saved after the last PPO update; those same bytes are later published as
+    ``final_model.zip``."""
 
     def __init__(self, eval_env_factory, *, eval_freq, n_eval_episodes,
-                 best_model_save_path, snapshot_dir,
+                 best_model_save_path, best_candidate_save_path, snapshot_dir,
                  fixed_evaluation_schedule=None,
                  evaluation_history_path=None, debug=False,
                  minimum_qualification_score=0.55,
@@ -4595,6 +4911,7 @@ class AsyncMaskableEvalCallback(BaseCallback):
         self.eval_freq = int(eval_freq)
         self.n_eval_episodes = int(n_eval_episodes)
         self.best_model_save_path = best_model_save_path
+        self.best_candidate_save_path = best_candidate_save_path
         self.snapshot_dir = snapshot_dir
         self.fixed_evaluation_schedule = [
             dict(case) for case in (fixed_evaluation_schedule or ())]
@@ -4619,6 +4936,10 @@ class AsyncMaskableEvalCallback(BaseCallback):
         self.best_promotion_key = None
         self.best_candidate_promotion_key = None
         self.best_candidate_timestep = None
+        self.best_candidate_artifact = None
+        self.final_model_evaluation = None
+        self._final_evaluated_snapshot_path = None
+        self._replaced_scheduled_evaluations = []
         self._evaluation_records = []
         self._skipped_evaluations = []
         self._cancelled_evaluations = []
@@ -4630,16 +4951,15 @@ class AsyncMaskableEvalCallback(BaseCallback):
         self._result_queue = None
 
     def _on_training_start(self):
-        if self.eval_freq <= 0:
-            return
         if not self.fixed_evaluation_schedule:
             raise RuntimeError(
-                "Periodic evaluation requires a fixed evaluation schedule")
+                "Checkpoint evaluation requires a fixed evaluation schedule")
         if not self.evaluation_history_path:
             raise RuntimeError(
-                "Periodic evaluation requires an evaluation history path")
+                "Checkpoint evaluation requires an evaluation history path")
         os.makedirs(self.snapshot_dir, exist_ok=True)
         os.makedirs(self.best_model_save_path, exist_ok=True)
+        os.makedirs(self.best_candidate_save_path, exist_ok=True)
         self._write_evaluation_history()
         context = multiprocessing.get_context("spawn")
         self._request_queue = context.Queue()
@@ -4653,7 +4973,9 @@ class AsyncMaskableEvalCallback(BaseCallback):
             name="async-eval-worker",
         )
         self._process.start()
-        self._next_eval_at = self.num_timesteps + self.eval_freq
+        self._next_eval_at = (
+            self.num_timesteps + self.eval_freq
+            if self.eval_freq > 0 else None)
 
     def _write_evaluation_history(self):
         if not self.evaluation_history_path:
@@ -4662,7 +4984,7 @@ class AsyncMaskableEvalCallback(BaseCallback):
             item for item in self._evaluation_records
             if item.get("promoted")]
         write_json_atomic(self.evaluation_history_path, {
-            "schema_version": 3,
+            "schema_version": 4,
             "kind": "playersim_fixed_checkpoint_evaluations",
             "schedule_sha256": self.schedule_sha256,
             "fixed_schedule": self.fixed_evaluation_schedule,
@@ -4682,11 +5004,188 @@ class AsyncMaskableEvalCallback(BaseCallback):
             ],
             "best_timestep": (
                 promoted[-1]["timesteps"] if promoted else None),
+            "best_evaluation_id": (
+                promoted[-1].get("evaluation_id") if promoted else None),
             "best_candidate_timestep": self.best_candidate_timestep,
+            "best_candidate_artifact": self.best_candidate_artifact,
+            "final_model_evaluation": self.final_model_evaluation,
+            "replaced_scheduled_evaluations":
+                self._replaced_scheduled_evaluations,
             "skipped_evaluations": self._skipped_evaluations,
             "cancelled_evaluations": self._cancelled_evaluations,
             "evaluations": self._evaluation_records,
         })
+
+    def _new_evaluation_id(self, role, timesteps):
+        sequence = (
+            len(self._evaluation_records) + self._pending_snapshots + 1)
+        return f"{role}-{int(timesteps):012d}-{sequence:04d}"
+
+    def _enqueue_evaluation(self, snapshot_path, timesteps, *,
+                            checkpoint_role="periodic",
+                            scheduled_boundary_timesteps=None,
+                            replaces_scheduled_boundary_timesteps=None,
+                            retain_snapshot=False):
+        snapshot_actual = resolve_artifact_path(snapshot_path)
+        if snapshot_actual is None:
+            raise FileNotFoundError(
+                "Evaluation snapshot save did not publish an artifact: "
+                f"{snapshot_path}")
+        request = {
+            "evaluation_id": self._new_evaluation_id(
+                checkpoint_role, timesteps),
+            "checkpoint_role": str(checkpoint_role),
+            "timesteps": int(timesteps),
+            "snapshot_path": snapshot_path,
+            "scheduled_boundary_timesteps": (
+                int(scheduled_boundary_timesteps)
+                if scheduled_boundary_timesteps is not None else None),
+            "replaces_scheduled_boundary_timesteps": (
+                int(replaces_scheduled_boundary_timesteps)
+                if replaces_scheduled_boundary_timesteps is not None
+                else None),
+            "retain_snapshot": bool(retain_snapshot),
+        }
+        self._request_queue.put(request)
+        self._pending_snapshots += 1
+        self._pending_snapshot_paths[snapshot_actual] = request
+        return request
+
+    def _candidate_path_from_artifact(self, artifact):
+        if not isinstance(artifact, dict) or not artifact.get("path"):
+            return None
+        path = str(artifact["path"]).replace("/", os.sep)
+        if not os.path.isabs(path):
+            path = os.path.join(BASE_DIR, path)
+        path = os.path.realpath(path)
+        candidate_root = os.path.realpath(self.best_candidate_save_path)
+        try:
+            if os.path.commonpath([path, candidate_root]) != candidate_root:
+                raise RuntimeError(
+                    "Candidate artifact path escaped its retention directory")
+        except ValueError as error:
+            raise RuntimeError(
+                "Candidate artifact path is on an unexpected volume") from error
+        return path
+
+    def _retain_candidate_snapshot(self, snapshot_actual, metadata,
+                                   *, retain_source):
+        os.makedirs(self.best_candidate_save_path, exist_ok=True)
+        checkpoint_sha256 = metadata["checkpoint_sha256"]
+        filename = (
+            f"eval_{int(metadata['timesteps']):012d}_"
+            f"{checkpoint_sha256}.zip")
+        destination = os.path.join(
+            self.best_candidate_save_path, filename)
+        temporary = f"{destination}.tmp"
+        try:
+            if retain_source:
+                shutil.copyfile(snapshot_actual, temporary)
+                os.replace(temporary, destination)
+            else:
+                os.replace(snapshot_actual, destination)
+        finally:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+        identity = artifact_identity(destination)
+        if (identity is None
+                or identity["sha256"] != checkpoint_sha256
+                or identity["size_bytes"]
+                != int(metadata["checkpoint_size_bytes"])):
+            try:
+                os.remove(destination)
+            except OSError:
+                pass
+            raise RuntimeError(
+                "Retained best-candidate bytes did not match the evaluated "
+                "checkpoint")
+        identity.update({
+            "timesteps": int(metadata["timesteps"]),
+            "evaluation_id": metadata["evaluation_id"],
+            "promotion_key": list(metadata["promotion_key"]),
+            "qualification_score": float(
+                metadata["qualification_score"]),
+            "qualification_interval":
+                metadata["qualification_interval"],
+            "qualified": bool(metadata["qualified"]),
+            "promoted": bool(metadata["promoted"]),
+            "schedule_sha256": self.schedule_sha256,
+            "completed_at": metadata["completed_at"],
+        })
+        return identity
+
+    def _remove_candidate_artifact(self, artifact):
+        path = self._candidate_path_from_artifact(artifact)
+        if path is None:
+            return
+        if not re.fullmatch(
+                r"eval_\d{12}_[0-9a-f]{64}\.zip",
+                os.path.basename(path)):
+            raise RuntimeError(
+                "Refusing to remove an unowned candidate artifact")
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+    def _reconcile_candidate_directory(self):
+        current_path = self._candidate_path_from_artifact(
+            self.best_candidate_artifact)
+        if current_path is not None:
+            identity = artifact_identity_from_pointer(
+                self.best_candidate_artifact)
+            if identity is None:
+                raise RuntimeError(
+                    "Committed best-candidate artifact is missing or corrupt")
+            current_path = os.path.realpath(current_path)
+        if not os.path.isdir(self.best_candidate_save_path):
+            return
+        for filename in os.listdir(self.best_candidate_save_path):
+            if not re.fullmatch(
+                    r"eval_\d{12}_[0-9a-f]{64}\.zip", filename):
+                continue
+            path = os.path.realpath(os.path.join(
+                self.best_candidate_save_path, filename))
+            if current_path is None or path != current_path:
+                try:
+                    os.remove(path)
+                except FileNotFoundError:
+                    pass
+
+    def final_evaluated_snapshot(self):
+        """Return private source details for the exact scored final archive."""
+        if (self.final_model_evaluation is None
+                or self._final_evaluated_snapshot_path is None):
+            return None
+        details = dict(self.final_model_evaluation)
+        details["source_path"] = self._final_evaluated_snapshot_path
+        return details
+
+    def record_final_model_publication(self, published_path):
+        """Bind the scored final identity to its permanent published path."""
+        if self.final_model_evaluation is None:
+            raise RuntimeError("No final checkpoint evaluation was recorded")
+        identity = artifact_identity(published_path)
+        if (identity is None
+                or identity["sha256"]
+                != self.final_model_evaluation["checkpoint_sha256"]
+                or identity["size_bytes"]
+                != self.final_model_evaluation["checkpoint_size_bytes"]):
+            raise RuntimeError(
+                "Published final model differs from the evaluated archive")
+        self.final_model_evaluation["artifact"] = identity
+        evaluation_id = self.final_model_evaluation["evaluation_id"]
+        for record in self._evaluation_records:
+            if record.get("evaluation_id") == evaluation_id:
+                record["published_artifact"] = identity
+                break
+        else:
+            raise RuntimeError(
+                "Final evaluation record disappeared before publication")
+        self._write_evaluation_history()
+        return identity
 
     def _handle_result(self, result):
         if "fatal" in result:
@@ -4765,34 +5264,50 @@ class AsyncMaskableEvalCallback(BaseCallback):
         if reported_sha256 and reported_sha256 != checkpoint_sha256:
             raise RuntimeError(
                 "Evaluated snapshot hash changed between scoring and promotion")
+        checkpoint_size_bytes = os.path.getsize(snapshot_actual)
+        checkpoint_role = result.get("checkpoint_role") or "periodic"
+        evaluation_id = (
+            result.get("evaluation_id")
+            or self._new_evaluation_id(
+                checkpoint_role, result["timesteps"]))
+        retain_snapshot = bool(result.get("retain_snapshot", False))
         candidate_promoted = (
             self.best_candidate_promotion_key is None
             or tuple(promotion_key) > self.best_candidate_promotion_key)
-        if candidate_promoted:
-            self.best_candidate_promotion_key = tuple(promotion_key)
-            self.best_candidate_timestep = int(result["timesteps"])
         promoted = qualified and (
             self.best_promotion_key is None
             or tuple(promotion_key) > self.best_promotion_key)
+        old_best_key = self.best_promotion_key
+        old_best_mean_reward = self.best_mean_reward
+        best_path = os.path.join(
+            self.best_model_save_path, "best_model.zip")
+        best_backup_path = f"{best_path}.rollback"
+        best_had_previous = os.path.isfile(best_path)
+        best_replaced = False
         if promoted:
-            self.best_promotion_key = tuple(promotion_key)
-            self.best_mean_reward = mean_reward
-            best_path = os.path.join(
-                self.best_model_save_path, "best_model.zip")
+            if os.path.exists(best_backup_path):
+                raise RuntimeError(
+                    "Stale best-model rollback artifact blocks promotion")
+            if best_had_previous:
+                shutil.copyfile(best_path, best_backup_path)
             temporary_best_path = f"{best_path}.tmp"
             try:
                 shutil.copyfile(snapshot_actual, temporary_best_path)
                 os.replace(temporary_best_path, best_path)
+                best_replaced = True
+                self.best_promotion_key = tuple(promotion_key)
+                self.best_mean_reward = mean_reward
+            except Exception:
+                try:
+                    os.remove(best_backup_path)
+                except OSError:
+                    pass
+                raise
             finally:
                 try:
                     os.remove(temporary_best_path)
                 except OSError:
                     pass
-            logging.info(
-                "New qualified fixed-suite outcome key %s (score %.3f, "
-                "95%% lower bound %.3f); "
-                "promoted the evaluated snapshot to best_model.zip",
-                promotion_key, qualification_score, qualification_lower)
         elif candidate_promoted and not qualified:
             logging.warning(
                 "Evaluation @ %s is the best candidate so far, but its "
@@ -4801,12 +5316,20 @@ class AsyncMaskableEvalCallback(BaseCallback):
                 "was not published.", result["timesteps"],
                 qualification_lower, qualification_score,
                 self.minimum_qualification_score)
-        self._evaluation_records.append({
+
+        completed_at = utc_timestamp()
+        record = {
+            "evaluation_id": evaluation_id,
+            "checkpoint_role": checkpoint_role,
             "timesteps": int(result["timesteps"]),
-            "completed_at": utc_timestamp(),
+            "scheduled_boundary_timesteps": result.get(
+                "scheduled_boundary_timesteps"),
+            "replaces_scheduled_boundary_timesteps": result.get(
+                "replaces_scheduled_boundary_timesteps"),
+            "completed_at": completed_at,
             "snapshot_name": os.path.basename(snapshot_actual),
             "checkpoint_sha256": checkpoint_sha256,
-            "checkpoint_size_bytes": os.path.getsize(snapshot_actual),
+            "checkpoint_size_bytes": checkpoint_size_bytes,
             "schedule_sha256": self.schedule_sha256,
             "promotion_key": list(promotion_key),
             "qualification_score": qualification_score,
@@ -4816,13 +5339,133 @@ class AsyncMaskableEvalCallback(BaseCallback):
             "promoted": promoted,
             "summary": summary,
             "episodes": episodes,
-        })
-        self._write_evaluation_history()
-        self._pending_snapshot_paths.pop(snapshot_actual, None)
+        }
+        if checkpoint_role == "final_model":
+            record["published_artifact"] = None
+
+        old_candidate_key = self.best_candidate_promotion_key
+        old_candidate_timestep = self.best_candidate_timestep
+        old_candidate_artifact = self.best_candidate_artifact
+        old_final_evaluation = self.final_model_evaluation
+        old_final_snapshot_path = self._final_evaluated_snapshot_path
+        new_candidate_artifact = None
+        record_appended = False
         try:
-            os.remove(snapshot_actual)
-        except OSError:
-            pass
+            if candidate_promoted:
+                candidate_metadata = {
+                    "evaluation_id": evaluation_id,
+                    "timesteps": int(result["timesteps"]),
+                    "checkpoint_sha256": checkpoint_sha256,
+                    "checkpoint_size_bytes": checkpoint_size_bytes,
+                    "promotion_key": list(promotion_key),
+                    "qualification_score": qualification_score,
+                    "qualification_interval": qualification_interval,
+                    "qualified": qualified,
+                    "promoted": promoted,
+                    "completed_at": completed_at,
+                }
+                new_candidate_artifact = self._retain_candidate_snapshot(
+                    snapshot_actual, candidate_metadata,
+                    retain_source=retain_snapshot)
+                self.best_candidate_promotion_key = tuple(promotion_key)
+                self.best_candidate_timestep = int(result["timesteps"])
+                self.best_candidate_artifact = new_candidate_artifact
+
+            if checkpoint_role == "final_model":
+                if not retain_snapshot:
+                    raise RuntimeError(
+                        "The final evaluated checkpoint must retain its source "
+                        "archive for publication")
+                self.final_model_evaluation = {
+                    "evaluation_id": evaluation_id,
+                    "timesteps": int(result["timesteps"]),
+                    "checkpoint_sha256": checkpoint_sha256,
+                    "checkpoint_size_bytes": checkpoint_size_bytes,
+                    "schedule_sha256": self.schedule_sha256,
+                    "completed_at": completed_at,
+                    "artifact": None,
+                }
+                self._final_evaluated_snapshot_path = snapshot_actual
+
+            self._evaluation_records.append(record)
+            record_appended = True
+            self._write_evaluation_history()
+        except Exception:
+            if record_appended:
+                self._evaluation_records.pop()
+            self.best_promotion_key = old_best_key
+            self.best_mean_reward = old_best_mean_reward
+            self.best_candidate_promotion_key = old_candidate_key
+            self.best_candidate_timestep = old_candidate_timestep
+            self.best_candidate_artifact = old_candidate_artifact
+            self.final_model_evaluation = old_final_evaluation
+            self._final_evaluated_snapshot_path = old_final_snapshot_path
+            if (new_candidate_artifact is not None
+                    and (old_candidate_artifact is None
+                         or old_candidate_artifact.get("path")
+                         != new_candidate_artifact.get("path"))):
+                try:
+                    self._remove_candidate_artifact(new_candidate_artifact)
+                except OSError as cleanup_error:
+                    logging.error(
+                        "Could not roll back uncommitted candidate artifact: "
+                        "%s", cleanup_error)
+            if best_replaced:
+                try:
+                    if best_had_previous:
+                        if not os.path.isfile(best_backup_path):
+                            raise FileNotFoundError(
+                                "best-model rollback backup is missing")
+                        os.replace(best_backup_path, best_path)
+                    else:
+                        try:
+                            os.remove(best_path)
+                        except FileNotFoundError:
+                            pass
+                except OSError as cleanup_error:
+                    logging.error(
+                        "Could not roll back uncommitted best model: %s",
+                        cleanup_error)
+            raise
+        else:
+            if best_replaced and best_had_previous:
+                try:
+                    os.remove(best_backup_path)
+                except OSError as cleanup_error:
+                    logging.warning(
+                        "Could not remove committed best-model rollback "
+                        "backup: %s", cleanup_error)
+
+        if promoted:
+            logging.info(
+                "New qualified fixed-suite outcome key %s (score %.3f, "
+                "95%% lower bound %.3f); "
+                "promoted the evaluated snapshot to best_model.zip",
+                promotion_key, qualification_score, qualification_lower)
+
+        if (new_candidate_artifact is not None
+                and old_candidate_artifact is not None
+                and old_candidate_artifact.get("path")
+                != new_candidate_artifact.get("path")):
+            try:
+                self._remove_candidate_artifact(old_candidate_artifact)
+            except OSError as error:
+                logging.warning(
+                    "Could not remove superseded candidate artifact: %s",
+                    error)
+        try:
+            self._reconcile_candidate_directory()
+        except OSError as error:
+            logging.warning(
+                "Candidate retention reconciliation will retry at training "
+                "end: %s", error)
+
+        self._pending_snapshot_paths.pop(snapshot_actual, None)
+        if not retain_snapshot and not candidate_promoted:
+            try:
+                os.remove(snapshot_actual)
+            except OSError:
+                pass
 
     def _drain_results(self, timeout=None):
         while True:
@@ -4859,8 +5502,11 @@ class AsyncMaskableEvalCallback(BaseCallback):
         self._process = None
 
     def _cleanup_pending_snapshots(self, reason):
-        for snapshot_path, timesteps in list(
+        for snapshot_path, request in list(
                 self._pending_snapshot_paths.items()):
+            timesteps = (
+                request.get("timesteps")
+                if isinstance(request, dict) else request)
             self._cancelled_evaluations.append({
                 "timesteps": int(timesteps),
                 "recorded_at": utc_timestamp(),
@@ -4903,7 +5549,26 @@ class AsyncMaskableEvalCallback(BaseCallback):
             raise RuntimeError(
                 "Asynchronous evaluation worker exited with evaluations "
                 "outstanding.")
-        if self.num_timesteps >= self._next_eval_at:
+        if (self._next_eval_at is not None
+                and self.num_timesteps >= self._next_eval_at):
+            terminal_target = int(
+                getattr(self.model, "_total_timesteps", 0) or 0)
+            if terminal_target and self.num_timesteps >= terminal_target:
+                boundary = int(self._next_eval_at)
+                self._replaced_scheduled_evaluations.append({
+                    "scheduled_boundary_timesteps": boundary,
+                    "observed_at_timesteps": int(self.num_timesteps),
+                    "recorded_at": utc_timestamp(),
+                    "reason": "replaced_by_post_update_final_evaluation",
+                })
+                logging.info(
+                    "Deferring the terminal %s-step evaluation boundary; "
+                    "the post-update final archive will replace it.",
+                    boundary)
+                while self._next_eval_at <= self.num_timesteps:
+                    self._next_eval_at += self.eval_freq
+                self._write_evaluation_history()
+                return True
             if self._pending_snapshots >= 2:
                 # The evaluator cannot keep up with the requested cadence.
                 # Skip this boundary instead of queueing an unbounded
@@ -4916,19 +5581,15 @@ class AsyncMaskableEvalCallback(BaseCallback):
                     self.num_timesteps, "evaluation_backlog",
                     self._pending_snapshots)
             else:
+                scheduled_boundary = int(self._next_eval_at)
                 snapshot_path = os.path.join(
                     self.snapshot_dir,
                     f"eval_snapshot_{self.num_timesteps}_steps")
                 self.model.save(snapshot_path)
-                snapshot_actual = resolve_artifact_path(snapshot_path)
-                if snapshot_actual is None:
-                    raise FileNotFoundError(
-                        "Evaluation snapshot save did not publish an artifact: "
-                        f"{snapshot_path}")
-                self._request_queue.put((snapshot_path, self.num_timesteps))
-                self._pending_snapshots += 1
-                self._pending_snapshot_paths[snapshot_actual] = int(
-                    self.num_timesteps)
+                self._enqueue_evaluation(
+                    snapshot_path, self.num_timesteps,
+                    checkpoint_role="periodic",
+                    scheduled_boundary_timesteps=scheduled_boundary)
             while self._next_eval_at <= self.num_timesteps:
                 self._next_eval_at += self.eval_freq
         return True
@@ -4938,21 +5599,61 @@ class AsyncMaskableEvalCallback(BaseCallback):
             return
         failure = None
         try:
+            if self._pending_snapshots > 0 and not self._process.is_alive():
+                raise RuntimeError(
+                    "Asynchronous evaluation worker exited with evaluations "
+                    "outstanding.")
+            if not self._process.is_alive():
+                raise RuntimeError(
+                    "Asynchronous evaluation worker exited before the final "
+                    "checkpoint could be scored.")
+            final_timesteps = int(getattr(
+                self.model, "num_timesteps", self.num_timesteps))
+            final_snapshot_path = os.path.join(
+                self.snapshot_dir,
+                f"final_model_{final_timesteps}_evaluated")
+            self.model.save(final_snapshot_path)
+            replaced_boundary = (
+                self._replaced_scheduled_evaluations[-1][
+                    "scheduled_boundary_timesteps"]
+                if self._replaced_scheduled_evaluations else None)
+            self._enqueue_evaluation(
+                final_snapshot_path, final_timesteps,
+                checkpoint_role="final_model",
+                replaces_scheduled_boundary_timesteps=replaced_boundary,
+                retain_snapshot=True)
             deadline = time.time() + self.final_result_timeout_seconds
             while (self._pending_snapshots > 0 and self._process.is_alive()
                    and time.time() < deadline):
                 self._drain_results(timeout=5.0)
+            # A worker may publish its fatal/result message immediately before
+            # exiting. Drain once more even when is_alive() just turned false
+            # so the attributable root cause is not replaced by a generic
+            # outstanding-work error.
+            self._drain_results()
             if self._pending_snapshots > 0:
                 failure = RuntimeError(
                     "%s fixed evaluation result(s) remained outstanding at "
                     "training end; refusing to publish an unevaluated run."
                     % self._pending_snapshots)
+            elif self.final_model_evaluation is None:
+                failure = RuntimeError(
+                    "The final checkpoint evaluation did not produce an "
+                    "attributable result.")
+            else:
+                self._reconcile_candidate_directory()
         except Exception as error:
             failure = error
         finally:
             self._shutdown_worker()
             if failure is not None:
                 self._cleanup_pending_snapshots("training_end_failure")
+                if self._final_evaluated_snapshot_path is not None:
+                    try:
+                        os.remove(self._final_evaluated_snapshot_path)
+                    except OSError:
+                        pass
+                    self._final_evaluated_snapshot_path = None
         if failure is not None:
             raise failure
 
@@ -4982,10 +5683,11 @@ def create_callbacks(eval_env_factory, run_id, args, num_train_envs=1,
 
     run_model_dir = os.path.join(MODEL_DIR, run_id)
     best_model_dir = os.path.join(run_model_dir, 'best_model')
+    best_candidate_dir = os.path.join(run_model_dir, 'best_candidate')
     checkpoint_dir = os.path.join(run_model_dir, 'checkpoints')
     snapshot_dir = os.path.join(run_model_dir, 'eval_snapshots')
     evaluation_log_dir = os.path.join(LOG_DIR, run_id, 'evaluation')
-    for path in (best_model_dir, checkpoint_dir, snapshot_dir,
+    for path in (best_model_dir, best_candidate_dir, checkpoint_dir, snapshot_dir,
                  evaluation_log_dir):
         os.makedirs(path, exist_ok=True)
 
@@ -4997,6 +5699,7 @@ def create_callbacks(eval_env_factory, run_id, args, num_train_envs=1,
         eval_freq=args.eval_freq,
         n_eval_episodes=getattr(args, "eval_episodes", 64),
         best_model_save_path=best_model_dir,
+        best_candidate_save_path=best_candidate_dir,
         snapshot_dir=snapshot_dir,
         fixed_evaluation_schedule=evaluation_schedule,
         evaluation_history_path=os.path.join(
@@ -5419,6 +6122,10 @@ def main():
             args.decks, args.format, args.format_dir)
         run_subtype_vocab = tuple(Card.SUBTYPE_VOCAB)
         manifest["lineage"] = lineage
+        if resume_lineage is not None:
+            resume_lineage["current_strategy_profile_lineage"] = (
+                validate_resume_strategy_lineage(
+                    resume_lineage, lineage))
         logging.info(
             "Loaded %s decks with %s unique cards", len(decks), len(card_db))
 
@@ -5739,10 +6446,50 @@ def main():
             logging.info(
                 f"Saved feature extractor to {feature_extractor_path}")
 
+        actual_num_timesteps = int(getattr(
+            model, "num_timesteps", initial_num_timesteps + args.timesteps))
         pending_model_path = os.path.join(run_model_dir, "pending_model")
         final_model_path = os.path.join(run_model_dir, "final_model")
-        logging.info("Saving pending model to %s", pending_model_path)
-        model.save(pending_model_path)
+        final_eval_callback = next((
+            callback for callback in (callbacks or ())
+            if isinstance(callback, AsyncMaskableEvalCallback)), None)
+        final_evaluation = (
+            final_eval_callback.final_evaluated_snapshot()
+            if final_eval_callback is not None else None)
+        if final_eval_callback is not None:
+            if final_evaluation is None:
+                raise RuntimeError(
+                    "Training ended without an attributable final checkpoint "
+                    "evaluation")
+            if int(final_evaluation["timesteps"]) != actual_num_timesteps:
+                raise RuntimeError(
+                    "Final checkpoint evaluation timestep does not match the "
+                    "trained model state")
+            evaluated_source = resolve_artifact_path(
+                final_evaluation["source_path"])
+            if evaluated_source is None:
+                raise FileNotFoundError(
+                    "The exact evaluated final archive disappeared before "
+                    "publication")
+            evaluated_identity = artifact_identity(evaluated_source)
+            if (evaluated_identity is None
+                    or evaluated_identity["sha256"]
+                    != final_evaluation["checkpoint_sha256"]
+                    or evaluated_identity["size_bytes"]
+                    != final_evaluation["checkpoint_size_bytes"]):
+                raise RuntimeError(
+                    "The retained final archive differs from its evaluation "
+                    "record")
+            pending_actual_destination = f"{pending_model_path}.zip"
+            logging.info(
+                "Moving exact evaluated final archive to %s",
+                pending_actual_destination)
+            os.replace(evaluated_source, pending_actual_destination)
+        else:
+            # Compatibility for lightweight model test doubles whose mocked
+            # callback list does not run SB3 lifecycle hooks.
+            logging.info("Saving pending model to %s", pending_model_path)
+            model.save(pending_model_path)
         pending_actual_path = resolve_artifact_path(pending_model_path)
         if pending_actual_path is not None:
             # The evaluation env lives in the async worker during training;
@@ -5750,12 +6497,27 @@ def main():
             eval_env = make_evaluation_vec_env()
             manifest["validation"] = validate_training_checkpoint(
                 pending_model_path, eval_env, device=selected_device,
-                seed=eval_seed)
+                seed=eval_seed,
+                expected_sha256=(
+                    final_evaluation["checkpoint_sha256"]
+                    if final_evaluation is not None else None),
+                expected_num_timesteps=(
+                    final_evaluation["timesteps"]
+                    if final_evaluation is not None else None))
             final_actual_path = (
                 f"{final_model_path}.zip"
                 if pending_actual_path.lower().endswith(".zip")
                 else final_model_path)
             os.replace(pending_actual_path, final_actual_path)
+            if final_eval_callback is not None:
+                published_identity = (
+                    final_eval_callback.record_final_model_publication(
+                        final_actual_path))
+                if (published_identity["sha256"]
+                        != manifest["validation"]["checkpoint_sha256"]):
+                    raise RuntimeError(
+                        "Final publication hash differs from checkpoint "
+                        "validation")
         else:
             # Test doubles may record save calls without creating a file. Real
             # SB3 models always take the validated atomic-publish branch above.
@@ -5765,8 +6527,6 @@ def main():
                 "reason": "model test double did not create a checkpoint",
             }
 
-        actual_num_timesteps = int(getattr(
-            model, "num_timesteps", initial_num_timesteps + args.timesteps))
         added_timesteps = max(0, actual_num_timesteps - initial_num_timesteps)
         manifest["metrics"] = {
             "requested_added_timesteps": args.timesteps,
@@ -5789,8 +6549,6 @@ def main():
         manifest["phase"] = "complete"
         manifest["timestamps"]["finished_at"] = utc_timestamp()
         manifest["timestamps"]["duration_seconds"] = training_duration
-        manifest["artifacts"] = training_artifacts(run_model_dir, run_id)
-        publish_manifest()
         exit_code = 0
 
     except (Exception, KeyboardInterrupt) as e:
@@ -5851,7 +6609,6 @@ def main():
         manifest["phase"] = current_phase
         manifest["timestamps"]["finished_at"] = utc_timestamp()
         manifest["timestamps"]["duration_seconds"] = duration
-        manifest["artifacts"] = training_artifacts(run_model_dir, run_id)
         incomplete_details = {
             "type": type(e).__name__,
             "message": str(e),
@@ -5864,10 +6621,6 @@ def main():
             manifest["failure"] = None
         else:
             manifest["failure"] = incomplete_details
-        try:
-            publish_manifest()
-        except Exception as manifest_error:
-            logging.error("Could not publish failure manifest: %s", manifest_error)
         if was_interrupted:
             exit_code = 130
     finally:
@@ -5896,8 +6649,25 @@ def main():
         logging.warning(f"Training run {run_id} was interrupted")
     else:
         logging.error(f"Training run {run_id} failed")
-    logging.getLogger().removeHandler(run_log_handler)
-    run_log_handler.close()
+    # The terminal manifest is canonical only after every environment-close
+    # message and the final status line have landed in training.log. Detach
+    # and close that handler before hashing so nothing can append afterward.
+    try:
+        run_log_handler.flush()
+    finally:
+        logging.getLogger().removeHandler(run_log_handler)
+        run_log_handler.close()
+    manifest["artifacts"] = training_artifacts(run_model_dir, run_id)
+    try:
+        publish_manifest()
+    except Exception as manifest_error:
+        # The run-log handler is deliberately already closed; reporting this
+        # through remaining handlers cannot invalidate its recorded identity.
+        logging.error(
+            "Could not publish terminal training manifest: %s",
+            manifest_error)
+        if exit_code == 0:
+            exit_code = 1
     return exit_code
     
 if __name__ == "__main__":

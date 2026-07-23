@@ -3933,7 +3933,34 @@
   "format": "standard",
   "meta_share": 0.115,
   "name": "4c Control",
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "https://www.mtggoldfish.com/deck/7852932",
-  "source_corpus": "metagame_corpus_2026-07-11.json"
+  "source_corpus": "metagame_corpus_2026-07-11.json",
+  "strategy_profile": {
+    "axes": {
+      "board_width": 18,
+      "card_advantage": 92,
+      "combo_dependency": 10,
+      "graveyard_dependency": 15,
+      "instant_speed": 82,
+      "interaction": 92,
+      "mana_acceleration": 5,
+      "speed": 15,
+      "synergy_dependency": 35,
+      "threat_density": 12
+    },
+    "primary": "control",
+    "review": {
+      "basis": "Pinned 60-card main deck reviewed against card rules text.",
+      "reviewed_at": "2026-07-22",
+      "status": "reviewed"
+    },
+    "secondary": null,
+    "tags": [
+      "board_control",
+      "burn"
+    ],
+    "taxonomy_version": 1
+  },
+  "strategy_profile_hash": "aae102271fac8ca3619af12d1b202d4960aa8f0c6792962e8612e8d8a714cbb0"
 }

@@ -2647,7 +2647,36 @@
   "format": "standard",
   "meta_share": 0.123,
   "name": "Izzet Prowess",
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "https://www.mtggoldfish.com/deck/7859084",
-  "source_corpus": "metagame_corpus_2026-07-11.json"
+  "source_corpus": "metagame_corpus_2026-07-11.json",
+  "strategy_profile": {
+    "axes": {
+      "board_width": 50,
+      "card_advantage": 60,
+      "combo_dependency": 22,
+      "graveyard_dependency": 20,
+      "instant_speed": 85,
+      "interaction": 58,
+      "mana_acceleration": 5,
+      "speed": 88,
+      "synergy_dependency": 82,
+      "threat_density": 42
+    },
+    "primary": "tempo",
+    "review": {
+      "basis": "Pinned 60-card main deck reviewed against card rules text.",
+      "reviewed_at": "2026-07-22",
+      "status": "reviewed"
+    },
+    "secondary": "aggro",
+    "tags": [
+      "burn",
+      "prowess",
+      "spellslinger",
+      "tokens"
+    ],
+    "taxonomy_version": 1
+  },
+  "strategy_profile_hash": "16b96eb26b5c78f7e4a2588dd3db234379071d4f34824d166bca1b41814f5dda"
 }

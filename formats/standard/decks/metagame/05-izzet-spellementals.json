@@ -3319,7 +3319,35 @@
   "format": "standard",
   "meta_share": 0.087,
   "name": "Izzet Spellementals",
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "https://www.mtggoldfish.com/deck/7848755",
-  "source_corpus": "metagame_corpus_2026-07-11.json"
+  "source_corpus": "metagame_corpus_2026-07-11.json",
+  "strategy_profile": {
+    "axes": {
+      "board_width": 45,
+      "card_advantage": 72,
+      "combo_dependency": 30,
+      "graveyard_dependency": 60,
+      "instant_speed": 88,
+      "interaction": 65,
+      "mana_acceleration": 5,
+      "speed": 62,
+      "synergy_dependency": 78,
+      "threat_density": 38
+    },
+    "primary": "tempo",
+    "review": {
+      "basis": "Pinned 60-card main deck reviewed against card rules text.",
+      "reviewed_at": "2026-07-22",
+      "status": "reviewed"
+    },
+    "secondary": "midrange",
+    "tags": [
+      "burn",
+      "graveyard",
+      "spellslinger"
+    ],
+    "taxonomy_version": 1
+  },
+  "strategy_profile_hash": "261d515e4bf01f5dbe5df1b1d7ba6f196a803094bc41c7537cd81b5a0e34abb8"
 }

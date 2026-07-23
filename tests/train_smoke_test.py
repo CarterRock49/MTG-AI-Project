@@ -359,6 +359,49 @@ def check_mask_aware_evaluation():
                 num_envs=8,
                 selected_device="cuda",
             )
+            empty_strategy_lineage = m.strategy_profile_lineage([])
+            strategy_contract = m.strategy_profile_lineage_contract(
+                empty_strategy_lineage)
+            strategy_canary = json.loads(json.dumps(canary))
+            strategy_canary["lineage"].update(strategy_contract)
+            strategy_runtime_lineage = {
+                "card_registry": {"sha256": canary["lineage"][
+                    "card_registry_sha256"]},
+                "feature_schema": {"sha256": canary["lineage"][
+                    "feature_schema_sha256"]},
+                "corpus": {"sha256": canary["lineage"]["corpus_sha256"]},
+                "strategy_profiles": empty_strategy_lineage,
+            }
+            m.validate_canary_runtime(
+                strategy_canary,
+                lineage=strategy_runtime_lineage,
+                training_config=canary["training_config"],
+                curriculum=canary_curriculum,
+                schedule_sha256=canary["lineage"][
+                    "evaluation_schedule_sha256"],
+                num_envs=8,
+                selected_device="cuda",
+            )
+            drifted_strategy_lineage = json.loads(json.dumps(
+                strategy_runtime_lineage))
+            drifted_strategy_lineage["strategy_profiles"]["classifier"][
+                "sha256"] = "0" * 64
+            try:
+                m.validate_canary_runtime(
+                    strategy_canary,
+                    lineage=drifted_strategy_lineage,
+                    training_config=canary["training_config"],
+                    curriculum=canary_curriculum,
+                    schedule_sha256=canary["lineage"][
+                        "evaluation_schedule_sha256"],
+                    num_envs=8,
+                    selected_device="cuda",
+                )
+            except RuntimeError as error:
+                assert "strategy_classifier_sha256" in str(error)
+            else:
+                raise AssertionError(
+                    "named canary accepted strategy-classifier drift")
             drifted_curriculum = json.loads(json.dumps(canary_curriculum))
             drifted_curriculum["stages"][-1]["handicap"]["start"] = 0.99
             try:
@@ -616,6 +659,8 @@ def check_mask_aware_evaluation():
             assert callbacks[1].save_freq == 10
             assert callbacks[0].best_model_save_path == os.path.join(
                 m.MODEL_DIR, "mask_smoke", "best_model")
+            assert callbacks[0].best_candidate_save_path == os.path.join(
+                m.MODEL_DIR, "mask_smoke", "best_candidate")
             assert callbacks[0].snapshot_dir == os.path.join(
                 m.MODEL_DIR, "mask_smoke", "eval_snapshots")
             assert callbacks[1].save_path == os.path.join(
@@ -853,7 +898,19 @@ def check_mask_aware_evaluation():
                 async_eval.best_model_save_path, "best_model.zip")
             assert not os.path.isfile(best_path), (
                 "an unqualified snapshot was published as best")
-            assert not os.path.exists(snapshot), "snapshot was not cleaned up"
+            assert not os.path.exists(snapshot), (
+                "candidate snapshot was not moved out of the transient area")
+            first_candidate = dict(async_eval.best_candidate_artifact)
+            first_candidate_identity = m.artifact_identity_from_pointer(
+                first_candidate)
+            assert first_candidate_identity is not None
+            first_candidate_path = (
+                first_candidate["path"].replace("/", os.sep))
+            if not os.path.isabs(first_candidate_path):
+                first_candidate_path = os.path.join(
+                    m.BASE_DIR, first_candidate_path)
+            with open(first_candidate_path, "rb") as handle:
+                assert handle.read() == b"snapshot-bytes"
             assert metrics["eval/decisive_wins"] == 1
             assert metrics["eval/timeouts"] == 1
             assert metrics["eval/evaluated_at_timesteps"] == 10
@@ -872,6 +929,20 @@ def check_mask_aware_evaluation():
                 assert handle.read() == b"outcome-bytes", (
                     "fewer timeouts did not beat higher shaped reward")
             assert not os.path.exists(better_outcome)
+            second_candidate = dict(async_eval.best_candidate_artifact)
+            second_candidate_path = (
+                second_candidate["path"].replace("/", os.sep))
+            if not os.path.isabs(second_candidate_path):
+                second_candidate_path = os.path.join(
+                    m.BASE_DIR, second_candidate_path)
+            assert not os.path.exists(first_candidate_path), (
+                "superseded candidate was not removed")
+            with open(second_candidate_path, "rb") as handle:
+                assert handle.read() == b"outcome-bytes"
+            assert len([
+                name for name in os.listdir(
+                    async_eval.best_candidate_save_path)
+                if name.endswith(".zip")]) == 1
 
             reward_only = os.path.join(
                 async_eval.snapshot_dir, "eval_snapshot_30_steps.zip")
@@ -887,6 +958,7 @@ def check_mask_aware_evaluation():
                 assert handle.read() == b"outcome-bytes", (
                     "shaped mean reward overrode decisive outcome quality")
             assert not os.path.exists(reward_only)
+            assert async_eval.best_candidate_artifact == second_candidate
 
             history_path = os.path.join(
                 m.LOG_DIR, "mask_smoke", "evaluation", "evaluations.json")
@@ -900,13 +972,17 @@ def check_mask_aware_evaluation():
             assert history["evaluations"][1]["qualified"] is True
             assert history["evaluations"][1]["promoted"] is True
             assert history["evaluations"][2]["promoted"] is False
-            assert history["schema_version"] == 3
+            assert history["schema_version"] == 4
             assert history["minimum_qualification_score"] == 0.30
             assert history["qualification_rule"]["metric"] == \
                 "qualification_interval.lower_bound"
             assert history["evaluations"][1]["qualification_interval"][
                 "lower_bound"] >= 0.30
             assert history["best_candidate_timestep"] == 20
+            assert history["best_candidate_artifact"] == second_candidate
+            assert (
+                history["best_candidate_artifact"]["sha256"]
+                == history["evaluations"][1]["checkpoint_sha256"])
             assert len(history["evaluations"][0]["checkpoint_sha256"]) == 64
             assert history["evaluations"][0]["episodes"][0][
                 "case"] == fixed_schedule[0]
@@ -916,6 +992,194 @@ def check_mask_aware_evaluation():
             assert history_summary["evaluation_points"] == 3
             assert history_summary["best_timestep"] == 20
             assert history_summary["qualified_evaluation_points"] == 1
+            assert (
+                history_summary["best_candidate_artifact"]
+                == second_candidate)
+            assert history_summary["periodic_evaluation_points"] == 3
+            assert history_summary["final_evaluation_points"] == 0
+
+            # The mandatory post-update result retains its exact source bytes;
+            # publishing moves that archive rather than re-saving the model.
+            final_snapshot = os.path.join(
+                async_eval.snapshot_dir,
+                "final_model_37_evaluated.zip")
+            with open(final_snapshot, "wb") as handle:
+                handle.write(b"exact-final-evaluated-bytes")
+            final_result = result_for(
+                final_snapshot, 37,
+                [("loss", "life_total"), ("loss", "life_total"),
+                 ("loss", "life_total"), ("loss", "life_total")],
+                [-1.0, -1.0, -1.0, -1.0])
+            final_result.update({
+                "evaluation_id": "final_model-000000000037-0004",
+                "checkpoint_role": "final_model",
+                "retain_snapshot": True,
+                "replaces_scheduled_boundary_timesteps": 30,
+            })
+            async_eval._pending_snapshots = 1
+            async_eval._handle_result(final_result)
+            retained_final = async_eval.final_evaluated_snapshot()
+            assert retained_final["timesteps"] == 37
+            assert os.path.isfile(final_snapshot)
+            published_final = os.path.join(
+                m.MODEL_DIR, "mask_smoke", "final_model.zip")
+            os.replace(final_snapshot, published_final)
+            final_identity = async_eval.record_final_model_publication(
+                published_final)
+            assert (
+                final_identity["sha256"]
+                == retained_final["checkpoint_sha256"])
+            with open(published_final, "rb") as handle:
+                assert handle.read() == b"exact-final-evaluated-bytes"
+            final_summary = m.evaluation_history_summary("mask_smoke")
+            assert final_summary["evaluation_points"] == 4
+            assert final_summary["periodic_evaluation_points"] == 3
+            assert final_summary["final_evaluation_points"] == 1
+            assert final_summary["final_model_evaluation"][
+                "artifact"]["sha256"] == final_identity["sha256"]
+            manifest_artifacts = m.training_artifacts(
+                os.path.join(m.MODEL_DIR, "mask_smoke"), "mask_smoke")
+            assert (
+                manifest_artifacts["best_candidate_model"]["sha256"]
+                == second_candidate["sha256"])
+            assert (
+                manifest_artifacts["final_model"]["sha256"]
+                == final_summary["final_model_evaluation"][
+                    "checkpoint_sha256"])
+            with open(history_path, encoding="utf-8") as handle:
+                committed_history = json.load(handle)
+            tampered_history = json.loads(json.dumps(committed_history))
+            tampered_history["final_model_evaluation"]["timesteps"] += 1
+            m.write_json_atomic(history_path, tampered_history)
+            tampered_summary = m.evaluation_history_summary("mask_smoke")
+            assert tampered_summary["status"] == "unreadable"
+            assert "checkpoint record" in tampered_summary["error"]
+            m.write_json_atomic(history_path, committed_history)
+
+            # Candidate ranking and publication qualification are independent:
+            # a later, higher-reward result may become retained evidence while
+            # an older qualified model remains the only published best model.
+            with tempfile.TemporaryDirectory() as gate_root:
+                gate_best = os.path.join(gate_root, "best")
+                gate_candidates = os.path.join(gate_root, "candidates")
+                gate_snapshots = os.path.join(gate_root, "snapshots")
+                gate_history = os.path.join(
+                    gate_root, "evaluation", "evaluations.json")
+                for directory in (
+                        gate_best, gate_candidates, gate_snapshots,
+                        os.path.dirname(gate_history)):
+                    os.makedirs(directory)
+                gate_callback = m.AsyncMaskableEvalCallback(
+                    lambda: eval_env,
+                    eval_freq=10,
+                    n_eval_episodes=len(fixed_schedule),
+                    best_model_save_path=gate_best,
+                    best_candidate_save_path=gate_candidates,
+                    snapshot_dir=gate_snapshots,
+                    fixed_evaluation_schedule=fixed_schedule,
+                    evaluation_history_path=gate_history,
+                    minimum_qualification_score=0.10,
+                )
+                gate_callback.model = SimpleNamespace(logger=fake_logger)
+
+                qualified_snapshot = os.path.join(
+                    gate_snapshots, "qualified.zip")
+                with open(qualified_snapshot, "wb") as handle:
+                    handle.write(b"qualified-published-bytes")
+                gate_callback._pending_snapshots = 1
+                gate_callback._handle_result(result_for(
+                    qualified_snapshot, 10,
+                    [("win", "life_total"), ("loss", "life_total"),
+                     ("win", "life_total"), ("loss", "life_total")],
+                    [-1.0, -1.0, -1.0, -1.0]))
+                gate_best_path = os.path.join(
+                    gate_best, "best_model.zip")
+                with open(gate_best_path, "rb") as handle:
+                    assert handle.read() == b"qualified-published-bytes"
+
+                unqualified_candidate = os.path.join(
+                    gate_snapshots, "unqualified_better.zip")
+                with open(unqualified_candidate, "wb") as handle:
+                    handle.write(b"unqualified-candidate-bytes")
+                gate_callback._pending_snapshots = 1
+                gate_callback._handle_result(result_for(
+                    unqualified_candidate, 20,
+                    [("win", "life_total"), ("win", "life_total"),
+                     ("loss", "life_total"), ("loss", "life_total")],
+                    [1.0, 1.0, 1.0, 1.0]))
+                assert gate_callback.best_candidate_timestep == 20
+                with open(gate_best_path, "rb") as handle:
+                    assert handle.read() == b"qualified-published-bytes"
+                gate_candidate_identity = (
+                    m.artifact_identity_from_pointer(
+                        gate_callback.best_candidate_artifact))
+                assert (
+                    gate_candidate_identity["sha256"]
+                    == m.sha256_file(
+                        gate_callback._candidate_path_from_artifact(
+                            gate_callback.best_candidate_artifact)))
+                with open(gate_history, encoding="utf-8") as handle:
+                    gate_payload = json.load(handle)
+                assert gate_payload["evaluations"][0]["qualified"] is True
+                assert gate_payload["evaluations"][0]["promoted"] is True
+                assert gate_payload["evaluations"][1]["qualified"] is False
+                assert gate_payload["evaluations"][1]["promoted"] is False
+                assert gate_payload["evaluations"][1][
+                    "candidate_promoted"] is True
+                rollback_candidate = dict(
+                    gate_callback.best_candidate_artifact)
+                rollback_candidate_path = (
+                    gate_callback._candidate_path_from_artifact(
+                        rollback_candidate))
+                rollback_snapshot = os.path.join(
+                    gate_snapshots, "history_write_failure.zip")
+                with open(rollback_snapshot, "wb") as handle:
+                    handle.write(b"must-not-survive-history-failure")
+                rollback_best_key = gate_callback.best_promotion_key
+                rollback_best_mean = gate_callback.best_mean_reward
+                with open(gate_best_path, "rb") as handle:
+                    rollback_best_bytes = handle.read()
+                original_history_writer = (
+                    gate_callback._write_evaluation_history)
+                original_threshold = (
+                    gate_callback.minimum_qualification_score)
+                gate_callback.minimum_qualification_score = 0.0
+
+                def fail_history_write():
+                    raise OSError("synthetic history publication failure")
+
+                gate_callback._write_evaluation_history = fail_history_write
+                gate_callback._pending_snapshots = 1
+                try:
+                    gate_callback._handle_result(result_for(
+                        rollback_snapshot, 30,
+                        [("win", "life_total")] * 4,
+                        [2.0, 2.0, 2.0, 2.0]))
+                except OSError as error:
+                    assert "synthetic history" in str(error)
+                else:
+                    raise AssertionError(
+                        "promotion survived a failed history publication")
+                finally:
+                    gate_callback._write_evaluation_history = (
+                        original_history_writer)
+                    gate_callback.minimum_qualification_score = (
+                        original_threshold)
+                assert (
+                    gate_callback.best_candidate_artifact
+                    == rollback_candidate)
+                assert gate_callback.best_promotion_key == rollback_best_key
+                assert gate_callback.best_mean_reward == rollback_best_mean
+                with open(gate_best_path, "rb") as handle:
+                    assert handle.read() == rollback_best_bytes
+                assert not os.path.exists(gate_best_path + ".rollback")
+                assert os.path.isfile(rollback_candidate_path)
+                assert not os.path.exists(rollback_snapshot)
+                assert len([
+                    name for name in os.listdir(gate_candidates)
+                    if name.endswith(".zip")]) == 1
+                with open(gate_history, encoding="utf-8") as handle:
+                    assert len(json.load(handle)["evaluations"]) == 2
             try:
                 async_eval._handle_result({"fatal": "worker exploded"})
             except RuntimeError as error:
@@ -949,6 +1213,8 @@ def check_mask_aware_evaluation():
             async_eval._pending_snapshot_paths[cancelled_snapshot] = 40
             async_eval.cancel_pending("test_interruption")
             assert not os.path.exists(cancelled_snapshot)
+            assert os.path.isfile(second_candidate_path), (
+                "cancellation removed committed candidate evidence")
             with open(history_path, encoding="utf-8") as handle:
                 cancelled_history = json.load(handle)
             assert cancelled_history["cancelled_evaluations"][-1][
@@ -970,11 +1236,125 @@ def check_mask_aware_evaluation():
             try:
                 async_eval._on_training_end()
             except RuntimeError as error:
-                assert "refusing to publish" in str(error)
+                assert (
+                    "evaluations outstanding" in str(error)
+                    or "refusing to publish" in str(error))
             else:
                 raise AssertionError(
                     "training end accepted a missing fixed evaluation")
             assert async_eval._process is None
+
+            # A cadence boundary observed on the terminal rollout is
+            # pre-update, so it is replaced by one mandatory post-update
+            # final-model evaluation.
+            with tempfile.TemporaryDirectory() as terminal_root:
+                terminal_snapshots = os.path.join(
+                    terminal_root, "eval_snapshots")
+                terminal_candidates = os.path.join(
+                    terminal_root, "best_candidate")
+                terminal_best = os.path.join(
+                    terminal_root, "best_model")
+                terminal_history = os.path.join(
+                    terminal_root, "evaluation", "evaluations.json")
+                for directory in (
+                        terminal_snapshots, terminal_candidates,
+                        terminal_best, os.path.dirname(terminal_history)):
+                    os.makedirs(directory)
+
+                terminal_results = queue.Queue()
+
+                class TerminalModel:
+                    def __init__(self):
+                        self.num_timesteps = 104
+                        self._total_timesteps = 100
+                        self.logger = fake_logger
+                        self.saved_paths = []
+
+                    def save(self, path):
+                        self.saved_paths.append(path)
+                        with open(f"{path}.zip", "wb") as handle:
+                            handle.write(b"post-update-final-state")
+
+                class LiveTerminalProcess:
+                    def __init__(self):
+                        self.alive = True
+
+                    def is_alive(self):
+                        return self.alive
+
+                    def join(self, timeout=None):
+                        self.alive = False
+
+                    def terminate(self):
+                        self.alive = False
+
+                class TerminalRequestQueue:
+                    def put(self, request):
+                        if request is None:
+                            return
+                        episodes = []
+                        for index, case in enumerate(fixed_schedule):
+                            episodes.append({
+                                "case_index": index,
+                                "case": dict(case),
+                                "game_result": "loss",
+                                "terminal_reason": "life_total",
+                                "reward": -1.0,
+                                "length": 20,
+                            })
+                        terminal_results.put({
+                            "evaluation_id": request["evaluation_id"],
+                            "checkpoint_role":
+                                request["checkpoint_role"],
+                            "timesteps": request["timesteps"],
+                            "snapshot_path": request["snapshot_path"],
+                            "scheduled_boundary_timesteps":
+                                request["scheduled_boundary_timesteps"],
+                            "replaces_scheduled_boundary_timesteps":
+                                request[
+                                    "replaces_scheduled_boundary_timesteps"],
+                            "retain_snapshot":
+                                request["retain_snapshot"],
+                            "schedule_sha256":
+                                terminal_callback.schedule_sha256,
+                            "episodes": episodes,
+                        })
+
+                terminal_callback = m.AsyncMaskableEvalCallback(
+                    lambda: eval_env,
+                    eval_freq=100,
+                    n_eval_episodes=len(fixed_schedule),
+                    best_model_save_path=terminal_best,
+                    best_candidate_save_path=terminal_candidates,
+                    snapshot_dir=terminal_snapshots,
+                    fixed_evaluation_schedule=fixed_schedule,
+                    evaluation_history_path=terminal_history,
+                )
+                terminal_model = TerminalModel()
+                terminal_callback.model = terminal_model
+                terminal_callback.num_timesteps = 100
+                terminal_callback._process = LiveTerminalProcess()
+                terminal_callback._request_queue = TerminalRequestQueue()
+                terminal_callback._result_queue = terminal_results
+                terminal_callback._next_eval_at = 100
+                assert terminal_callback._on_step()
+                assert not terminal_model.saved_paths
+                assert terminal_callback._replaced_scheduled_evaluations[
+                    -1]["scheduled_boundary_timesteps"] == 100
+                terminal_callback._on_training_end()
+                final_details = (
+                    terminal_callback.final_evaluated_snapshot())
+                assert final_details["timesteps"] == 104
+                assert (
+                    final_details["checkpoint_sha256"]
+                    == m.sha256_file(final_details["source_path"]))
+                with open(terminal_history, encoding="utf-8") as handle:
+                    terminal_history_payload = json.load(handle)
+                final_record = terminal_history_payload["evaluations"][-1]
+                assert final_record["checkpoint_role"] == "final_model"
+                assert final_record[
+                    "replaces_scheduled_boundary_timesteps"] == 100
+                assert len(terminal_history_payload["evaluations"]) == 1
             network_callbacks = [
                 callback for callback in callbacks
                 if isinstance(callback, m.NetworkRecordingCallback)]
@@ -1385,9 +1765,13 @@ def check_runtime_configuration():
         with open(checkpoint_path, "wb") as handle:
             handle.write(b"checkpoint")
         resume_manifest_path = os.path.join(run_dir, "training_run.json")
+        empty_strategy_lineage = m.strategy_profile_lineage([])
         resume_manifest = {
             "kind": "playersim_training_run",
             "run_id": "compatible-v5",
+            "lineage": {
+                "strategy_profiles": empty_strategy_lineage,
+            },
             "resolved": {
                 "training_config": {
                     "reward_contract_version":
@@ -1404,6 +1788,23 @@ def check_runtime_configuration():
             json.dump(resume_manifest, handle)
         lineage = m.validate_resume_lineage(checkpoint_path, "none")
         assert lineage["run_id"] == "compatible-v5"
+        current_strategy_lineage = {
+            "strategy_profiles": json.loads(json.dumps(
+                empty_strategy_lineage)),
+        }
+        assert m.validate_resume_strategy_lineage(
+            lineage, current_strategy_lineage) == (
+                lineage["strategy_profile_lineage"])
+        current_strategy_lineage["strategy_profiles"][
+            "reviewed_profiles_sha256"] = "0" * 64
+        try:
+            m.validate_resume_strategy_lineage(
+                lineage, current_strategy_lineage)
+        except ValueError as error:
+            assert "does not match" in str(error)
+        else:
+            raise AssertionError(
+                "resume accepted a corrupted strategy-profile aggregate")
 
         resume_manifest["resolved"]["training_config"][
             "reward_contract_version"] = "discounted-state-potential-v4"
@@ -1441,6 +1842,25 @@ def check_main_failure_semantics():
     parent_seeds = []
     environment_vocabularies = []
     frozen_vocab = ("format-schema-alpha", "format-schema-omega")
+
+    def assert_terminal_runtime_log(run_manifest, terminal_word):
+        pointer = run_manifest["artifacts"]["runtime_log"]
+        identity = m.artifact_identity_from_pointer(pointer)
+        assert identity == pointer
+        path = pointer["path"].replace("/", os.sep)
+        if not os.path.isabs(path):
+            path = os.path.join(m.BASE_DIR, path)
+        with open(path, encoding="utf-8") as handle:
+            payload = handle.read()
+        expected = (
+            f"Training run {run_manifest['run_id']} {terminal_word}")
+        assert expected in payload, (
+            f"missing terminal line {expected!r}; tail={payload[-800:]!r}")
+        before_sha = m.sha256_file(path)
+        before_size = os.path.getsize(path)
+        m.logging.info("post-main runtime-log detachment probe")
+        assert m.sha256_file(path) == before_sha
+        assert os.path.getsize(path) == before_size
 
     class FakeVecEnv:
         def __init__(self, factories):
@@ -1482,6 +1902,7 @@ def check_main_failure_semantics():
         "make_masked_mtg_env",
         "create_callbacks", "create_training_model", "MaskablePPO",
         "record_network_architecture", "set_random_seed", "safe_cpu_count",
+        "write_json_atomic",
     )
     originals = {name: getattr(m, name) for name in patched_names}
     original_set_num_threads = m.torch.set_num_threads
@@ -1491,6 +1912,17 @@ def check_main_failure_semantics():
 
     with tempfile.TemporaryDirectory() as tmp:
         try:
+            manifest_status_writes = {}
+
+            def tracked_json_write(path, payload):
+                if (os.path.basename(path) == "training_run.json"
+                        and isinstance(payload, dict)
+                        and payload.get("kind") == "playersim_training_run"):
+                    manifest_status_writes.setdefault(
+                        payload["run_id"], []).append(payload.get("status"))
+                return originals["write_json_atomic"](path, payload)
+
+            m.write_json_atomic = tracked_json_write
             m.MODEL_DIR = os.path.join(tmp, "models")
             m.LOG_DIR = os.path.join(tmp, "logs")
             m.TENSORBOARD_DIR = os.path.join(tmp, "tensorboard")
@@ -1518,7 +1950,8 @@ def check_main_failure_semantics():
             m.safe_cpu_count = lambda: 1
             m.torch.set_num_threads = lambda _count: None
             m.torch.cuda.is_available = lambda: False
-            m.time.strftime = lambda _format: "20000101_000000"
+            m.time.strftime = (
+                lambda _format, *_time_tuple: "20000101_000000")
 
             # A failed learn() must return nonzero and save only a clearly
             # incomplete artifact.
@@ -1544,6 +1977,9 @@ def check_main_failure_semantics():
                 m.DEFAULT_TRAINING_SEED]
             assert first_manifest["resolved"]["evaluation_seed"] == \
                 m.DEFAULT_EVALUATION_SEED
+            assert manifest_status_writes[first_manifest["run_id"]].count(
+                "failed") == 1
+            assert_terminal_runtime_log(first_manifest, "failed")
 
             # A successful learn() is the only path allowed to publish final_model.
             saved_paths.clear()
@@ -1571,6 +2007,9 @@ def check_main_failure_semantics():
             assert second_manifest["resolved"][
                 "fixed_evaluation_schedule_sha256"] == first_manifest[
                     "resolved"]["fixed_evaluation_schedule_sha256"]
+            assert manifest_status_writes[second_manifest["run_id"]].count(
+                "complete") == 1
+            assert_terminal_runtime_log(second_manifest, "completed")
 
             # A checkpoint load failure must also be observable to the shell.
             saved_paths.clear()
@@ -1588,6 +2027,9 @@ def check_main_failure_semantics():
                 json.dump({
                     "kind": "playersim_training_run",
                     "run_id": "resume-source",
+                    "lineage": {
+                        "strategy_profiles": m.strategy_profile_lineage([]),
+                    },
                     "resolved": {
                         "training_config": {
                             "reward_contract_version":
@@ -1615,6 +2057,8 @@ def check_main_failure_semantics():
                 third_manifest = json.load(handle)
             assert third_manifest["status"] == "failed"
             assert third_manifest["phase"] == "model_setup"
+            assert manifest_status_writes[third_manifest["run_id"]].count(
+                "failed") == 1
 
             # Deck-loading failures happen before environments exist but still
             # must return a nonzero process status.
@@ -1630,6 +2074,8 @@ def check_main_failure_semantics():
                 fourth_manifest = json.load(handle)
             assert fourth_manifest["status"] == "failed"
             assert fourth_manifest["phase"] == "data_loading"
+            assert manifest_status_writes[fourth_manifest["run_id"]].count(
+                "failed") == 1
             assert parent_seeds == [
                 m.DEFAULT_TRAINING_SEED, 1234,
                 m.DEFAULT_TRAINING_SEED, m.DEFAULT_TRAINING_SEED]
@@ -1673,7 +2119,11 @@ def check_main_failure_semantics():
             assert interrupted_manifest["failure"] is None
             assert interrupted_manifest["interruption"]["type"] == \
                 "KeyboardInterrupt"
+            assert manifest_status_writes[
+                interrupted_manifest["run_id"]].count("interrupted") == 1
             assert all(env.closed for env in made_vec_envs)
+            assert_terminal_runtime_log(
+                interrupted_manifest, "was interrupted")
         finally:
             sys.argv = original_argv
             for name, original in originals.items():
@@ -1705,6 +2155,14 @@ def check_format_corpus_lineage():
         assert lineage["feature_schema"]["sha256"] == schema["sha256"]
         assert lineage["pool_snapshot"]["format"] == "standard"
         assert lineage["corpus"]["sha256"]
+        strategy_lineage = lineage["strategy_profiles"]
+        assert strategy_lineage["reviewed_profile_count"] == 8
+        assert len(strategy_lineage["reviewed_profiles_sha256"]) == 64
+        assert len(strategy_lineage["taxonomy"]["sha256"]) == 64
+        assert len(strategy_lineage["classifier"]["sha256"]) == 64
+        assert all(
+            len(item["sha256"]) == 64
+            for item in strategy_lineage["reviewed_profiles"])
         # Canonical IDs replace insertion-order IDs across the corpus.
         expected = {entry["name"].lower(): entry["index"]
                     for entry in registry["cards"]}
@@ -1723,6 +2181,7 @@ def check_format_corpus_lineage():
         assert default_lineage["format"] == "standard"
         assert default_lineage["card_registry"] == lineage["card_registry"]
         assert default_lineage["corpus"]["sha256"] == lineage["corpus"]["sha256"]
+        assert default_lineage["strategy_profiles"] == strategy_lineage
     finally:
         Card.SUBTYPE_VOCAB = saved_vocab
 

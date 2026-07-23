@@ -2754,7 +2754,36 @@
   "format": "standard",
   "meta_share": 0.129,
   "name": "Jeskai Lessons",
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "https://www.mtggoldfish.com/deck/7858638",
-  "source_corpus": "metagame_corpus_2026-07-11.json"
+  "source_corpus": "metagame_corpus_2026-07-11.json",
+  "strategy_profile": {
+    "axes": {
+      "board_width": 25,
+      "card_advantage": 86,
+      "combo_dependency": 20,
+      "graveyard_dependency": 35,
+      "instant_speed": 72,
+      "interaction": 78,
+      "mana_acceleration": 10,
+      "speed": 25,
+      "synergy_dependency": 58,
+      "threat_density": 15
+    },
+    "primary": "control",
+    "review": {
+      "basis": "Pinned 60-card main deck reviewed against card rules text.",
+      "reviewed_at": "2026-07-22",
+      "status": "reviewed"
+    },
+    "secondary": null,
+    "tags": [
+      "board_control",
+      "burn",
+      "lessons",
+      "spellslinger"
+    ],
+    "taxonomy_version": 1
+  },
+  "strategy_profile_hash": "14575a090c2c7c5e34ebf4bb414c3af27ce47e0bfb31d21d1e21101b343444e8"
 }

@@ -2552,7 +2552,38 @@
   "format": "standard",
   "meta_share": 0.031,
   "name": "Azorius Momo",
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "https://www.mtggoldfish.com/deck/7851900",
-  "source_corpus": "metagame_corpus_2026-07-11.json"
+  "source_corpus": "metagame_corpus_2026-07-11.json",
+  "strategy_profile": {
+    "axes": {
+      "board_width": 82,
+      "card_advantage": 68,
+      "combo_dependency": 12,
+      "graveyard_dependency": 10,
+      "instant_speed": 22,
+      "interaction": 28,
+      "mana_acceleration": 28,
+      "speed": 74,
+      "synergy_dependency": 78,
+      "threat_density": 82
+    },
+    "primary": "aggro",
+    "review": {
+      "basis": "Pinned 60-card main deck reviewed against card rules text.",
+      "reviewed_at": "2026-07-22",
+      "status": "reviewed"
+    },
+    "secondary": "midrange",
+    "tags": [
+      "blink",
+      "counters",
+      "fliers",
+      "go_wide",
+      "lifegain",
+      "tokens"
+    ],
+    "taxonomy_version": 1
+  },
+  "strategy_profile_hash": "41d1cd696a44dfb5f9339ec7609935db90d34c14c007b01af268ab4969d0b812"
 }

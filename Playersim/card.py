@@ -2447,6 +2447,7 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
     feature width cannot drift when decks are added; cards whose subtypes
     fall outside the frozen vocabulary are also fatal.
     """
+    from .archetypes import declared_profile_hash, normalize_declared_profile
     from .card_registry import CanonicalRegistryError
 
     registry_index = None
@@ -2479,9 +2480,8 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
                 with open(deck_path, 'r', encoding='utf-8') as f:
                     deck_data = json.load(f)
                     
-                    # Hydrated corpora retain the human-readable archetype
-                    # name in the payload; legacy files fall back to their
-                    # filename for compatibility.
+                    # Hydrated corpora retain the human-readable deck name;
+                    # legacy files fall back to their filename.
                     deck_name = str(
                         deck_data.get("name")
                         or deck_path.stem)
@@ -2496,6 +2496,37 @@ def load_decks_and_card_db(decks_folder, format_name=None, banned_names=None,
                         "name": deck_name,
                         "cards": []
                     }
+                    for metadata_key in (
+                            "format", "kind", "meta_share", "schema_version",
+                            "source", "source_corpus"):
+                        if metadata_key in deck_data:
+                            current_deck[metadata_key] = deck_data[metadata_key]
+                    raw_profile = deck_data.get("strategy_profile")
+                    try:
+                        deck_schema_version = int(
+                            deck_data.get("schema_version", 1))
+                    except (TypeError, ValueError) as error:
+                        raise ValueError(
+                            f"Invalid deck schema_version in {deck_file}") from error
+                    # Schema-v2 hydrated/governed corpora promise a reviewed
+                    # strategy profile. User imports use the same transport
+                    # schema but are explicitly marked imported_deck and
+                    # remain eligible for deterministic rule inference.
+                    if (deck_schema_version >= 2
+                            and deck_data.get("kind") != "imported_deck"
+                            and raw_profile is None):
+                        raise ValueError(
+                            f"Schema-v{deck_schema_version} deck {deck_file} "
+                            "is missing the required reviewed strategy_profile")
+                    if raw_profile is not None:
+                        strategy_profile = normalize_declared_profile(raw_profile)
+                        profile_hash = declared_profile_hash(strategy_profile)
+                        stored_hash = deck_data.get("strategy_profile_hash")
+                        if stored_hash is not None and stored_hash != profile_hash:
+                            raise ValueError(
+                                f"Strategy profile hash mismatch in {deck_file}")
+                        current_deck["strategy_profile"] = strategy_profile
+                        current_deck["strategy_profile_hash"] = profile_hash
                    
                     for entry in deck_data["deck"]:
                         card_data = entry["card"]

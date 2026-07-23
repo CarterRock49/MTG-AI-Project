@@ -2735,7 +2735,36 @@
   "format": "standard",
   "meta_share": 0.069,
   "name": "Dimir Excruciator",
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "https://www.mtggoldfish.com/deck/7851898",
-  "source_corpus": "metagame_corpus_2026-07-11.json"
+  "source_corpus": "metagame_corpus_2026-07-11.json",
+  "strategy_profile": {
+    "axes": {
+      "board_width": 30,
+      "card_advantage": 75,
+      "combo_dependency": 88,
+      "graveyard_dependency": 30,
+      "instant_speed": 48,
+      "interaction": 90,
+      "mana_acceleration": 0,
+      "speed": 25,
+      "synergy_dependency": 68,
+      "threat_density": 28
+    },
+    "primary": "combo",
+    "review": {
+      "basis": "Pinned 60-card main deck reviewed against card rules text.",
+      "reviewed_at": "2026-07-22",
+      "status": "reviewed"
+    },
+    "secondary": "control",
+    "tags": [
+      "alternate_win",
+      "board_control",
+      "discard",
+      "mill"
+    ],
+    "taxonomy_version": 1
+  },
+  "strategy_profile_hash": "03a923eb2943e6128626e18a0935b737e4313367507bd6d87275256f8adaaedc"
 }

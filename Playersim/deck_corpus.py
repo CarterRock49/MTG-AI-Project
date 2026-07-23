@@ -15,6 +15,7 @@ import re
 import shutil
 from pathlib import Path
 
+from .archetypes import declared_profile_hash, normalize_declared_profile
 from .card_registry import load_pool_snapshot_cards
 
 
@@ -24,7 +25,7 @@ DEFAULT_FORMAT_DIRECTORY = PROJECT_ROOT / "formats" / DEFAULT_FORMAT
 DEFAULT_CORPUS = DEFAULT_FORMAT_DIRECTORY / "metagame_corpus_2026-07-11.json"
 DEFAULT_SNAPSHOT = PROJECT_ROOT / "Format Card Lists" / "standard.jsonl"
 DEFAULT_OUTPUT = DEFAULT_FORMAT_DIRECTORY / "decks" / "metagame"
-HYDRATED_SCHEMA_VERSION = 1
+HYDRATED_SCHEMA_VERSION = 2  # Strategy profiles are preserved.
 
 
 def _canonical_json_bytes(payload) -> bytes:
@@ -136,18 +137,30 @@ def hydrate_corpus(corpus_path, snapshot_path, output_directory,
             total += count
         if total != 60:
             raise ValueError(f"{name} contains {total} cards; expected exactly 60")
+        raw_profile = compact_deck.get("strategy_profile")
+        if raw_profile is None and int(corpus.get("schema_version", 1)) >= 2:
+            raise ValueError(
+                f"{name} is missing the required reviewed strategy_profile")
+        strategy_profile = (
+            normalize_declared_profile(raw_profile)
+            if raw_profile is not None else None)
+        hydrated_payload = {
+            "captured_at": corpus.get("captured_at"),
+            "deck": hydrated_entries,
+            "format": effective_format,
+            "meta_share": compact_deck.get("meta_share"),
+            "name": name,
+            "schema_version": HYDRATED_SCHEMA_VERSION,
+            "source": compact_deck.get("source"),
+            "source_corpus": corpus_path.name,
+        }
+        if strategy_profile is not None:
+            hydrated_payload["strategy_profile"] = strategy_profile
+            hydrated_payload["strategy_profile_hash"] = (
+                declared_profile_hash(strategy_profile))
         hydrated.append((
             _deck_filename(position, name),
-            {
-                "captured_at": corpus.get("captured_at"),
-                "deck": hydrated_entries,
-                "format": effective_format,
-                "meta_share": compact_deck.get("meta_share"),
-                "name": name,
-                "schema_version": HYDRATED_SCHEMA_VERSION,
-                "source": compact_deck.get("source"),
-                "source_corpus": corpus_path.name,
-            },
+            hydrated_payload,
         ))
 
     staging = output.with_name(output.name + ".tmp")
@@ -172,14 +185,22 @@ def hydrate_corpus(corpus_path, snapshot_path, output_directory,
 
     files = []
     aggregate = hashlib.sha256()
+    profile_aggregate = hashlib.sha256()
     for path in sorted(output.glob("*.json"), key=lambda item: item.name):
         digest = _sha256(path)
+        with path.open("r", encoding="utf-8") as handle:
+            payload = json.load(handle)
+        profile_hash = payload.get("strategy_profile_hash")
         files.append({
             "name": path.name,
+            "strategy_profile_hash": profile_hash,
             "sha256": digest,
             "size_bytes": path.stat().st_size,
         })
         aggregate.update(f"{path.name}:{digest}\n".encode("utf-8"))
+        if profile_hash:
+            profile_aggregate.update(
+                f"{path.name}:{profile_hash}\n".encode("utf-8"))
     return {
         "corpus_sha256": _sha256(corpus_path),
         "deck_count": len(hydrated),
@@ -188,6 +209,7 @@ def hydrate_corpus(corpus_path, snapshot_path, output_directory,
         "output": str(output),
         "sha256": aggregate.hexdigest(),
         "snapshot_sha256": _sha256(snapshot_path),
+        "strategy_profiles_sha256": profile_aggregate.hexdigest(),
     }
 
 

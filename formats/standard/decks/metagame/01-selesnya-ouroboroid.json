@@ -2822,7 +2822,35 @@
   "format": "standard",
   "meta_share": 0.129,
   "name": "Selesnya Ouroboroid",
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "https://www.mtggoldfish.com/deck/7861989",
-  "source_corpus": "metagame_corpus_2026-07-11.json"
+  "source_corpus": "metagame_corpus_2026-07-11.json",
+  "strategy_profile": {
+    "axes": {
+      "board_width": 76,
+      "card_advantage": 48,
+      "combo_dependency": 15,
+      "graveyard_dependency": 5,
+      "instant_speed": 25,
+      "interaction": 35,
+      "mana_acceleration": 45,
+      "speed": 72,
+      "synergy_dependency": 62,
+      "threat_density": 78
+    },
+    "primary": "aggro",
+    "review": {
+      "basis": "Pinned 60-card main deck reviewed against card rules text.",
+      "reviewed_at": "2026-07-22",
+      "status": "reviewed"
+    },
+    "secondary": "midrange",
+    "tags": [
+      "counters",
+      "go_wide",
+      "toolbox"
+    ],
+    "taxonomy_version": 1
+  },
+  "strategy_profile_hash": "4a42cb5a2a6a2fce7a39a2cdc8fffd847ca4ca33dd0ba220d4dfcb024efc3a91"
 }

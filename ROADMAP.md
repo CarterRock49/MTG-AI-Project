@@ -683,9 +683,12 @@ only from independent exact-state scenarios.
 
 ### Non-negotiable lineage rules
 
-- **Start the next policy as the fresh Round 7.99 experiment on the Round 7.97
-  Observation v5 boundary, using the current `tempo-graded-potential-v1`
-  reward, `combat-v7` curriculum, and pinned checkpoint-league contract.**
+- **Round 7.99 is complete. Start the next policy only after the planned
+  Observation v6 plus archetype-conditioning boundary is implemented and its
+  delivery gate passes; launch that policy fresh rather than resuming a v5
+  checkpoint.** Preserve `tempo-graded-potential-v1`, `combat-v7`, and the
+  pinned checkpoint-league contract so the new strategy input and conditioning
+  path remain the only experimental lever.
   Observation v5 adds producible mana by color
   (`my_producible_mana`, `opp_producible_mana`) on top of the v4 decklist
   features (`my_deck_card_identity`, `my_library_composition`, full-deck
@@ -1180,61 +1183,79 @@ signal structurally rather than add features; see the plan below.
 
 ---
 
+## Round 7.99 post-mortem and provenance closeout — July 22, 2026
+
+`round-7.99-self-play-v1` completed cleanly at **2,007,040 actual
+timesteps**. The checkpoint league delivered the intended mixed training
+opponents, but it did not solve the archetype-specific piloting failure:
+control remained 0–24 in the comparable fixed-suite slices, and the accumulated
+deck results remained effectively zero for 4c Control and Jeskai Lessons
+(0–160 each) and near-zero for Dimir Excruciator (2–158). Self-play is
+therefore evidence against “more of the same policy” as the missing signal,
+not evidence that the control problem is fixed.
+
+The audit found three provenance defects in an otherwise clean run:
+
+1. the best-so-far 1.7M evaluation archive was deleted after scoring, leaving
+   only metadata and non-byte-identical later serializations;
+2. the fixed evaluator scored the 2.0M cadence snapshot, while the published
+   final model contained three later PPO updates at 2,007,040;
+3. `training.log` was hashed before the final 219 bytes of completion output.
+
+All three are now closed for future runs. Evaluation history schema v4 retains
+exactly one content-addressed best-candidate archive independently of the
+qualified `best_model.zip` gate. A terminal cadence snapshot is deferred until
+after the last PPO update, the exact scored archive is moved into
+`final_model.zip`, and evaluation/reload/final hashes plus timesteps must
+agree. Environments now close and the final status line is flushed before the
+runtime-log handler is detached; only then are terminal artifact hashes and
+the manifest published.
+
+The prerequisite archetype overhaul is also landed **before** Observation v6
+or FiLM work: one versioned strategy-profile contract now separates macro
+plans from secondary plans, closed multi-label gameplan tags, and quantized
+strategic axes; the eight pinned Standard decks carry reviewed profiles;
+hydration/runtime loading preserves and validates them; stats and the
+own-deck planner consume the centralized classifier. Observation v5 remains
+unchanged, and opponent input remains public inference only. This foundation
+is the hard gate that had to exist before adding `my_archetype` or
+archetype-conditioned capacity.
+
+---
+
 ## Current execution plan
 
-### Now — Round 7.99: rerun the repaired checkpoint-league experiment
+### Now — Observation v6 and archetype-conditioned capacity
 
-The 7.97 post-mortem (above) confirms the reactive-deck 0% is a single-policy
-piloting ceiling, invariant to observation and reward changes. Stop adding
-observation fields and reward terms for this failure. Round 7.98 confirmed that
-the checkpoint league activates, leases policies, and produces the intended
-approximately 50/50 post-warmup opponent mix, but its fidelity stop at 705,456
-prevents any strength conclusion. Round 7.99 retries the same structural lever
-after the copied-source repair; its 500k permanent-checkpoint cadence is an
-operational storage change, not a second training-signal lever. Three structural
-levers remain sequenced cheapest-first, one new signal lever per round:
+Round 7.99 is complete; do **not** relaunch it. The next experimental lever is
+archetype-conditioned capacity, now that its previously missing semantic
+foundation is versioned and golden-tested:
 
-1. **Self-play / checkpoint league (lead lever; repaired rerun ready).** The
-   Round 7.98/7.99 implementation is complete: explicit perspective-safe opponent
-   observation/mask generation, strict hidden-information and cache isolation,
-   mask-valid atomic opponent dispatch, eager fail-closed checkpoint staging,
-   a bounded four-snapshot disk pool, deterministic one-policy worker leases,
-   per-episode checkpoint-versus-scripted sampling, rollback/provenance
-   manifests, and a scripted-only fixed evaluator. The steady-state resource
-   contract is one frozen CPU policy per worker; only a safe lease refresh may
-   temporarily hold the active and pending policies together. The copied
-   Colorstorm/Deceit source-name defect is scenario-guarded, the complete
-   delivery gate is green, and the targeted probe records no failures. The
-   next action is to launch the fresh named 7.99 canary below and measure
-   whether this training signal moves control decks off 0%, not to add another
-   lever.
-2. **Archetype-conditioned capacity.** The agent observes `opponent_archetype`
-   (6-dim) but **not its own** — there is no `my_archetype` field. Add it
-   (Observation v6, hard lineage boundary) and/or a light policy conditioning
-   (FiLM or an archetype-indexed head) so the control gameplan is not averaged
-   away by the dominant aggro gradient. Sequence after lever 1 so the two do not
-   confound.
-3. **Mulligan policy, targeted.** Most likely downstream of levers 1–2 (the
-   policy mulligans control hands hunting a proactive plan it cannot execute);
-   revisit only if the 0% persists once control decks can win. No cap (standing
-   preference); if needed, sharpen the keep/mull value signal — the heuristic
-   `mulligan_recommendation` from `strategic_planner.suggest_mulligan_decision`
-   is already an observation — rather than legislate the decision.
+1. **Completed prerequisite:** preserve reviewed exact-own strategy profiles
+   through the Standard corpus, hydration, runtime loader, analytics, and
+   planner. Macro plan, secondary plan, tags, axes, confidence/evidence, and
+   hashes come from one contract rather than three drifting classifiers.
+2. **Observation v6 hard boundary:** add an exact-own strategy encoding under a
+   clearly named field. Keep opponent input public-only; never substitute the
+   opponent seat's curated full-deck profile for its inferred belief. Pin field
+   order, bounds, taxonomy/classifier hashes, and reject every older checkpoint.
+3. **Condition the policy:** route the own profile into a small FiLM or
+   archetype-indexed conditioning path so a control policy can express a
+   different plan rather than averaging into the dominant proactive gradient.
+   Treat the v6 input plus conditioning path as one declared capacity lever.
+4. **Delivery gate before a canary:** all eight curated golden profiles,
+   representation/order invariance, loader preservation, hidden-information
+   tests, exact observation shape/hash, save/load rejection, training smoke,
+   default invariant fuzz, and the new evaluation-provenance invariants must
+   pass.
+5. **Only then launch a fresh named canary from scratch.** Keep checkpoint
+   self-play and every other 7.99 training setting fixed so conditioning is the
+   only changed experimental lever. Promotion still requires the pair-aware
+   95% qualification lower bound to reach 55% with zero fidelity counters.
 
-Do not launch more than one new lever per round. Keep the delivery gate
-mandatory (golden scenarios, discovered unit tests, runtime and training smoke,
-default invariant fuzz, canary validation); any observation change (lever 2)
-mints a new schema hash, canary, and checkpoint lineage and retrains from
-scratch. Promotion to `best_model.zip` still requires the pair-aware 95%
-qualification lower bound to reach 55% with zero fidelity counters.
-
-```bash
-python main.py --canary-config round-7.99 --timesteps 2000000 \
-  --checkpoint-pool-self-play --run-name round-7.99-self-play-v1
-```
-
-Do not add `--matchup-weighting` or `--resume`; the canary rejects both so the
-checkpoint league remains the only changed experimental lever.
+Mulligan work remains downstream. Revisit it only if control decks still
+collapse after they can express a distinct plan; sharpen the existing
+`mulligan_recommendation` signal rather than imposing a decision cap.
 
 ### Next — qualify and calibrate Standard
 
@@ -1271,7 +1292,7 @@ checkpoint league remains the only changed experimental lever.
   treat any schema mismatch or hidden-information leak as a run-stopper.
 - Profile production-sized training and Harvest workloads; land optimizations
   as separately verified changes.
-- During 7.99, track post-warmup self-play share, rollout stragglers, evaluator
+- During the next canary, track post-warmup self-play share, rollout stragglers, evaluator
   duration, resident-policy RAM, system free memory, and effective steps/min.
   Keep permanent checkpoints at 500k and the bounded opponent pool at 100k
   unless a new measured failure justifies another named experiment.
@@ -1450,12 +1471,12 @@ The project is complete only when all of these are true:
 ## Checkpoint and schema boundaries
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
-mistake. The practical rule is: **launch Round 7.99 fresh on the Round 7.97
-Observation v5 boundary using `tempo-graded-potential-v1`, `combat-v7`, and the
-pinned checkpoint-league contract.** Round 7.99 does not change the observation
-schema, reward, curriculum, or opponent mix. Its named canary rejects resume
-and matchup weighting; only copied-source engine fidelity and permanent
-recovery cadence differ from the failed 7.98 run.
+mistake. Round 7.99 is complete and remains an immutable Observation v5 result.
+The practical rule is: **do not relaunch or resume 7.99; create the next policy
+fresh only after the Observation v6 and archetype-conditioning delivery gate
+passes.** Keep `tempo-graded-potential-v1`, `combat-v7`, and the pinned
+checkpoint-league contract fixed so that strategy conditioning is the single
+declared experimental lever.
 
 | Minimum round | Incompatible change |
 | --- | --- |

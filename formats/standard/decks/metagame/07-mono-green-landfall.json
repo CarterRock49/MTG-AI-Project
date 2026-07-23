@@ -2276,7 +2276,36 @@
   "format": "standard",
   "meta_share": 0.055,
   "name": "Mono-Green Landfall",
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "https://www.mtggoldfish.com/deck/7850826",
-  "source_corpus": "metagame_corpus_2026-07-11.json"
+  "source_corpus": "metagame_corpus_2026-07-11.json",
+  "strategy_profile": {
+    "axes": {
+      "board_width": 65,
+      "card_advantage": 42,
+      "combo_dependency": 58,
+      "graveyard_dependency": 20,
+      "instant_speed": 8,
+      "interaction": 18,
+      "mana_acceleration": 92,
+      "speed": 67,
+      "synergy_dependency": 86,
+      "threat_density": 72
+    },
+    "primary": "ramp",
+    "review": {
+      "basis": "Pinned 60-card main deck reviewed against card rules text.",
+      "reviewed_at": "2026-07-22",
+      "status": "reviewed"
+    },
+    "secondary": "combo",
+    "tags": [
+      "big_mana",
+      "counters",
+      "landfall",
+      "lands"
+    ],
+    "taxonomy_version": 1
+  },
+  "strategy_profile_hash": "c618bd8af3d1e0108ac820df5baa852c11da5775be461c711bb8eb5076acdeee"
 }

@@ -10,6 +10,13 @@ import math
 
 import numpy as np
 
+from .archetypes import (
+    PrimaryArchetype,
+    classify_full_deck,
+    compatibility_primary,
+    planner_strategy_label,
+)
+
 
 def _card_number(card, attribute, default=0.0):
     """Return a finite numeric characteristic for strategic estimates."""
@@ -954,7 +961,46 @@ class ArchetypeAnalysisMixin:
         except Exception as e:
             logging.warning(f"Error accessing player state: {e}")
             return "midrange"
-            
+
+        # Prefer the centralized exact-deck macro for the strategy families
+        # already implemented directly by the planner. Tempo, ramp, and typal
+        # profiles continue through the specialized legacy parameter builder
+        # below until those planner branches are migrated independently.
+        try:
+            player_index = 0 if gs.agent_is_p1 else 1
+            analytics_label = (
+                getattr(gs, "deck_archetypes", {}) or {}).get(player_index)
+            if analytics_label:
+                macro = compatibility_primary(analytics_label)
+                centralized_label = (
+                    PrimaryArchetype.MIDRANGE.value
+                    if macro in {
+                        PrimaryArchetype.HYBRID,
+                        PrimaryArchetype.UNKNOWN,
+                    }
+                    else macro.value)
+            else:
+                exact_cards = [
+                    card_id
+                    for zone in ("hand", "battlefield", "library", "graveyard")
+                    for card_id in me[zone]
+                ]
+                centralized_profile = classify_full_deck(
+                    exact_cards, getattr(gs, "card_db", {}) or {})
+                centralized_label = (
+                    None
+                    if centralized_profile.primary in {
+                        PrimaryArchetype.HYBRID,
+                        PrimaryArchetype.UNKNOWN,
+                    }
+                    else planner_strategy_label(centralized_profile))
+            if centralized_label in self.strategies:
+                self._initialize_strategy_params(centralized_label)
+                return centralized_label
+        except (TypeError, ValueError) as error:
+            logging.debug(
+                "Centralized deck classification unavailable: %s", error)
+
         # Enhanced archetype definitions with detailed markers
         archetypes = {
             "aggro": {

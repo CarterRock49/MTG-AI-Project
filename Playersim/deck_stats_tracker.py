@@ -14,6 +14,13 @@ from collections import defaultdict, Counter
 from typing import Dict, List, Any, Optional, Tuple, Union
 from enum import Enum
 import math
+
+from .archetypes import (
+    DeckStrategyProfile,
+    classify_full_deck,
+    deck_composition_hash,
+    normalize_declared_profile,
+)
 # Version information for tracking schema changes
 STATS_VERSION = "3.4.0"  # Canonical-ID per-deck card analytics
 
@@ -119,6 +126,8 @@ class DeckArchetype(Enum):
     DISCARD = "discard"
     BLINK = "blink"
     TOOLBOX = "toolbox"
+    HYBRID = "hybrid"
+    UNKNOWN = "unknown"
 
 class DeckStatsTracker:
     """Comprehensive deck statistics tracker with analytics and recommendations"""
@@ -141,6 +150,7 @@ class DeckStatsTracker:
         self._meta_data_dirty = False
         self._individual_card_cache = {}
         self._dirty_individual_card_files = set()
+        self._strategy_profiles_by_composition = {}
         self._ensure_directories()
         self.current_deck_name_p1 = None
         self.current_deck_name_p2 = None
@@ -192,6 +202,16 @@ class DeckStatsTracker:
             deck_id = self.get_deck_fingerprint(card_ids)
             self.deck_name_to_id[deck_name] = deck_id
             self.deck_id_to_name[deck_id] = deck_name
+            raw_profile = deck.get("strategy_profile")
+            if raw_profile is not None:
+                try:
+                    self._strategy_profiles_by_composition[
+                        deck_composition_hash(card_ids)
+                    ] = normalize_declared_profile(raw_profile)
+                except ValueError as error:
+                    logging.warning(
+                        "Ignoring invalid strategy profile for %s: %s",
+                        deck_name, error)
             
         # Legacy/direct callers that do not supply runtime decks may still
         # discover a configured hydrated directory (Standard by default).
@@ -615,341 +635,25 @@ class DeckStatsTracker:
         
         return fingerprint
     
+    def identify_strategy_profile(
+            self, card_list: List[int]) -> DeckStrategyProfile:
+        """Return the centralized, versioned profile for one exact deck."""
+        declared = getattr(
+            self, "_strategy_profiles_by_composition", {}).get(
+                deck_composition_hash(card_list))
+        return classify_full_deck(
+            card_list, self.card_db or {}, declared=declared)
+
     def identify_archetype(self, card_list: List[int]) -> str:
         """
-        Identify the archetype of a deck based on its card composition.
-        Uses key cards and patterns to determine the most likely archetype.
-        Returns a DeckArchetype enum value.
+        Return the centralized profile's primary macro as a legacy string API.
+
+        Existing analytics persist a single lowercase string. Keeping that
+        boundary avoids an unversioned stats migration while all new
+        classification logic and reviewed overrides live in archetypes.py.
         """
-        card_counter = Counter(card_list)
-        
-        # Enhanced archetype detection based on card characteristics and patterns
-        # Define archetype signatures with more comprehensive criteria
-        archetype_signatures = {
-            DeckArchetype.AGGRO: {
-                "creature_ratio": 0.4,
-                "avg_cmc_threshold": 2.5,
-                "keyword_points": ["haste", "first strike", "menace"],
-                "card_name_points": ["goblin", "slith", "knight", "warrior"]
-            },
-            DeckArchetype.CONTROL: {
-                "noncreature_spell_ratio": 0.6,
-                "avg_cmc_threshold": 3.5,
-                "keyword_points": ["counterspell", "destroy", "exile", "return"],
-                "card_name_points": ["wrath", "doom", "verdict", "counter", "deny", "cancel"]
-            },
-            DeckArchetype.MIDRANGE: {
-                "creature_ratio": 0.3,
-                "noncreature_spell_ratio": 0.3,
-                "keyword_points": ["enters the battlefield", "when ~ enters", "value"],
-                "card_name_points": ["titan", "gearhulk", "command", "charm"]
-            },
-            DeckArchetype.COMBO: {
-                "key_cards_threshold": 3,
-                "keyword_points": ["whenever", "triggers", "infinite", "search your library"],
-                "card_name_points": ["twin", "splinter", "kiki", "oracle", "labman"]
-            },
-            DeckArchetype.RAMP: {
-                "ramp_card_ratio": 0.15,
-                "keyword_points": ["add {", "search your library for a land", "put a land"],
-                "card_name_points": ["growth", "cultivate", "kodama", "oracle", "land"]
-            },
-            DeckArchetype.TEMPO: {
-                "bounce_spell_count": 3,
-                "cheap_creature_ratio": 0.25,
-                "keyword_points": ["flash", "return", "bounce", "tap", "doesn't untap"],
-                "card_name_points": ["delver", "sprite", "faerie", "tempo", "aggro-control"]
-            },
-            DeckArchetype.BURN: {
-                "direct_damage_ratio": 0.3,
-                "keyword_points": ["damage to", "damage to any target", "to target player"],
-                "card_name_points": ["lightning", "bolt", "lava", "burn", "shock", "blaze"]
-            },
-            DeckArchetype.TRIBAL: {
-                "tribal_creature_ratio": 0.4,
-                "keyword_points": ["other", "you control", "creature type"],
-                "card_name_points": ["lord", "chief", "master", "king", "champion", "sliver"]
-            },
-            DeckArchetype.REANIMATOR: {
-                "reanimation_spell_count": 3,
-                "graveyard_interaction_ratio": 0.2,
-                "keyword_points": ["return", "from your graveyard", "put", "onto the battlefield"],
-                "card_name_points": ["reanimate", "resurrection", "living", "dread", "animate"]
-            },
-            DeckArchetype.MILL: {
-                "mill_spell_count": 4,
-                "keyword_points": ["put", "cards from the top", "library into", "graveyard"],
-                "card_name_points": ["mill", "glimpse", "archive", "thought", "memory"]
-            },
-            DeckArchetype.TOKENS: {
-                "token_generator_count": 4,
-                "keyword_points": ["create", "token", "tokens", "creatures", "populate"],
-                "card_name_points": ["token", "anthem", "procession", "marshal", "crusade"]
-            },
-            DeckArchetype.STOMPY: {
-                "big_creature_ratio": 0.3,
-                "avg_power_threshold": 4.0,
-                "keyword_points": ["trample", "fight", "power", "toughness"],
-                "card_name_points": ["titan", "dinosaur", "wurm", "behemoth", "giant"]
-            }
-        }
-        
-        # Initialize score for each archetype
-        archetype_scores = {archetype: 0.0 for archetype in DeckArchetype}
-        
-        # Count card types and other relevant metrics
-        creatures = 0
-        noncreature_spells = 0
-        lands = 0
-        ramp_cards = 0
-        reanimation_spells = 0
-        mill_spells = 0
-        token_generators = 0
-        bounce_spell_count = 0  # Changed from bounce_spells to bounce_spell_count
-        direct_damage_spells = 0
-        
-        total_cmc = 0
-        card_count = 0
-        
-        # Tribal detection (count by creature type)
-        creature_types = Counter()
-        
-        # Known combo pieces
-        combo_pieces_found = 0
-        
-        # Card name and text analysis
-        card_names = []
-        card_texts = []
-        
-        # Big creatures (power 4+)
-        big_creatures = 0
-        total_power = 0
-        creature_count = 0
-        
-        # Cheap creatures (CMC <= 2)
-        cheap_creatures = 0
-        
-        # Graveyard interaction
-        graveyard_interaction = 0
-        
-        # Process each card for detailed analysis
-        for card_id, count in card_counter.items():
-            if card_id in self.card_db:
-                card = self.card_db[card_id]
-                card_count += count
-                
-                # Collect name and text for keyword analysis
-                if hasattr(card, 'name'):
-                    card_names.extend([card.name.lower()] * count)
-                
-                if hasattr(card, 'oracle_text'):
-                    card_texts.extend([card.oracle_text.lower()] * count)
-                
-                # Type counting
-                if hasattr(card, 'card_types'):
-                    if 'creature' in card.card_types:
-                        creatures += count
-                        
-                        # Track creature type for tribal detection
-                        if hasattr(card, 'subtypes'):
-                            for subtype in card.subtypes:
-                                creature_types[subtype] += count
-                        
-                        # Track creature stats
-                        if hasattr(card, 'power') and hasattr(card, 'toughness'):
-                            power = _finite_card_number(card, 'power')
-                            creature_count += count
-                            total_power += power * count
-                            
-                            if power >= 4:
-                                big_creatures += count
-                        
-                        # Track cheap creatures
-                        if _finite_card_number(card, 'cmc') <= 2:
-                            cheap_creatures += count
-                        
-                    elif 'instant' in card.card_types or 'sorcery' in card.card_types:
-                        noncreature_spells += count
-                        
-                        # Analyze spell effects from oracle text
-                        if hasattr(card, 'oracle_text'):
-                            text = card.oracle_text.lower()
-                            
-                            # Ramp detection
-                            if ("search your library for a land" in text or 
-                                "add {" in text or 
-                                "put a land" in text):
-                                ramp_cards += count
-                            
-                            # Reanimation detection
-                            if ("return" in text and 
-                                "from your graveyard" in text and 
-                                "to the battlefield" in text):
-                                reanimation_spells += count
-                                graveyard_interaction += count
-                            
-                            # Mill detection
-                            if ("put" in text and 
-                                ("cards from the top" in text or "into their graveyard" in text) and 
-                                "library" in text):
-                                mill_spells += count
-                            
-                            # Token generation
-                            if "create" in text and "token" in text:
-                                token_generators += count
-                            
-                            # Bounce detection
-                            if ("return" in text and 
-                                "to its owner's hand" in text):
-                                bounce_spell_count += count
-                            
-                            # Direct damage
-                            if ("damage" in text and 
-                                ("to target" in text or "to any target" in text)):
-                                direct_damage_spells += count
-                            
-                            # Graveyard interaction
-                            if "graveyard" in text:
-                                graveyard_interaction += count
-                    
-                    elif 'land' in card.card_types:
-                        lands += count
-                
-                # CMC tracking
-                if hasattr(card, 'cmc'):
-                    total_cmc += _finite_card_number(
-                        card, 'cmc') * count
-                
-                # Combo piece detection
-                if hasattr(card, 'oracle_text') and any(combo_term in card.oracle_text.lower() 
-                                                        for combo_term in ["infinite", "copy", "untap", "whenever", "triggers"]):
-                    combo_pieces_found += 1
-        
-        # Calculate derived metrics
-        nonland_count = card_count - lands
-        if nonland_count > 0:
-            creature_ratio = creatures / nonland_count
-            noncreature_spell_ratio = noncreature_spells / nonland_count
-            avg_cmc = total_cmc / nonland_count
-            ramp_card_ratio = ramp_cards / nonland_count
-            direct_damage_ratio = direct_damage_spells / nonland_count
-            cheap_creature_ratio = cheap_creatures / nonland_count
-            big_creature_ratio = big_creatures / nonland_count
-            graveyard_interaction_ratio = graveyard_interaction / nonland_count
-        else:
-            creature_ratio = 0
-            noncreature_spell_ratio = 0
-            avg_cmc = 0
-            ramp_card_ratio = 0
-            direct_damage_ratio = 0
-            cheap_creature_ratio = 0
-            big_creature_ratio = 0
-            graveyard_interaction_ratio = 0
-        
-        # Calculate average power
-        avg_power = total_power / max(1, creature_count)
-        
-        # Find most common creature type for tribal
-        most_common_type = creature_types.most_common(1)
-        tribal_creature_count = most_common_type[0][1] if most_common_type else 0
-        tribal_creature_ratio = tribal_creature_count / max(1, creatures)
-        
-        # Calculate scores for each archetype
-        for archetype, criteria in archetype_signatures.items():
-            score = 0.0
-            
-            # Ratio-based scoring
-            if archetype == DeckArchetype.AGGRO:
-                if creature_ratio >= criteria["creature_ratio"]:
-                    score += 2.0
-                if avg_cmc <= criteria["avg_cmc_threshold"]:
-                    score += 2.0
-            
-            elif archetype == DeckArchetype.CONTROL:
-                if noncreature_spell_ratio >= criteria["noncreature_spell_ratio"]:
-                    score += 2.0
-                if avg_cmc >= criteria["avg_cmc_threshold"]:
-                    score += 2.0
-            
-            elif archetype == DeckArchetype.MIDRANGE:
-                if (creature_ratio >= criteria["creature_ratio"] and 
-                    noncreature_spell_ratio >= criteria["noncreature_spell_ratio"]):
-                    score += 3.0
-            
-            elif archetype == DeckArchetype.COMBO:
-                if combo_pieces_found >= criteria["key_cards_threshold"]:
-                    score += 4.0
-            
-            elif archetype == DeckArchetype.RAMP:
-                if ramp_card_ratio >= criteria["ramp_card_ratio"]:
-                    score += 3.0
-            
-            elif archetype == DeckArchetype.TEMPO:
-                if bounce_spell_count >= criteria.get("bounce_spell_count", 0):
-                    score += 2.0
-                if cheap_creature_ratio >= criteria.get("cheap_creature_ratio", 0):
-                    score += 2.0
-            
-            elif archetype == DeckArchetype.BURN:
-                if direct_damage_ratio >= criteria.get("direct_damage_ratio", 0):
-                    score += 4.0
-            
-            elif archetype == DeckArchetype.TRIBAL:
-                if tribal_creature_ratio >= criteria.get("tribal_creature_ratio", 0):
-                    score += 4.0
-            
-            elif archetype == DeckArchetype.REANIMATOR:
-                if reanimation_spells >= criteria.get("reanimation_spell_count", 0):
-                    score += 2.0
-                if graveyard_interaction_ratio >= criteria.get("graveyard_interaction_ratio", 0):
-                    score += 2.0
-            
-            elif archetype == DeckArchetype.MILL:
-                if mill_spells >= criteria.get("mill_spell_count", 0):
-                    score += 4.0
-            
-            elif archetype == DeckArchetype.TOKENS:
-                if token_generators >= criteria.get("token_generator_count", 0):
-                    score += 4.0
-            
-            elif archetype == DeckArchetype.STOMPY:
-                if big_creature_ratio >= criteria.get("big_creature_ratio", 0):
-                    score += 2.0
-                if avg_power >= criteria.get("avg_power_threshold", 0):
-                    score += 2.0
-            
-            # Keyword-based scoring
-            if "keyword_points" in criteria:
-                keyword_matches = sum(1 for keyword in criteria["keyword_points"] 
-                                     if any(keyword in text for text in card_texts))
-                score += keyword_matches * 0.5
-            
-            # Card name-based scoring
-            if "card_name_points" in criteria:
-                name_matches = sum(1 for name_part in criteria["card_name_points"] 
-                                  if any(name_part in name for name in card_names))
-                score += name_matches * 0.5
-            
-            archetype_scores[archetype] = score
-        
-        # Find the archetype with the highest score
-        if not archetype_scores:
-            return DeckArchetype.MIDRANGE.value  # Default to midrange if no scores
-        
-        best_archetype = max(archetype_scores.items(), key=lambda x: x[1])
-        
-        # If the best score is very low, default to a more generic archetype
-        if best_archetype[1] < 1.0:
-            # Fallback based on simple heuristics
-            if creature_ratio >= 0.4 and avg_cmc <= 3.0:
-                return DeckArchetype.AGGRO.value
-            elif noncreature_spell_ratio >= 0.5 and avg_cmc >= 3.0:
-                return DeckArchetype.CONTROL.value
-            else:
-                return DeckArchetype.MIDRANGE.value
-        
-        return best_archetype[0].value
-    
+        return self.identify_strategy_profile(card_list).primary.value
+
     def calculate_deck_similarity(self, deck1: List[int], deck2: List[int]) -> float:
         """
         Calculate similarity between two decks.

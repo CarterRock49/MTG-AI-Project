@@ -19,6 +19,7 @@ from collections import OrderedDict
 from collections import Counter
 from pathlib import Path
 
+from .archetypes import declared_profile_hash, normalize_declared_profile
 from .card import Card
 from .card_registry import (
     REGISTRY_FILENAME,
@@ -85,6 +86,7 @@ def _parse_json_payload(payload: object, fallback_name: str) -> dict:
         sideboard = payload.get("sideboard", [])
         declared_format = payload.get("format")
         maybeboard = payload.get("maybeboard", [])
+        raw_strategy_profile = payload.get("strategy_profile")
         if raw_entries is None and all(
                 isinstance(value, int) for value in payload.values()):
             raw_entries = [
@@ -95,6 +97,7 @@ def _parse_json_payload(payload: object, fallback_name: str) -> dict:
     if not isinstance(payload, dict):
         declared_format = None
         maybeboard = []
+        raw_strategy_profile = None
     if not isinstance(raw_entries, list):
         raise ValueError("JSON deck list has no deck/cards list")
     def parse_entries(raw_values, label):
@@ -121,6 +124,9 @@ def _parse_json_payload(payload: object, fallback_name: str) -> dict:
     parsed = parse_entries(raw_entries, "deck")
     parsed_sideboard = parse_entries(sideboard, "sideboard")
     parsed_maybeboard = parse_entries(maybeboard, "maybeboard")
+    strategy_profile = (
+        normalize_declared_profile(raw_strategy_profile)
+        if raw_strategy_profile is not None else None)
     return {
         "name": name, "deck": _aggregate(parsed),
         "sideboard": _aggregate(parsed_sideboard),
@@ -129,6 +135,7 @@ def _parse_json_payload(payload: object, fallback_name: str) -> dict:
         "declared_format": (
             str(declared_format).strip().casefold()
             if declared_format else None),
+        "strategy_profile": strategy_profile,
     }
 
 
@@ -207,6 +214,7 @@ def parse_decklist(path, *, _source_bytes=None) -> dict:
         "sideboard_count": sum(count for count, _ in sideboard_entries),
         "maybeboard_count": sum(count for count, _ in maybeboard_entries),
         "declared_format": None,
+        "strategy_profile": None,
     }
 
 
@@ -477,7 +485,7 @@ def ingest_decklist(path, *, deck_name=None, format_name=None,
             "format": selected_format,
             "kind": "imported_deck",
             "name": deck_name,
-            "schema_version": 1,
+            "schema_version": 2,
             "sideboard": [
                 {"count": int(entry["count"]), "card": raw_card["name"]}
                 for entry, raw_card in selected_sideboard],
@@ -486,6 +494,11 @@ def ingest_decklist(path, *, deck_name=None, format_name=None,
             "source_decklist": source_path.name,
             "source_sha256": hashlib.sha256(source_bytes).hexdigest(),
         }
+        strategy_profile = parsed.get("strategy_profile")
+        if strategy_profile is not None:
+            payload["strategy_profile"] = strategy_profile
+            payload["strategy_profile_hash"] = declared_profile_hash(
+                strategy_profile)
         destination_dir.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_suffix(destination.suffix + ".tmp")
         temporary.write_text(

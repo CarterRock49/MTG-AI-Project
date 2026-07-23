@@ -4,6 +4,29 @@
     {
       "meta_share": 0.129,
       "name": "Selesnya Ouroboroid",
+      "strategy_profile": {
+        "axes": {
+          "board_width": 76,
+          "card_advantage": 48,
+          "combo_dependency": 15,
+          "graveyard_dependency": 5,
+          "instant_speed": 25,
+          "interaction": 35,
+          "mana_acceleration": 45,
+          "speed": 72,
+          "synergy_dependency": 62,
+          "threat_density": 78
+        },
+        "primary": "aggro",
+        "review": {
+          "basis": "Pinned 60-card main deck reviewed against card rules text.",
+          "reviewed_at": "2026-07-22",
+          "status": "reviewed"
+        },
+        "secondary": "midrange",
+        "tags": ["counters", "go_wide", "toolbox"],
+        "taxonomy_version": 1
+      },
       "source": "https://www.mtggoldfish.com/deck/7861989",
       "deck": [
         {"count": 3, "card": "Abandoned Air Temple"},
@@ -31,6 +54,29 @@
     {
       "meta_share": 0.129,
       "name": "Jeskai Lessons",
+      "strategy_profile": {
+        "axes": {
+          "board_width": 25,
+          "card_advantage": 86,
+          "combo_dependency": 20,
+          "graveyard_dependency": 35,
+          "instant_speed": 72,
+          "interaction": 78,
+          "mana_acceleration": 10,
+          "speed": 25,
+          "synergy_dependency": 58,
+          "threat_density": 15
+        },
+        "primary": "control",
+        "review": {
+          "basis": "Pinned 60-card main deck reviewed against card rules text.",
+          "reviewed_at": "2026-07-22",
+          "status": "reviewed"
+        },
+        "secondary": null,
+        "tags": ["board_control", "burn", "lessons", "spellslinger"],
+        "taxonomy_version": 1
+      },
       "source": "https://www.mtggoldfish.com/deck/7858638",
       "deck": [
         {"count": 4, "card": "Abandon Attachments"},
@@ -58,6 +104,29 @@
     {
       "meta_share": 0.123,
       "name": "Izzet Prowess",
+      "strategy_profile": {
+        "axes": {
+          "board_width": 50,
+          "card_advantage": 60,
+          "combo_dependency": 22,
+          "graveyard_dependency": 20,
+          "instant_speed": 85,
+          "interaction": 58,
+          "mana_acceleration": 5,
+          "speed": 88,
+          "synergy_dependency": 82,
+          "threat_density": 42
+        },
+        "primary": "tempo",
+        "review": {
+          "basis": "Pinned 60-card main deck reviewed against card rules text.",
+          "reviewed_at": "2026-07-22",
+          "status": "reviewed"
+        },
+        "secondary": "aggro",
+        "tags": ["burn", "prowess", "spellslinger", "tokens"],
+        "taxonomy_version": 1
+      },
       "source": "https://www.mtggoldfish.com/deck/7859084",
       "deck": [
         {"count": 4, "card": "Boomerang Basics"},
@@ -84,6 +153,29 @@
     {
       "meta_share": 0.115,
       "name": "4c Control",
+      "strategy_profile": {
+        "axes": {
+          "board_width": 18,
+          "card_advantage": 92,
+          "combo_dependency": 10,
+          "graveyard_dependency": 15,
+          "instant_speed": 82,
+          "interaction": 92,
+          "mana_acceleration": 5,
+          "speed": 15,
+          "synergy_dependency": 35,
+          "threat_density": 12
+        },
+        "primary": "control",
+        "review": {
+          "basis": "Pinned 60-card main deck reviewed against card rules text.",
+          "reviewed_at": "2026-07-22",
+          "status": "reviewed"
+        },
+        "secondary": null,
+        "tags": ["board_control", "burn"],
+        "taxonomy_version": 1
+      },
       "source": "https://www.mtggoldfish.com/deck/7852932",
       "deck": [
         {"count": 2, "card": "Abrade"}, {"count": 3, "card": "Consult the Star Charts"},
@@ -106,6 +198,29 @@
     {
       "meta_share": 0.087,
       "name": "Izzet Spellementals",
+      "strategy_profile": {
+        "axes": {
+          "board_width": 45,
+          "card_advantage": 72,
+          "combo_dependency": 30,
+          "graveyard_dependency": 60,
+          "instant_speed": 88,
+          "interaction": 65,
+          "mana_acceleration": 5,
+          "speed": 62,
+          "synergy_dependency": 78,
+          "threat_density": 38
+        },
+        "primary": "tempo",
+        "review": {
+          "basis": "Pinned 60-card main deck reviewed against card rules text.",
+          "reviewed_at": "2026-07-22",
+          "status": "reviewed"
+        },
+        "secondary": "midrange",
+        "tags": ["burn", "graveyard", "spellslinger"],
+        "taxonomy_version": 1
+      },
       "source": "https://www.mtggoldfish.com/deck/7848755",
       "deck": [
         {"count": 2, "card": "Boomerang Basics"}, {"count": 1, "card": "Bounce Off"},
@@ -125,6 +240,29 @@
     {
       "meta_share": 0.069,
       "name": "Dimir Excruciator",
+      "strategy_profile": {
+        "axes": {
+          "board_width": 30,
+          "card_advantage": 75,
+          "combo_dependency": 88,
+          "graveyard_dependency": 30,
+          "instant_speed": 48,
+          "interaction": 90,
+          "mana_acceleration": 0,
+          "speed": 25,
+          "synergy_dependency": 68,
+          "threat_density": 28
+        },
+        "primary": "combo",
+        "review": {
+          "basis": "Pinned 60-card main deck reviewed against card rules text.",
+          "reviewed_at": "2026-07-22",
+          "status": "reviewed"
+        },
+        "secondary": "control",
+        "tags": ["alternate_win", "board_control", "discard", "mill"],
+        "taxonomy_version": 1
+      },
       "source": "https://www.mtggoldfish.com/deck/7851898",
       "deck": [
         {"count": 3, "card": "Bitter Triumph"}, {"count": 2, "card": "Cavern of Souls"},
@@ -142,6 +280,29 @@
     {
       "meta_share": 0.055,
       "name": "Mono-Green Landfall",
+      "strategy_profile": {
+        "axes": {
+          "board_width": 65,
+          "card_advantage": 42,
+          "combo_dependency": 58,
+          "graveyard_dependency": 20,
+          "instant_speed": 8,
+          "interaction": 18,
+          "mana_acceleration": 92,
+          "speed": 67,
+          "synergy_dependency": 86,
+          "threat_density": 72
+        },
+        "primary": "ramp",
+        "review": {
+          "basis": "Pinned 60-card main deck reviewed against card rules text.",
+          "reviewed_at": "2026-07-22",
+          "status": "reviewed"
+        },
+        "secondary": "combo",
+        "tags": ["big_mana", "counters", "landfall", "lands"],
+        "taxonomy_version": 1
+      },
       "source": "https://www.mtggoldfish.com/deck/7850826",
       "deck": [
         {"count": 1, "card": "Archdruid's Charm"}, {"count": 3, "card": "Ba Sing Se"},
@@ -157,6 +318,29 @@
     {
       "meta_share": 0.031,
       "name": "Azorius Momo",
+      "strategy_profile": {
+        "axes": {
+          "board_width": 82,
+          "card_advantage": 68,
+          "combo_dependency": 12,
+          "graveyard_dependency": 10,
+          "instant_speed": 22,
+          "interaction": 28,
+          "mana_acceleration": 28,
+          "speed": 74,
+          "synergy_dependency": 78,
+          "threat_density": 82
+        },
+        "primary": "aggro",
+        "review": {
+          "basis": "Pinned 60-card main deck reviewed against card rules text.",
+          "reviewed_at": "2026-07-22",
+          "status": "reviewed"
+        },
+        "secondary": "midrange",
+        "tags": ["blink", "counters", "fliers", "go_wide", "lifegain", "tokens"],
+        "taxonomy_version": 1
+      },
       "source": "https://www.mtggoldfish.com/deck/7851900",
       "deck": [
         {"count": 2, "card": "Aang, Swift Savior // Aang and La, Ocean's Fury"}, {"count": 2, "card": "Abandoned Air Temple"},
@@ -174,6 +358,6 @@
   "format": "standard",
   "kind": "representative_metagame_corpus",
   "meta_share_total": 0.738,
-  "schema_version": 1,
+  "schema_version": 2,
   "source": "https://www.mtggoldfish.com/metagame/standard"
 }
