@@ -1,9 +1,9 @@
 """Versioned, deterministic deck-strategy profiles.
 
 This module is the single taxonomy boundary shared by deck ingestion,
-analytics, and the strategic planner.  It deliberately does not inspect an
-opponent's hidden zones and is not wired into the policy observation; the
-public opponent belief remains an independent Observation-v5 contract.
+analytics, the strategic planner, and Observation v6's exact-own strategy
+field.  It deliberately does not inspect an opponent's hidden zones; the
+public opponent belief remains an independent, public-information contract.
 """
 
 from __future__ import annotations
@@ -753,7 +753,7 @@ def planner_strategy_label(profile: DeckStrategyProfile) -> str:
 
 
 def encode_profile(profile: DeckStrategyProfile) -> tuple[float, ...]:
-    """Stable vector API reserved for a future, explicitly versioned observer."""
+    """Encode the active Observation-v6 exact-own strategy contract."""
 
     primary = tuple(
         1.0 if profile.primary.value == name else 0.0
@@ -770,4 +770,3 @@ def encode_profile(profile: DeckStrategyProfile) -> tuple[float, ...]:
 PROFILE_VECTOR_SIZE = (
     len(PRIMARY_ARCHETYPES) * 2 + len(STRATEGY_TAGS)
     + len(STRATEGY_AXES) + 1)
-

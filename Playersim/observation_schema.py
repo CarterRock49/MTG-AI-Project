@@ -11,9 +11,20 @@ from __future__ import annotations
 import hashlib
 import json
 
+from .archetypes import (
+    CLASSIFIER_VERSION,
+    PRIMARY_ARCHETYPES,
+    PROFILE_VECTOR_SIZE,
+    STRATEGY_AXES,
+    STRATEGY_TAGS,
+    TAXONOMY_VERSION,
+    classifier_identity,
+    taxonomy_identity,
+)
+
 
 OBSERVATION_SCHEMA_KIND = "playersim_policy_observation"
-OBSERVATION_SCHEMA_VERSION = 5
+OBSERVATION_SCHEMA_VERSION = 6
 SEMANTIC_IDENTITY_VOCAB_SIZE = 65_536
 SEMANTIC_IDENTITY_MAX = SEMANTIC_IDENTITY_VOCAB_SIZE - 1
 
@@ -141,6 +152,32 @@ CORRECTED_V5_SEMANTICS = (
     "producible_mana_uses_visible_untapped_sources_only",
 )
 
+# v6 gives the policy an explicit, centralized encoding of the observing
+# player's exact full-deck strategy profile.  The field is deliberately named
+# ``my_...`` and selected only after the observer-relative perspective is set:
+# there is no corresponding opponent-exact field.  Public opponent inference
+# remains the independent six-value ``opponent_archetype`` observation.
+EXACT_OWN_STRATEGY_PROFILE_FIELD = "my_exact_deck_strategy_profile"
+EXACT_OWN_STRATEGY_PROFILE_SIZE = PROFILE_VECTOR_SIZE
+EXACT_OWN_STRATEGY_PROFILE_ORDER = (
+    *(f"primary_one_hot:{name}" for name in PRIMARY_ARCHETYPES),
+    *(f"secondary_one_hot:{name}" for name in PRIMARY_ARCHETYPES),
+    *(f"tag:{name}" for name in STRATEGY_TAGS),
+    *(f"axis:{name}" for name in STRATEGY_AXES),
+    "confidence",
+)
+if len(EXACT_OWN_STRATEGY_PROFILE_ORDER) != EXACT_OWN_STRATEGY_PROFILE_SIZE:
+    raise RuntimeError("exact-own strategy profile schema width drifted")
+
+ADDED_V6_FIELDS = (EXACT_OWN_STRATEGY_PROFILE_FIELD,)
+
+CORRECTED_V6_SEMANTICS = (
+    "exact_strategy_profile_is_observer_own_only",
+    "opponent_exact_deck_profile_is_never_observed",
+    "opponent_archetype_remains_public_inference_only",
+    "strategy_profile_uses_reviewed_or_deterministic_inferred_contract",
+)
+
 CORRECTED_V3_SEMANTICS = (
     "snow_mana_pool_includes_restricted_snow_provenance",
     "total_available_mana_excludes_snow_provenance_duplicates",
@@ -195,6 +232,29 @@ def _schema_payload() -> dict:
         "max_deck_observation_size": MAX_DECK_OBSERVATION_SIZE,
         "added_v5_fields": list(ADDED_V5_FIELDS),
         "corrected_v5_semantics": list(CORRECTED_V5_SEMANTICS),
+        "added_v6_fields": list(ADDED_V6_FIELDS),
+        "corrected_v6_semantics": list(CORRECTED_V6_SEMANTICS),
+        "exact_own_strategy_profile": {
+            "field": EXACT_OWN_STRATEGY_PROFILE_FIELD,
+            "dtype": "float32",
+            "shape": [EXACT_OWN_STRATEGY_PROFILE_SIZE],
+            "bounds": [0.0, 1.0],
+            "component_order": list(EXACT_OWN_STRATEGY_PROFILE_ORDER),
+            "component_encoding": {
+                "primary": "closed_vocabulary_one_hot",
+                "secondary": "closed_vocabulary_one_hot_or_all_zero",
+                "tags": "closed_vocabulary_multi_hot",
+                "axes": "integer_0_to_100_divided_by_100",
+                "confidence":
+                    "basis_points_0_to_10000_divided_by_10000",
+            },
+            "taxonomy_version": TAXONOMY_VERSION,
+            "taxonomy_sha256": taxonomy_identity()["sha256"],
+            "classifier_version": CLASSIFIER_VERSION,
+            "classifier_sha256": classifier_identity()["sha256"],
+            "own_profile_source": "reviewed_or_deterministic_full_deck_inference",
+            "opponent_profile_source": "public_inference_only",
+        },
     }
 
 

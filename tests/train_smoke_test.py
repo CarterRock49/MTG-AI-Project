@@ -327,14 +327,15 @@ def check_mask_aware_evaluation():
                     m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256
                 return relineaged
 
-            # Use the current Observation-v5 canary; the older-schema canaries
-            # correctly fail closed against v5 runtime.
+            # Every named canary predates Observation v6. Relineage this copy
+            # only while testing its other frozen runtime dimensions.
             canary_args = SimpleNamespace(
                 **m.ROUND_7_97_CANARY["cli"],
                 canary_config="round-7.97", resume=None,
                 optimize_hp=False)
             canary = m.validate_canary_cli(canary_args)
             assert canary is not m.ROUND_7_97_CANARY
+            canary = to_current_observation(canary)
             canary_decks = [{"name": name} for name in (
                 "Selesnya Ouroboroid", "Jeskai Lessons", "Izzet Prowess",
                 "4c Control", "Izzet Spellementals", "Dimir Excruciator",
@@ -1760,17 +1761,49 @@ def check_runtime_configuration():
     with tempfile.TemporaryDirectory() as tmp:
         run_dir = os.path.join(tmp, "source_run")
         checkpoint_dir = os.path.join(run_dir, "checkpoints")
-        os.makedirs(checkpoint_dir)
-        checkpoint_path = os.path.join(checkpoint_dir, "model.zip")
-        with open(checkpoint_path, "wb") as handle:
-            handle.write(b"checkpoint")
+        pool_dir = os.path.join(run_dir, "checkpoint_pool")
+        direct_artifact_paths = {
+            "final_model": os.path.join(run_dir, "final_model.zip"),
+            "interrupted_model": os.path.join(
+                run_dir, "interrupted_model.zip"),
+            "failed_model": os.path.join(run_dir, "failed_model.zip"),
+            "best_model": os.path.join(
+                run_dir, "best_model", "best_model.zip"),
+            "best_candidate_model": os.path.join(
+                run_dir, "best_candidate", "candidate.zip"),
+        }
+        checkpoint_path = os.path.join(
+            checkpoint_dir, "model_500000_steps.zip")
+        pool_snapshot_path = os.path.join(
+            pool_dir, "pool_snapshot_000001.zip")
+        all_model_paths = list(direct_artifact_paths.values()) + [
+            checkpoint_path, pool_snapshot_path]
+        for index, model_path in enumerate(all_model_paths):
+            os.makedirs(os.path.dirname(model_path), exist_ok=True)
+            with open(model_path, "wb") as handle:
+                handle.write(f"checkpoint-{index}".encode("ascii"))
         resume_manifest_path = os.path.join(run_dir, "training_run.json")
         empty_strategy_lineage = m.strategy_profile_lineage([])
         resume_manifest = {
             "kind": "playersim_training_run",
-            "run_id": "compatible-v5",
+            "run_id": "compatible-v6-film",
             "lineage": {
+                "card_registry": {"sha256": "1" * 64},
+                "feature_schema": {"sha256": "2" * 64},
+                "corpus": {"sha256": "3" * 64},
                 "strategy_profiles": empty_strategy_lineage,
+            },
+            "artifacts": {
+                **{
+                    role: m.artifact_identity(path)
+                    for role, path in direct_artifact_paths.items()
+                },
+                "checkpoints": [m.artifact_identity(checkpoint_path)],
+                "checkpoint_pool": {
+                    "manifest": None,
+                    "snapshots_on_disk": [
+                        m.artifact_identity(pool_snapshot_path)],
+                },
             },
             "resolved": {
                 "training_config": {
@@ -1781,25 +1814,175 @@ def check_runtime_configuration():
                     m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION,
                 "observation_schema_sha256":
                     m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256,
+                "feature_extractor_architecture":
+                    m.feature_extractor_architecture_identity(),
                 "curriculum": None,
             },
         }
         with open(resume_manifest_path, "w", encoding="utf-8") as handle:
             json.dump(resume_manifest, handle)
+
+        supported_artifacts = [
+            (path, role) for role, path in direct_artifact_paths.items()
+        ] + [
+            (checkpoint_path, "permanent_checkpoint"),
+            (pool_snapshot_path, "checkpoint_pool_snapshot"),
+        ]
+        for supported_path, expected_role in supported_artifacts:
+            supported_lineage = m.validate_resume_lineage(
+                supported_path, "none")
+            source_pointer = supported_lineage["checkpoint_artifact"][
+                "source_pointer"]
+            assert source_pointer["role"] == expected_role
+            assert source_pointer["sha256"] == m.sha256_file(
+                supported_path)
+            assert source_pointer["size_bytes"] == os.path.getsize(
+                supported_path)
+
         lineage = m.validate_resume_lineage(checkpoint_path, "none")
-        assert lineage["run_id"] == "compatible-v5"
-        current_strategy_lineage = {
-            "strategy_profiles": json.loads(json.dumps(
-                empty_strategy_lineage)),
+        assert lineage["run_id"] == "compatible-v6-film"
+        assert lineage["feature_extractor_architecture"] == \
+            m.feature_extractor_architecture_identity()
+        assert lineage["checkpoint_artifact"]["selected"]["sha256"] == \
+            m.sha256_file(checkpoint_path)
+
+        foreign_path = os.path.join(checkpoint_dir, "foreign.zip")
+        with open(foreign_path, "wb") as handle:
+            handle.write(b"foreign-unattributed-checkpoint")
+        try:
+            m.validate_resume_lineage(foreign_path, "none")
+        except ValueError as error:
+            assert "not recorded as an allowed model artifact" in str(error)
+        else:
+            raise AssertionError(
+                "resume accepted foreign bytes from inside a source run")
+
+        non_archive_path = os.path.join(checkpoint_dir, "checkpoint.json")
+        with open(non_archive_path, "wb") as handle:
+            handle.write(b"not-a-model-archive")
+        resume_manifest["artifacts"]["checkpoints"].append(
+            m.artifact_identity(non_archive_path))
+        with open(resume_manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(resume_manifest, handle)
+        try:
+            m.validate_resume_lineage(non_archive_path, "none")
+        except ValueError as error:
+            assert ".zip" in str(error) and "archive" in str(error)
+        else:
+            raise AssertionError(
+                "resume accepted a non-archive checkpoint manifest entry")
+        resume_manifest["artifacts"]["checkpoints"].pop()
+        with open(resume_manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(resume_manifest, handle)
+
+        with open(checkpoint_path, "rb") as handle:
+            authorized_checkpoint_bytes = handle.read()
+        with open(checkpoint_path, "wb") as handle:
+            handle.write(b"checkpoint-swapped-after-authorization")
+        try:
+            m.validate_resume_checkpoint_unchanged(
+                checkpoint_path, lineage)
+        except ValueError as error:
+            assert "changed after artifact authorization" in str(error)
+        else:
+            raise AssertionError(
+                "resume missed a checkpoint swap before model loading")
+        with open(checkpoint_path, "wb") as handle:
+            handle.write(authorized_checkpoint_bytes)
+        assert m.validate_resume_checkpoint_unchanged(
+            checkpoint_path, lineage)["sha256"] == m.sha256_file(
+                checkpoint_path)
+        recorded_architecture = resume_manifest["resolved"][
+            "feature_extractor_architecture"]
+        resume_manifest["resolved"]["feature_extractor_architecture"] = {
+            **recorded_architecture, "sha256": "0" * 64,
         }
-        assert m.validate_resume_strategy_lineage(
-            lineage, current_strategy_lineage) == (
-                lineage["strategy_profile_lineage"])
-        current_strategy_lineage["strategy_profiles"][
+        with open(resume_manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(resume_manifest, handle)
+        try:
+            m.validate_resume_lineage(checkpoint_path, "none")
+        except ValueError as error:
+            assert "feature-extractor architecture" in str(error)
+        else:
+            raise AssertionError(
+                "resume accepted a drifted FiLM/extractor architecture")
+        resume_manifest["resolved"]["feature_extractor_architecture"] = \
+            recorded_architecture
+        with open(resume_manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(resume_manifest, handle)
+        current_schema_version = resume_manifest["resolved"][
+            "observation_schema_version"]
+        current_schema_hash = resume_manifest["resolved"][
+            "observation_schema_sha256"]
+        resume_manifest["resolved"]["observation_schema_version"] = 5
+        resume_manifest["resolved"]["observation_schema_sha256"] = \
+            "legacy-observation-v5"
+        with open(resume_manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(resume_manifest, handle)
+        try:
+            m.validate_resume_lineage(checkpoint_path, "none")
+        except ValueError as error:
+            assert "Observation v6" in str(error)
+        else:
+            raise AssertionError(
+                "resume accepted a legacy Observation-v5 checkpoint")
+        resume_manifest["resolved"]["observation_schema_version"] = \
+            current_schema_version
+        resume_manifest["resolved"]["observation_schema_sha256"] = \
+            current_schema_hash
+        with open(resume_manifest_path, "w", encoding="utf-8") as handle:
+            json.dump(resume_manifest, handle)
+        current_corpus_lineage = json.loads(json.dumps(
+            resume_manifest["lineage"]))
+        validated_current_lineage = m.validate_resume_corpus_lineage(
+            lineage, current_corpus_lineage)
+        assert validated_current_lineage["format"] == \
+            lineage["format_lineage"]
+        assert validated_current_lineage["strategy_profiles"] == \
+            lineage["strategy_profile_lineage"]
+
+        for lineage_field in (
+                "card_registry", "feature_schema", "corpus"):
+            drifted_lineage = json.loads(json.dumps(
+                current_corpus_lineage))
+            drifted_lineage[lineage_field]["sha256"] = "f" * 64
+            try:
+                m.validate_resume_corpus_lineage(
+                    lineage, drifted_lineage)
+            except ValueError as error:
+                assert lineage_field in str(error)
+                assert "mismatch" in str(error)
+            else:
+                raise AssertionError(
+                    "resume accepted drifted freshly loaded "
+                    f"{lineage_field} bytes")
+
+        for lineage_field in (
+                "card_registry", "feature_schema", "corpus"):
+            recorded_identity = resume_manifest["lineage"].pop(
+                lineage_field)
+            with open(
+                    resume_manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(resume_manifest, handle)
+            try:
+                m.validate_resume_lineage(checkpoint_path, "none")
+            except ValueError as error:
+                assert lineage_field in str(error)
+                assert "required" in str(error)
+            else:
+                raise AssertionError(
+                    f"resume accepted a source manifest without "
+                    f"{lineage_field} lineage")
+            resume_manifest["lineage"][lineage_field] = recorded_identity
+            with open(
+                    resume_manifest_path, "w", encoding="utf-8") as handle:
+                json.dump(resume_manifest, handle)
+
+        current_corpus_lineage["strategy_profiles"][
             "reviewed_profiles_sha256"] = "0" * 64
         try:
-            m.validate_resume_strategy_lineage(
-                lineage, current_strategy_lineage)
+            m.validate_resume_corpus_lineage(
+                lineage, current_corpus_lineage)
         except ValueError as error:
             assert "does not match" in str(error)
         else:
@@ -2027,8 +2210,11 @@ def check_main_failure_semantics():
                 json.dump({
                     "kind": "playersim_training_run",
                     "run_id": "resume-source",
-                    "lineage": {
-                        "strategy_profiles": m.strategy_profile_lineage([]),
+                    "lineage": json.loads(json.dumps(
+                        first_manifest["lineage"])),
+                    "artifacts": {
+                        "final_model": m.artifact_identity(
+                            resume_checkpoint),
                     },
                     "resolved": {
                         "training_config": {
@@ -2039,6 +2225,8 @@ def check_main_failure_semantics():
                             m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION,
                         "observation_schema_sha256":
                             m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256,
+                        "feature_extractor_architecture":
+                            m.feature_extractor_architecture_identity(),
                         "curriculum": None,
                     },
                 }, handle)
@@ -2312,6 +2500,8 @@ def build_model(vec_env):
 
 @stage("regression: extractor weights registered and trainable")
 def check_extractor_registration(model):
+    import main as m
+
     extractor = model.policy.features_extractor
 
     # 1. The per-key sub-networks must be registered modules (ModuleDict).
@@ -2322,7 +2512,10 @@ def check_extractor_registration(model):
         "shared semantic identity embedding missing from state_dict")
     from Playersim.observation_schema import SEMANTIC_IDENTITY_FIELDS
     identity_fields = set(SEMANTIC_IDENTITY_FIELDS)
-    intentionally_external = {"phase", "action_mask", "target_card_ids"}
+    intentionally_external = {
+        "phase", "action_mask", "target_card_ids",
+        m.EXACT_OWN_STRATEGY_PROFILE_FIELD,
+    }
     expected_extractor_keys = (
         set(model.observation_space.spaces)
         - intentionally_external - identity_fields)
@@ -2336,6 +2529,25 @@ def check_extractor_registration(model):
         "semantic identity vocabulary drifted with the active deck corpus")
     assert "ability_recommendations" in extractor.extractors, (
         "rank-3 ability recommendations do not reach the policy")
+    assert m.EXACT_OWN_STRATEGY_PROFILE_FIELD not in extractor.extractors, (
+        "strategy conditioning leaked into generic feature concatenation")
+    assert any(
+        key.startswith("strategy_profile_encoder.") for key in state_keys), (
+        "strategy-profile encoder is missing from state_dict")
+    assert any(key.startswith("strategy_film.") for key in state_keys), (
+        "FiLM scale/shift layer is missing from state_dict")
+    strategy_space = model.observation_space.spaces[
+        m.EXACT_OWN_STRATEGY_PROFILE_FIELD]
+    assert strategy_space.shape == (m.EXACT_OWN_STRATEGY_PROFILE_SIZE,)
+    architecture = m.feature_extractor_architecture_identity()
+    assert architecture["strategy_conditioning"]["observation_key"] == \
+        m.EXACT_OWN_STRATEGY_PROFILE_FIELD
+    assert architecture["strategy_conditioning"]["profile_vector_size"] == \
+        m.EXACT_OWN_STRATEGY_PROFILE_SIZE
+    assert architecture["sha256"] == (
+        "179b31ea6925d112e0b527cd1f03aa15dae6a36a061d50c3f66c671c1028d9ab")
+    assert architecture["sha256"] == \
+        m.FEATURE_EXTRACTOR_ARCHITECTURE_SHA256
 
     # 2. feature_merger must exist at construction time, before any forward().
     assert hasattr(extractor, "feature_merger"), (
@@ -2357,6 +2569,96 @@ def check_extractor_registration(model):
         f"phase embedding has {n_emb} slots but phases reach {true_max_phase}")
 
 
+@stage("Observation-v6 strategy FiLM is routed, live, and profile-dependent")
+def check_strategy_film_liveness(model):
+    import torch
+    from gymnasium import spaces
+    import main as m
+
+    extractor = model.policy.features_extractor
+    observation = model.get_env().reset()
+    tensors, _ = model.policy.obs_to_tensor(observation)
+    first = {key: value.clone() for key, value in tensors.items()}
+    second = {key: value.clone() for key, value in tensors.items()}
+    first_profile = torch.zeros_like(
+        first[m.EXACT_OWN_STRATEGY_PROFILE_FIELD])
+    second_profile = torch.zeros_like(first_profile)
+    first_profile[:, 0] = 1.0
+    first_profile[:, -1] = 1.0
+    second_profile[:, 3] = 1.0
+    second_profile[:, -1] = 1.0
+    first[m.EXACT_OWN_STRATEGY_PROFILE_FIELD] = first_profile
+    second[m.EXACT_OWN_STRATEGY_PROFILE_FIELD] = second_profile
+
+    extractor.eval()
+    with torch.no_grad():
+        first_features = extractor(first)
+        second_features = extractor(second)
+    assert first_features.shape == second_features.shape == (
+        1, m.FEATURE_OUTPUT_DIM)
+    assert torch.isfinite(first_features).all()
+    assert torch.isfinite(second_features).all()
+    difference = torch.max(
+        torch.abs(first_features - second_features)).item()
+    assert difference > 1e-7, (
+        "changing only the exact own-deck profile did not change features")
+
+    extractor.train()
+    extractor.zero_grad(set_to_none=True)
+    live_features = extractor(first)
+    live_features.square().mean().backward()
+    for module_name, module in (
+            ("strategy_profile_encoder", extractor.strategy_profile_encoder),
+            ("strategy_film", extractor.strategy_film)):
+        gradients = [
+            parameter.grad for parameter in module.parameters()
+            if parameter.requires_grad]
+        assert gradients and all(
+            gradient is not None for gradient in gradients), (
+            f"{module_name} is disconnected from the feature output")
+        assert any(
+            torch.count_nonzero(gradient).item()
+            for gradient in gradients), (
+            f"{module_name} received only zero gradients")
+        assert all(
+            torch.isfinite(gradient).all() for gradient in gradients), (
+            f"{module_name} produced non-finite gradients")
+    model.policy.optimizer.zero_grad(set_to_none=True)
+
+    # Fail closed before allocating the larger state networks when the schema
+    # omits or changes the conditioning vector.
+    state_space = spaces.Box(
+        low=-1.0, high=1.0, shape=(2,), dtype=np.float32)
+    phase_space = spaces.Box(
+        low=0, high=31, shape=(1,), dtype=np.int32)
+    missing_space = spaces.Dict({
+        "phase": phase_space,
+        "state": state_space,
+    })
+    try:
+        m.FixedWindowMTGExtractor(missing_space, features_dim=16)
+    except ValueError as error:
+        assert m.EXACT_OWN_STRATEGY_PROFILE_FIELD in str(error)
+    else:
+        raise AssertionError("extractor accepted a pre-v6 observation space")
+
+    wrong_space = spaces.Dict({
+        "phase": phase_space,
+        "state": state_space,
+        m.EXACT_OWN_STRATEGY_PROFILE_FIELD: spaces.Box(
+            low=0.0, high=1.0,
+            shape=(m.EXACT_OWN_STRATEGY_PROFILE_SIZE + 1,),
+            dtype=np.float32),
+    })
+    try:
+        m.FixedWindowMTGExtractor(wrong_space, features_dim=16)
+    except ValueError as error:
+        assert "must have shape" in str(error)
+    else:
+        raise AssertionError(
+            "extractor accepted a drifted strategy-profile shape")
+
+
 @stage("one model directory contains every run artifact")
 def check_model_artifact_layout(model):
     import main as m
@@ -2373,6 +2675,11 @@ def check_model_artifact_layout(model):
             summary = os.path.join(
                 run_model_dir, "architecture", "network_summary.txt")
             assert os.path.isfile(summary)
+            with open(summary, encoding="utf-8") as handle:
+                summary_text = handle.read()
+            assert m.feature_extractor_architecture_identity()[
+                "sha256"] in summary_text
+            assert m.EXACT_OWN_STRATEGY_PROFILE_FIELD in summary_text
             assert sorted(os.listdir(temp_dir)) == [run_id], (
                 "recording architecture created a sibling top-level model "
                 f"directory: {os.listdir(temp_dir)}")
@@ -2394,10 +2701,18 @@ def save_load_roundtrip(model, vec_env):
     from sb3_contrib.ppo_mask import MaskablePPO
     from stable_baselines3.common.vec_env import DummyVecEnv
     from Playersim.card import Card
+    import torch
     import main as m
 
     with tempfile.TemporaryDirectory() as tmp:
         path = os.path.join(tmp, "roundtrip_model")
+        reference_observation = vec_env.reset()
+        reference_tensors, _ = model.policy.obs_to_tensor(
+            reference_observation)
+        model.policy.features_extractor.eval()
+        with torch.no_grad():
+            reference_features = model.policy.features_extractor(
+                reference_tensors).detach().cpu()
         model.save(path)
         run_vocab = tuple(vec_env.run_subtype_vocab)
         saved_global_vocab = list(Card.SUBTYPE_VOCAB)
@@ -2417,6 +2732,17 @@ def save_load_roundtrip(model, vec_env):
             validation_env = DummyVecEnv([make_validation_env])
             assert validation_env.observation_space == vec_env.observation_space
             loaded = MaskablePPO.load(path, env=validation_env)
+            loaded.policy.features_extractor.eval()
+            loaded_tensors, _ = loaded.policy.obs_to_tensor(
+                reference_observation)
+            with torch.no_grad():
+                loaded_features = loaded.policy.features_extractor(
+                    loaded_tensors).detach().cpu()
+            assert torch.equal(reference_features, loaded_features), (
+                "save/load changed the exact FiLM-conditioned features")
+            loaded_state_keys = loaded.policy.features_extractor.state_dict()
+            assert "strategy_film.weight" in loaded_state_keys
+            assert "strategy_profile_encoder.0.weight" in loaded_state_keys
             obs = validation_env.reset()
             masks = np.stack(validation_env.env_method("action_mask"))
             action, _ = loaded.predict(
@@ -2452,6 +2778,7 @@ def main():
         if model is None:
             return finish()
         check_extractor_registration(model)
+        check_strategy_film_liveness(model)
         check_model_artifact_layout(model)
         short_train(model)
         save_load_roundtrip(model, vec_env)

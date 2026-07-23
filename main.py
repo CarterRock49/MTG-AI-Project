@@ -60,8 +60,22 @@ from Playersim.archetypes import (
     declared_profile_hash,
     taxonomy_identity as archetype_taxonomy_identity,
 )
-from Playersim.observation_schema import SEMANTIC_IDENTITY_FIELDS
+from Playersim.observation_schema import (
+    EXACT_OWN_STRATEGY_PROFILE_FIELD,
+    EXACT_OWN_STRATEGY_PROFILE_SIZE,
+    SEMANTIC_IDENTITY_FIELDS,
+)
 from Playersim.debug import DEBUG_MODE
+
+# Observation v6 exposes the observer's exact own-deck strategy profile. It
+# is conditioning context, not another interchangeable state vector: routing
+# it through the generic concatenation would make the distinction accidental
+# and much harder to audit.
+FEATURE_EXTRACTOR_ARCHITECTURE_KIND = "playersim_fixed_window_mtg_extractor"
+FEATURE_EXTRACTOR_ARCHITECTURE_VERSION = 2
+STRATEGY_FILM_HIDDEN_DIM = 64
+STRATEGY_FILM_SCALE_LIMIT = 0.25
+STRATEGY_FILM_SHIFT_LIMIT = 0.25
 
 # Custom Feature Extractor and Policy
 class FixedWindowMTGExtractor(BaseFeaturesExtractor):
@@ -71,9 +85,36 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
     """
     def __init__(self, observation_space, features_dim=512):
         super().__init__(observation_space, features_dim=features_dim)
+
+        strategy_space = observation_space.spaces.get(
+            EXACT_OWN_STRATEGY_PROFILE_FIELD)
+        if strategy_space is None:
+            raise ValueError(
+                "Observation v6 requires conditioning field "
+                f"'{EXACT_OWN_STRATEGY_PROFILE_FIELD}'")
+        if tuple(strategy_space.shape) != (
+                EXACT_OWN_STRATEGY_PROFILE_SIZE,):
+            raise ValueError(
+                f"'{EXACT_OWN_STRATEGY_PROFILE_FIELD}' must have shape "
+                f"({EXACT_OWN_STRATEGY_PROFILE_SIZE},), got "
+                f"{strategy_space.shape}")
         
         self.output_dim = features_dim
         self.has_initialized = False
+
+        # All FiLM modules exist before SB3 creates its optimizer. The final
+        # layer starts close to the identity transform (not exactly zero, so
+        # profile-dependent gradients and outputs are live from update one).
+        self.strategy_profile_encoder = torch.nn.Sequential(
+            torch.nn.Linear(
+                EXACT_OWN_STRATEGY_PROFILE_SIZE,
+                STRATEGY_FILM_HIDDEN_DIM),
+            torch.nn.ReLU(),
+        )
+        self.strategy_film = torch.nn.Linear(
+            STRATEGY_FILM_HIDDEN_DIM, 2 * self.output_dim)
+        torch.nn.init.xavier_uniform_(self.strategy_film.weight, gain=0.01)
+        torch.nn.init.zeros_(self.strategy_film.bias)
         
         # BUGFIX: was a plain dict, so PyTorch never registered these sub-networks.
         # Their weights were invisible to the optimizer (never trained), missing from
@@ -120,7 +161,9 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
             # phase has a dedicated embedding; action_mask is consumed by
             # MaskablePPO; target_card_ids are unstable runtime occurrence
             # handles used only to verify the public target-page protocol.
-            if key in {"phase", "action_mask", "target_card_ids"}:
+            if key in {
+                    "phase", "action_mask", "target_card_ids",
+                    EXACT_OWN_STRATEGY_PROFILE_FIELD}:
                 continue
 
             if key in SEMANTIC_IDENTITY_FIELDS:
@@ -209,6 +252,10 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
 
     def forward(self, observations):
         """Process the observations through the feature extractors"""
+        if EXACT_OWN_STRATEGY_PROFILE_FIELD not in observations:
+            raise KeyError(
+                "Missing required Observation-v6 conditioning field "
+                f"'{EXACT_OWN_STRATEGY_PROFILE_FIELD}'")
         encoded_tensor_list = []
 
         # Process discrete observations
@@ -247,19 +294,44 @@ class FixedWindowMTGExtractor(BaseFeaturesExtractor):
             f"The observation space likely changed after construction.")
         merged_features = self.feature_merger(preprocessed_features)
         projected_features = self.final_projection(merged_features)
+
+        # FiLM keeps the learned game-state representation at the fixed policy
+        # width while allowing one shared policy to specialize its response to
+        # the exact strategy of the observer's own deck. Bounded modulation
+        # prevents one malformed/extreme profile from exploding activations.
+        strategy_profile = observations[
+            EXACT_OWN_STRATEGY_PROFILE_FIELD].float().clamp(0.0, 1.0)
+        expected_profile_shape = (
+            batch_size, EXACT_OWN_STRATEGY_PROFILE_SIZE)
+        if tuple(strategy_profile.shape) != expected_profile_shape:
+            raise ValueError(
+                f"Batched '{EXACT_OWN_STRATEGY_PROFILE_FIELD}' must have shape "
+                f"{expected_profile_shape}, got "
+                f"{tuple(strategy_profile.shape)}")
+        strategy_context = self.strategy_profile_encoder(strategy_profile)
+        raw_scale, raw_shift = self.strategy_film(strategy_context).chunk(
+            2, dim=1)
+        film_scale = torch.tanh(raw_scale) * STRATEGY_FILM_SCALE_LIMIT
+        film_shift = torch.tanh(raw_shift) * STRATEGY_FILM_SHIFT_LIMIT
+        conditioned_features = (
+            projected_features * (1.0 + film_scale) + film_shift)
         
         # Apply the length-one gated feature transform.
-        sequence = projected_features.unsqueeze(1)
+        sequence = conditioned_features.unsqueeze(1)
         hidden_state = (
-            torch.zeros(1, batch_size, self.output_dim, device=projected_features.device),
-            torch.zeros(1, batch_size, self.output_dim, device=projected_features.device)
+            torch.zeros(
+                1, batch_size, self.output_dim,
+                device=conditioned_features.device),
+            torch.zeros(
+                1, batch_size, self.output_dim,
+                device=conditioned_features.device)
         )
         
         lstm_out, _ = self.lstm(sequence, hidden_state)
         lstm_features = lstm_out.squeeze(1)
         
         # Combine with residual connection
-        result = projected_features + lstm_features
+        result = conditioned_features + lstm_features
         
         return result
 
@@ -1339,6 +1411,126 @@ def artifact_identity_from_pointer(pointer):
     return identity
 
 
+def resume_model_artifact_pointers(source_manifest):
+    """Return the model pointers a training manifest permits for resume.
+
+    Only model-bearing artifact fields are accepted.  In particular, merely
+    placing an archive below a run directory does not make it attributable to
+    that run: its exact SHA-256 and size must have been published in the
+    nearest ``training_run.json`` terminal artifact inventory.
+    """
+    artifacts = source_manifest.get("artifacts")
+    if not isinstance(artifacts, dict):
+        raise ValueError(
+            "Resume manifest has no model artifact inventory")
+
+    candidates = []
+
+    def add_pointer(role, pointer):
+        if pointer is None:
+            return
+        if not isinstance(pointer, dict):
+            raise ValueError(
+                f"Resume manifest artifact {role} must be an object")
+        path = pointer.get("path")
+        digest = str(pointer.get("sha256") or "")
+        size = pointer.get("size_bytes")
+        if not isinstance(path, str) or not path.strip():
+            raise ValueError(
+                f"Resume manifest artifact {role} requires a path")
+        if not path.casefold().endswith(".zip"):
+            raise ValueError(
+                f"Resume manifest artifact {role} is not a .zip archive")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(
+                f"Resume manifest artifact {role} requires a lowercase "
+                "SHA-256 digest")
+        if (isinstance(size, bool) or not isinstance(size, int)
+                or size < 0):
+            raise ValueError(
+                f"Resume manifest artifact {role} requires a nonnegative "
+                "size_bytes integer")
+        candidates.append({
+            "role": role,
+            "path": path,
+            "sha256": digest,
+            "size_bytes": size,
+        })
+
+    for role in (
+            "final_model", "interrupted_model", "failed_model",
+            "best_model", "best_candidate_model"):
+        add_pointer(role, artifacts.get(role))
+
+    checkpoints = artifacts.get("checkpoints", [])
+    if not isinstance(checkpoints, list):
+        raise ValueError(
+            "Resume manifest artifacts.checkpoints must be a list")
+    for pointer in checkpoints:
+        add_pointer("permanent_checkpoint", pointer)
+
+    checkpoint_pool = artifacts.get("checkpoint_pool") or {}
+    if not isinstance(checkpoint_pool, dict):
+        raise ValueError(
+            "Resume manifest artifacts.checkpoint_pool must be an object")
+    pool_snapshots = checkpoint_pool.get("snapshots_on_disk", [])
+    if not isinstance(pool_snapshots, list):
+        raise ValueError(
+            "Resume manifest checkpoint-pool snapshots must be a list")
+    for pointer in pool_snapshots:
+        add_pointer("checkpoint_pool_snapshot", pointer)
+
+    if not candidates:
+        raise ValueError(
+            "Resume manifest records no allowed model artifacts")
+    return candidates
+
+
+def validate_resume_checkpoint_artifact(checkpoint, source_manifest):
+    """Bind selected resume bytes to a source manifest model pointer."""
+    actual_checkpoint = resolve_artifact_path(checkpoint)
+    if actual_checkpoint is None:
+        raise ValueError(f"Resume checkpoint does not exist: {checkpoint}")
+    if not actual_checkpoint.casefold().endswith(".zip"):
+        raise ValueError("Resume checkpoint must be a .zip model archive")
+    selected = artifact_identity(actual_checkpoint)
+    matches = [
+        pointer for pointer in resume_model_artifact_pointers(source_manifest)
+        if (pointer["sha256"] == selected["sha256"]
+            and pointer["size_bytes"] == selected["size_bytes"])
+    ]
+    if not matches:
+        raise ValueError(
+            "Resume checkpoint SHA-256/size is not recorded as an allowed "
+            "model artifact in its nearest training_run.json")
+    return {
+        "selected": selected,
+        "source_pointer": matches[0],
+    }
+
+
+def validate_resume_checkpoint_unchanged(checkpoint, resume_lineage):
+    """Recheck authorized checkpoint bytes immediately before model load."""
+    recorded = ((resume_lineage or {}).get("checkpoint_artifact") or {}).get(
+        "selected")
+    if not isinstance(recorded, dict):
+        raise ValueError(
+            "Resume metadata is missing its selected checkpoint identity")
+    actual_checkpoint = resolve_artifact_path(checkpoint)
+    current = (
+        artifact_identity(actual_checkpoint)
+        if (actual_checkpoint is not None
+            and actual_checkpoint.casefold().endswith(".zip"))
+        else None)
+    if (current is None
+            or current.get("sha256") != recorded.get("sha256")
+            or current.get("size_bytes") != recorded.get("size_bytes")):
+        raise ValueError(
+            "Resume checkpoint changed after artifact authorization and "
+            "before model loading")
+    return current
+
+
 def build_fixed_evaluation_schedule(decks, n_eval_episodes, seed):
     """Build reproducible, exposure-balanced periodic evaluation pairs.
 
@@ -1494,6 +1686,8 @@ def validate_canary_runtime(config, *, lineage, training_config, curriculum,
         "curriculum_sha256": configuration_sha256(curriculum),
         "num_envs": int(num_envs),
         "feature_output_dim": FEATURE_OUTPUT_DIM,
+        "feature_extractor_architecture_sha256":
+            feature_extractor_architecture_identity()["sha256"],
         "selected_device": str(selected_device),
     })
     if "checkpoint_pool_config" in expected_runtime:
@@ -1635,6 +1829,9 @@ def validate_resume_lineage(checkpoint_path, requested_curriculum):
     if source_manifest.get("kind") != "playersim_training_run":
         raise ValueError("Resume manifest has an unknown artifact kind")
 
+    checkpoint_artifact = validate_resume_checkpoint_artifact(
+        checkpoint, source_manifest)
+
     resolved = source_manifest.get("resolved") or {}
     training_config = resolved.get("training_config") or {}
     reward_contract = training_config.get("reward_contract_version")
@@ -1650,6 +1847,20 @@ def validate_resume_lineage(checkpoint_path, requested_curriculum):
         raise ValueError(
             "Resume checkpoint does not match the current Observation "
             f"v{AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION} version/hash")
+
+    expected_extractor_architecture = (
+        feature_extractor_architecture_identity())
+    recorded_extractor_architecture = resolved.get(
+        "feature_extractor_architecture")
+    if recorded_extractor_architecture != expected_extractor_architecture:
+        recorded_hash = (
+            recorded_extractor_architecture.get("sha256")
+            if isinstance(recorded_extractor_architecture, dict) else None)
+        raise ValueError(
+            "Resume checkpoint does not match the current feature-extractor "
+            "architecture: "
+            f"recorded={recorded_hash!r}, "
+            f"required={expected_extractor_architecture['sha256']!r}")
 
     requested_name = None if requested_curriculum in (None, "none") \
         else str(requested_curriculum)
@@ -1667,20 +1878,26 @@ def validate_resume_lineage(checkpoint_path, requested_curriculum):
             "are checkpointed; start this Round 7.89 lineage fresh")
 
     try:
+        recorded_format_lineage = format_corpus_lineage_contract(
+            source_manifest.get("lineage") or {})
         recorded_strategy_lineage = strategy_profile_lineage_contract(
             source_manifest.get("lineage") or {})
     except ValueError as error:
         raise ValueError(
-            "Resume manifest has no valid strategy-profile lineage: "
+            "Resume manifest has no valid corpus lineage: "
             f"{error}") from error
 
     return {
         "run_id": source_manifest.get("run_id"),
         "manifest": artifact_identity(manifest_path),
+        "checkpoint_artifact": checkpoint_artifact,
         "reward_contract_version": reward_contract,
         "observation_schema_version": schema_version,
         "observation_schema_sha256": schema_sha256,
+        "feature_extractor_architecture":
+            recorded_extractor_architecture,
         "curriculum": recorded_name,
+        "format_lineage": recorded_format_lineage,
         "strategy_profile_lineage": recorded_strategy_lineage,
     }
 
@@ -1888,6 +2105,23 @@ def strategy_profile_lineage_contract(lineage):
     }
 
 
+def format_corpus_lineage_contract(lineage):
+    """Require the three format/corpus identities that define model inputs."""
+    if not isinstance(lineage, dict):
+        raise ValueError("format/corpus lineage must be an object")
+    contract = {}
+    for field in ("card_registry", "feature_schema", "corpus"):
+        identity = lineage.get(field)
+        if not isinstance(identity, dict):
+            raise ValueError(f"{field} identity is required")
+        digest = str(identity.get("sha256") or "")
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError(
+                f"{field}.sha256 must be a lowercase SHA-256 digest")
+        contract[f"{field}_sha256"] = digest
+    return contract
+
+
 def validate_resume_strategy_lineage(resume_lineage, current_lineage):
     """Require the loaded corpus strategy contract to match the source run."""
     recorded = (resume_lineage or {}).get("strategy_profile_lineage")
@@ -1907,6 +2141,32 @@ def validate_resume_strategy_lineage(resume_lineage, current_lineage):
                 f"keys={sorted(current)!r} "
                 f"(source {sorted(recorded)!r})"]))
     return current
+
+
+def validate_resume_corpus_lineage(resume_lineage, current_lineage):
+    """Match freshly loaded format data and strategy profiles to the source."""
+    recorded_format = (resume_lineage or {}).get("format_lineage")
+    if not isinstance(recorded_format, dict):
+        raise ValueError(
+            "Resume metadata is missing its format/corpus lineage")
+    current_format = format_corpus_lineage_contract(current_lineage)
+    mismatches = [
+        f"{key}={current_format.get(key)!r} (source {value!r})"
+        for key, value in recorded_format.items()
+        if current_format.get(key) != value
+    ]
+    if mismatches or set(current_format) != set(recorded_format):
+        raise ValueError(
+            "Resume format/corpus lineage mismatch: "
+            + "; ".join(mismatches or [
+                f"keys={sorted(current_format)!r} "
+                f"(source {sorted(recorded_format)!r})"]))
+    current_strategy = validate_resume_strategy_lineage(
+        resume_lineage, current_lineage)
+    return {
+        "format": current_format,
+        "strategy_profiles": current_strategy,
+    }
 
 
 def load_training_corpus(decks_arg, format_name, format_dir_arg):
@@ -2419,6 +2679,71 @@ def validate_training_checkpoint(
 # buys sample efficiency, which is what matters when every sample costs
 # CPU-simulated game steps. Width changes start a new checkpoint lineage.
 FEATURE_OUTPUT_DIM = 1024
+FEATURE_EXTRACTOR_ARCHITECTURE_SHA256 = (
+    "179b31ea6925d112e0b527cd1f03aa15dae6a36a061d50c3f66c671c1028d9ab")
+
+
+def feature_extractor_architecture_identity(features_dim=FEATURE_OUTPUT_DIM):
+    """Return the exact policy-side strategy-conditioning contract.
+
+    Observation lineage proves which values enter the model; this separate
+    identity proves how the policy consumes them. Both are required because a
+    checkpoint can have the right Gym space but incompatible learned weights.
+    """
+
+    payload = {
+        "kind": FEATURE_EXTRACTOR_ARCHITECTURE_KIND,
+        "architecture_version": FEATURE_EXTRACTOR_ARCHITECTURE_VERSION,
+        "feature_output_dim": int(features_dim),
+        "preprocessing_dim": 512,
+        "strategy_conditioning": {
+            "observation_key": EXACT_OWN_STRATEGY_PROFILE_FIELD,
+            "profile_vector_size": EXACT_OWN_STRATEGY_PROFILE_SIZE,
+            "input_transform": {
+                "dtype": "float32",
+                "clamp": [0.0, 1.0],
+            },
+            "encoder": [
+                {
+                    "type": "linear",
+                    "in_features": EXACT_OWN_STRATEGY_PROFILE_SIZE,
+                    "out_features": STRATEGY_FILM_HIDDEN_DIM,
+                },
+                {"type": "relu"},
+            ],
+            "modulation_projection": {
+                "type": "linear",
+                "in_features": STRATEGY_FILM_HIDDEN_DIM,
+                "out_features": 2 * int(features_dim),
+                "output_order": ["scale", "shift"],
+                "weight_initialization": {
+                    "type": "xavier_uniform",
+                    "gain": 0.01,
+                },
+                "bias_initialization": "zeros",
+            },
+            "operation": "state * (1 + tanh(scale) * limit) + "
+                         "tanh(shift) * limit",
+            "scale_limit": STRATEGY_FILM_SCALE_LIMIT,
+            "shift_limit": STRATEGY_FILM_SHIFT_LIMIT,
+            "placement": "after_projection_before_length_one_lstm",
+            "generic_feature_concatenation": False,
+        },
+        "state_transform": "length_one_lstm_with_residual",
+    }
+    encoded = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=True).encode("utf-8")
+    digest = hashlib.sha256(encoded).hexdigest()
+    if (int(features_dim) == FEATURE_OUTPUT_DIM
+            and digest != FEATURE_EXTRACTOR_ARCHITECTURE_SHA256):
+        raise RuntimeError(
+            "Feature-extractor architecture payload drifted without an "
+            "explicit architecture-version/hash update")
+    return {
+        **payload,
+        "sha256": digest,
+    }
 
 NETWORK_ARCHITECTURES = {
     'small': {'pi': [128, 64, 32], 'vf': [128, 64, 32]},
@@ -2981,6 +3306,14 @@ def record_network_architecture(model, run_id):
             f.write("Feature Extractor:\n")
             f.write(f"  Type: {type(policy.features_extractor).__name__}\n")
             f.write(f"  Output Dimension: {policy.features_extractor.output_dim}\n\n")
+            architecture_identity = feature_extractor_architecture_identity(
+                policy.features_extractor.output_dim)
+            f.write("  Architecture Identity: "
+                    f"{architecture_identity['sha256']}\n")
+            f.write("  Strategy Conditioning Key: "
+                    f"{EXACT_OWN_STRATEGY_PROFILE_FIELD}\n")
+            f.write("  Strategy FiLM: "
+                    f"{policy.features_extractor.strategy_film}\n\n")
             
             # Write policy network info
             f.write("Policy Network:\n")
@@ -6123,9 +6456,12 @@ def main():
         run_subtype_vocab = tuple(Card.SUBTYPE_VOCAB)
         manifest["lineage"] = lineage
         if resume_lineage is not None:
+            current_resume_lineage = validate_resume_corpus_lineage(
+                resume_lineage, lineage)
+            resume_lineage["current_format_lineage"] = (
+                current_resume_lineage["format"])
             resume_lineage["current_strategy_profile_lineage"] = (
-                validate_resume_strategy_lineage(
-                    resume_lineage, lineage))
+                current_resume_lineage["strategy_profiles"])
         logging.info(
             "Loaded %s decks with %s unique cards", len(decks), len(card_db))
 
@@ -6200,6 +6536,8 @@ def main():
                 AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION,
             "observation_schema_sha256":
                 AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256,
+            "feature_extractor_architecture":
+                feature_extractor_architecture_identity(),
             "optimized_parameters": json_safe(best_params),
             "seed": args.seed,
             "train_worker_seeds": [args.seed + index
@@ -6345,6 +6683,8 @@ def main():
                 AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256,
             "action_space_size": AlphaZeroMTGEnv.ACTION_SPACE_SIZE,
             "feature_output_dim": FEATURE_OUTPUT_DIM,
+            "feature_extractor_architecture":
+                feature_extractor_architecture_identity(),
             "training_config_sha256": configuration_sha256(
                 training_config),
             "reward_contract_version": training_config[
@@ -6370,6 +6710,8 @@ def main():
         manifest["phase"] = current_phase
         publish_manifest()
         if args.resume:
+            validate_resume_checkpoint_unchanged(
+                args.resume, resume_lineage)
             model = MaskablePPO.load(
                 args.resume,
                 env=vec_env,

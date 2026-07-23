@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from contextlib import redirect_stderr
 import io
@@ -121,7 +122,14 @@ class CheckpointPoolConfigTests(unittest.TestCase):
                         resume=None, optimize_hp=False))
 
     def test_round_798_runtime_rejects_resolved_pool_drift(self):
-        contract = m.ROUND_7_98_CANARY
+        # Round 7.98 is an immutable Observation-v5 artifact. Re-pin only this
+        # local copy to the live observation boundary so the test isolates the
+        # checkpoint-pool contract it is meant to exercise.
+        contract = copy.deepcopy(m.ROUND_7_98_CANARY)
+        contract["lineage"]["observation_schema_version"] = \
+            m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_VERSION
+        contract["lineage"]["observation_schema_sha256"] = \
+            m.AlphaZeroMTGEnv.OBSERVATION_SCHEMA_SHA256
         decks = [{"name": name} for name in (
             "Selesnya Ouroboroid", "Jeskai Lessons", "Izzet Prowess",
             "4c Control", "Izzet Spellementals", "Dimir Excruciator",

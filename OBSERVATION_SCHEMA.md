@@ -1,15 +1,41 @@
 # Playersim policy observation schema
 
-Current contract: **Observation v5**, frozen July 20, 2026.
+Current contract: **Observation v6**, frozen July 23, 2026.
 
 Current schema hash:
-`cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16`.
+`6521db9c0c70c919a63c34e9c99463a3b801e25ae91149fd518a34054989e790`.
+
+Observation v6 adds `my_exact_deck_strategy_profile`, a `float32` vector with
+shape `(54,)` and inclusive bounds `0..1`. Its fixed order is eight primary
+one-hot values, eight secondary one-hot values, 27 game-plan tags, ten
+quantized strategic axes, and confidence. Axes are divided by 100 and
+confidence basis points by 10,000; the primary/secondary one-hot and tag
+multi-hot rules are explicit. These normalization rules, the taxonomy and
+classifier hashes, component order, dtype, shape, bounds, and
+observer-relative semantics are all part of the observation-schema hash.
+
+The profile is computed once from the observing seat's exact starting deck,
+using its validated reviewed profile when present and deterministic full-deck
+inference otherwise. It is selected again at every observer boundary, so P1
+and P2 each receive only their own profile. There is deliberately no exact
+opponent-profile field: `opponent_archetype` remains the existing six-value
+belief inferred only from public battlefield, graveyard, and visible-exile
+evidence.
+
+The policy consumes this field only through a dedicated bounded FiLM path,
+not through generic feature concatenation. A 54-to-64 encoder produces scale
+and shift for the projected game-state representation; `tanh` bounds each
+modulation to `0.25`. The architecture identity is independently hashed and
+resume-validated because an unchanged Gym space is not sufficient evidence of
+compatible learned weights.
 
 Observation v5 adds producible mana by color (`my_producible_mana`,
 `opp_producible_mana`): each card's cost was already broken out by color, but
 what the observer could produce was only a single color-blind
 `total_available_mana` scalar. Own producible mana is exact; the opponent's is
 the public estimate from its face-up untapped lands (no hidden information).
+The prior v5 hash was
+`cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16`.
 The prior v4 hash was
 `15783924c36af23cf9dffb2700894f21d4c15343d0dc1fb353d351eae2f5d19f`.
 
@@ -184,6 +210,7 @@ Mana vectors use color order `W,U,B,R,G,C` and saturate at 100 per entry.
 | `strategic_metrics` | `(7)`, `-1..1` | Position, board, card, mana, life, tempo, and game-stage metrics. Card and mana advantages use magnitude-preserving `tanh(delta / 3)` normalization. |
 | `position_advantage` | `(1)`, `-1..1` | Planner position score. |
 | `deck_composition_estimate` | `(6)`, `0..1` | v4: card-type ratios (creature, instant, sorcery, artifact, enchantment, land) of the observer's **full starting deck**, which the observer legitimately knows. Was a backward-looking estimate over already-revealed cards. |
+| `my_exact_deck_strategy_profile` | `(54,)`, `0..1`, `float32` | v6: observer-own exact starting-deck strategy encoding: 8 primary one-hot, 8 secondary one-hot, 27 tags, 10 axes, then confidence. Reviewed when available, otherwise deterministically inferred. Never contains the other seat's curated or exact full-deck profile; routed only through bounded FiLM. |
 | `opponent_archetype` | `(6)`, `0..1` | Opponent deck/archetype summary inferred from **observed cards only**; the opponent's decklist is never exposed. |
 | `my_deck_card_identity` | `(60)`, `0..65535` | v4: the observer's full starting decklist as canonical categorical identities, sorted (an order-free multiset — the cards you own, not your hidden draw order). Padded with 0; shared categorical-embedding route. Observer-own only. |
 | `my_library_composition` | `(21)`, `0..count_max` | v4: the observer's **remaining** library — 8 card-type counts, 7 mana-curve buckets (cmc 0..6+), 5 color counts (WUBRG), and the total remaining count. The live "what's left to draw" signal for draw planning and keep/mulligan decisions. Observer-own only. |
@@ -282,9 +309,15 @@ printed card.
 
 ## Compatibility rule
 
-Observation v5 is checkpoint-incompatible with every earlier model, including
-v4: it adds observation fields (a wider policy input). Consumers must reject or
-isolate runs when `lineage.observation_schema.sha256` differs. The canonical
-registry hash determines the identity embedding namespace; the card
-feature-schema hash determines `F`; both must match as well. Resuming any
-earlier-schema checkpoint into a v5 run fails closed.
+Observation v6 is checkpoint-incompatible with every earlier model, including
+all v5 checkpoints and named canaries through Round 7.99. It adds a policy
+field and a separately lineage-pinned conditioning architecture. Consumers
+must reject or isolate runs when either the observation-schema identity or the
+feature-extractor architecture identity differs. The canonical registry hash
+determines the identity embedding namespace; the card feature-schema hash
+determines `F`; both must match as well. Resuming any earlier-schema or
+pre-FiLM checkpoint into a v6 run fails closed. Resume and Harvest additionally
+require the selected ZIP's exact SHA-256 and size to appear as an allowed model
+artifact in the nearest source `training_run.json`; archive bytes are checked
+again immediately before loading. No v6 canary may launch until the delivery
+gate in `ROADMAP.md` is complete.

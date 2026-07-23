@@ -1,4 +1,4 @@
-# Playersim roadmap — current as of July 22, 2026
+# Playersim roadmap — current as of July 23, 2026
 
 ## Mission and scope
 
@@ -33,18 +33,22 @@ deck-builder feedback loop is not connected.
 
 ### Current verified delivery baseline
 
-The current working tree is green at the following delivery gates:
+The current Observation-v6/FiLM working tree is green at the following gates:
 
 | Gate | Result |
 | --- | --- |
 | Golden scenarios | 409/409 |
 | Runtime smoke | 9/9 |
-| Training smoke | 13/13 |
-| Discovered unit tests | 851/851 |
+| Training smoke | 14/14 |
+| Discovered unit tests | 873/873 |
 | Default invariant fuzz | 8/8 seeds × 1,000 valid actions, plus phase-boundary check |
-| Observation schema | v5 / `cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16` |
+| Observation schema | v6 / `6521db9c0c70c919a63c34e9c99463a3b801e25ae91149fd518a34054989e790` |
 
-Standing broader gates last recorded green: fixture Harvest 18/18, production
+The default invariant run covers 8,000 valid actions total plus the controlled
+phase-boundary check. The full v6 delivery gate is complete. No v6 canary,
+canary name, or launch command has yet been created.
+
+Standing broader gates last recorded green: fixture Harvest 24/24, production
 Harvest protocol 17/17, card registry 19/19, deck ingestion 13/13, and
 fuzz/replay configuration 6/6. The strict long-fuzz result (32 seeds × 10,000
 valid actions) is historical until that scheduled/manual gate is rerun.
@@ -683,13 +687,13 @@ only from independent exact-state scenarios.
 
 ### Non-negotiable lineage rules
 
-- **Round 7.99 is complete. Start the next policy only after the planned
-  Observation v6 plus archetype-conditioning boundary is implemented and its
-  delivery gate passes; launch that policy fresh rather than resuming a v5
-  checkpoint.** Preserve `tempo-graded-potential-v1`, `combat-v7`, and the
-  pinned checkpoint-league contract so the new strategy input and conditioning
-  path remain the only experimental lever.
-  Observation v5 adds producible mana by color
+- **Round 7.99 is complete. Observation v6 and its bounded
+  archetype-conditioning path are implemented and the full delivery gate has
+  passed. The next task is to define and launch a fresh named canary rather
+  than resume any earlier checkpoint; no v6 canary or command exists yet.** Preserve
+  `tempo-graded-potential-v1`, `combat-v7`, and the pinned checkpoint-league
+  contract so the new strategy input and conditioning path remain the only
+  experimental lever. Observation v5 added producible mana by color
   (`my_producible_mana`, `opp_producible_mana`) on top of the v4 decklist
   features (`my_deck_card_identity`, `my_library_composition`, full-deck
   `deck_composition_estimate`). Own producible mana is exact; the opponent's
@@ -700,14 +704,15 @@ only from independent exact-state scenarios.
   recorded but excluded from live evaluator advice by default so worker-local
   histories cannot make the same public state nonstationary. Recorded
   archetypes are canonical and play-turn analytics are player-relative;
-  targetable observations match the active target instruction. Do not resume
-  an Observation v2/v3/v4 checkpoint into this lineage; the v5 schema hash is
-  `cc7d2e002af3338ee1192f3b85cc16d0913f1a4b4ee763b6b9ba7750d6c50a16` and
-  earlier-schema resumes fail closed. Round 7.99 keeps the v5 observation,
-  reward/curriculum, and 7.98 checkpoint-league lineage; its named canary
-  requires checkpoint self-play, rejects resume, and pins matchup weighting
-  off. It changes permanent recovery cadence to 500k while leaving the 100k
-  self-play pool cadence unchanged. Round 7.98 remains an immutable failed
+  targetable observations match the active target instruction. Observation v6
+  adds the observer-own `my_exact_deck_strategy_profile` (`float32`, `(54,)`,
+  bounds `0..1`) and consumes it only through dedicated bounded FiLM; exact
+  opponent deck metadata remains forbidden. Its schema hash is
+  `6521db9c0c70c919a63c34e9c99463a3b801e25ae91149fd518a34054989e790`, and
+  the extractor architecture has its own required lineage identity. Every
+  prior checkpoint and named canary, including Round 7.99, is incompatible.
+  Round 7.99 remains an immutable v5 result with 500k permanent recovery and
+  100k self-play publication cadence; Round 7.98 remains an immutable failed
   diagnostic boundary. Generic runs still leave both checkpoint self-play and
   matchup weighting off by default.
 - Resume now verifies the companion manifest's reward contract and Observation
@@ -1211,47 +1216,57 @@ agree. Environments now close and the final status line is flushed before the
 runtime-log handler is detached; only then are terminal artifact hashes and
 the manifest published.
 
-The prerequisite archetype overhaul is also landed **before** Observation v6
-or FiLM work: one versioned strategy-profile contract now separates macro
-plans from secondary plans, closed multi-label gameplan tags, and quantized
-strategic axes; the eight pinned Standard decks carry reviewed profiles;
-hydration/runtime loading preserves and validates them; stats and the
-own-deck planner consume the centralized classifier. Observation v5 remains
-unchanged, and opponent input remains public inference only. This foundation
-is the hard gate that had to exist before adding `my_archetype` or
-archetype-conditioned capacity.
+The prerequisite archetype overhaul, Observation v6, and bounded FiLM are now
+implemented as one lineage boundary. The versioned strategy-profile contract
+separates macro plans from secondary plans, closed multi-label gameplan tags,
+and quantized strategic axes; the eight pinned Standard decks carry reviewed
+profiles; hydration/runtime loading preserves and validates them; stats and
+the own-deck planner consume the centralized classifier. Observation v6
+exposes only the active observer's exact profile as
+`my_exact_deck_strategy_profile`; opponent input remains public inference only.
+The dedicated 54-to-64 FiLM path bounds both scale and shift to `0.25` and is
+excluded from generic feature concatenation. The implementation is complete;
+the full delivery gate is now complete as well. No canary has yet been defined
+or launched.
 
 ---
 
 ## Current execution plan
 
-### Now — Observation v6 and archetype-conditioned capacity
+### Now — define and launch a fresh named v6 canary
 
-Round 7.99 is complete; do **not** relaunch it. The next experimental lever is
-archetype-conditioned capacity, now that its previously missing semantic
-foundation is versioned and golden-tested:
+Round 7.99 is complete; do **not** relaunch it. Observation v6 and the
+archetype-conditioned capacity lever are implemented, and the full delivery
+gate is green. No v6 canary, canary name, or launch command has yet been
+created. The current task is step 5:
 
 1. **Completed prerequisite:** preserve reviewed exact-own strategy profiles
    through the Standard corpus, hydration, runtime loader, analytics, and
    planner. Macro plan, secondary plan, tags, axes, confidence/evidence, and
    hashes come from one contract rather than three drifting classifiers.
-2. **Observation v6 hard boundary:** add an exact-own strategy encoding under a
-   clearly named field. Keep opponent input public-only; never substitute the
-   opponent seat's curated full-deck profile for its inferred belief. Pin field
-   order, bounds, taxonomy/classifier hashes, and reject every older checkpoint.
-3. **Condition the policy:** route the own profile into a small FiLM or
-   archetype-indexed conditioning path so a control policy can express a
-   different plan rather than averaging into the dominant proactive gradient.
-   Treat the v6 input plus conditioning path as one declared capacity lever.
-4. **Delivery gate before a canary:** all eight curated golden profiles,
-   representation/order invariance, loader preservation, hidden-information
-   tests, exact observation shape/hash, save/load rejection, training smoke,
-   default invariant fuzz, and the new evaluation-provenance invariants must
-   pass.
-5. **Only then launch a fresh named canary from scratch.** Keep checkpoint
-   self-play and every other 7.99 training setting fixed so conditioning is the
-   only changed experimental lever. Promotion still requires the pair-aware
-   95% qualification lower bound to reach 55% with zero fidelity counters.
+2. **Implemented: Observation v6 hard boundary.**
+   `my_exact_deck_strategy_profile` is a `float32` `(54,)` vector bounded to
+   `0..1`, with literal component order plus taxonomy/classifier identities
+   pinned by schema hash
+   `6521db9c0c70c919a63c34e9c99463a3b801e25ae91149fd518a34054989e790`.
+   It follows the acting observer and never substitutes the other seat's
+   curated full-deck profile for public opponent inference.
+3. **Implemented: condition the policy.** A dedicated 54-to-64 encoder drives
+   FiLM scale and shift after shared-state projection. `tanh` bounds each
+   modulation to `0.25`, the profile bypasses generic concatenation, and the
+   extractor architecture is separately lineage-hashed and resume-validated.
+   The v6 input plus conditioning path is one declared capacity lever.
+4. **Completed: delivery gate before a canary.** The gate is green at 873/873
+   discovered unit tests, 409/409 scenarios, 9/9 runtime smoke, 14/14 training
+   smoke, and 8/8 default fuzz seeds x 1,000 valid actions (8,000 total), plus
+   the controlled phase-boundary check. Resume and Harvest checkpoint loading
+   also bind exact ZIP bytes to an allowed source-manifest artifact and reject
+   policy/schema/data-lineage drift before use.
+5. **Next: define and launch a fresh named canary from scratch.** No canary
+   name or command has been created yet. Keep checkpoint self-play and every
+   other 7.99 training setting fixed so conditioning is the only changed
+   experimental lever. Promotion still requires the pair-aware 95%
+   qualification lower bound to reach 55% with zero fidelity counters.
 
 Mulligan work remains downstream. Revisit it only if control decks still
 collapse after they can express a distinct plan; sharpen the existing
@@ -1312,8 +1327,10 @@ collapse after they can express a distinct plan; sharpen the existing
 Checkpoint/self-play policies already receive their own perspective-correct
 observation and legal mask. The paired-seat qualification command fails closed
 on illegal predictions, fidelity failures, and provenance mismatches. What
-remains is operational: train a policy that passes, freeze it, then replace the
-scripted Harvest baseline with qualified policy-vs-policy or league play.
+remains begins with defining and launching the fresh v6 canary now that the
+delivery gate is complete; then train a policy that passes, freeze it, and
+replace the scripted Harvest baseline with qualified policy-vs-policy or league
+play. No v6 canary or command has yet been created.
 
 ### 2. Card fidelity and coverage — ◐
 
@@ -1408,8 +1425,9 @@ missing automated builder consumer.
 - ✅ Shared foundation: canonical append-only registry, frozen self-hashed
   feature schema, explicit format/deck configuration, legality checks, and
   lineage-stamped manifests.
-- ◐ Standard: corpus, namespace, and Observation v5 exist; qualification,
-  calibration, and production Harvest remain.
+- ◐ Standard: corpus, namespace, reviewed profiles, Observation v6, and
+  bounded archetype conditioning exist and the v6 delivery gate is green;
+  fresh-canary launch, qualification, calibration, and production Harvest remain.
 - ▢ Modern: no representative training corpus yet.
 - ▢ Pioneer: no representative training corpus yet.
 - ▢ Unified builder: format-aware feedback queue not connected.
@@ -1472,11 +1490,14 @@ The project is complete only when all of these are true:
 
 Historical boundaries are retained here so old artifacts cannot be resumed by
 mistake. Round 7.99 is complete and remains an immutable Observation v5 result.
-The practical rule is: **do not relaunch or resume 7.99; create the next policy
-fresh only after the Observation v6 and archetype-conditioning delivery gate
-passes.** Keep `tempo-graded-potential-v1`, `combat-v7`, and the pinned
-checkpoint-league contract fixed so that strategy conditioning is the single
-declared experimental lever.
+Observation v6 and bounded FiLM are implemented and their delivery gate has
+passed. The practical rule remains: **do not relaunch or resume 7.99; define
+and launch the next policy fresh.** No v6 canary, name, or command exists yet.
+Every prior checkpoint and named canary is incompatible with schema hash
+`6521db9c0c70c919a63c34e9c99463a3b801e25ae91149fd518a34054989e790` and the
+separately pinned extractor architecture. Keep `tempo-graded-potential-v1`,
+`combat-v7`, and the checkpoint-league contract fixed so strategy conditioning
+is the single declared experimental lever.
 
 | Minimum round | Incompatible change |
 | --- | --- |
@@ -1505,6 +1526,7 @@ declared experimental lever.
 | 7.97 | Observation v5: producible mana by color (`my_producible_mana`, `opp_producible_mana`); reward/curriculum carry over from 7.96. Opt-in `--matchup-weighting` and cast-path legality hardening ride along (neither breaks lineage) |
 | 7.98 | Resource-bounded checkpoint self-play: explicit opponent-private observation/mask boundary, one frozen CPU policy per worker, four-snapshot FIFO disk pool, reset-scoped deterministic leases, fail-closed staging/rollback provenance, and scripted-only fixed evaluation. Observation v5, reward, and curriculum remain unchanged |
 | 7.99 | Fresh repair boundary after 7.98 failed at 705,456: copied Colorstorm and Deceit executable Oracle templates are name-independent; permanent recovery checkpoints move from 50k to 500k while the four-snapshot self-play pool remains at 100k. Observation v5, reward, curriculum, evaluation, seeds, and opponent mix remain unchanged |
+| Post-7.99 next-policy boundary | Observation v6 `my_exact_deck_strategy_profile` (`float32`, `(54,)`, `0..1`, observer-own only), taxonomy/classifier-pinned schema, and dedicated bounded FiLM with separately hashed extractor architecture. Incompatible with every prior checkpoint; delivery gate complete, fresh canary not yet defined |
 
 The canonical registry is append-only within the fixed identity capacity;
 appends change registry lineage without changing observation width. Changing

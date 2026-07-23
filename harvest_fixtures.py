@@ -211,12 +211,322 @@ def checkpoint_identity(path: Path | str) -> dict:
     }
 
 
+_DIRECT_MODEL_ARTIFACTS = (
+    "final_model",
+    "best_model",
+    "best_candidate_model",
+    "interrupted_model",
+    "failed_model",
+)
+
+
+def _nearest_training_manifest(checkpoint: Path) -> Path:
+    """Find the closest training manifest that owns one checkpoint path."""
+    cursor = checkpoint.parent
+    while True:
+        candidate = cursor / "training_run.json"
+        if candidate.is_file():
+            return candidate
+        parent = cursor.parent
+        if parent == cursor:
+            break
+        cursor = parent
+    raise RuntimeError(
+        f"Checkpoint has no companion training_run.json: {checkpoint.name}")
+
+
+def _model_artifact_pointers(artifacts: dict):
+    """Yield only ZIP model pointers that may authorize a Harvest policy."""
+    if not isinstance(artifacts, dict):
+        raise RuntimeError("Training manifest has no artifact inventory")
+
+    def zipped(pointer, entry):
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if isinstance(path, str) and path.casefold().endswith(".zip"):
+            return pointer, entry
+        return None
+
+    for name in _DIRECT_MODEL_ARTIFACTS:
+        entry = artifacts.get(name)
+        allowed = zipped(f"artifacts.{name}", entry)
+        if allowed is not None:
+            yield allowed
+
+    checkpoints = artifacts.get("checkpoints", [])
+    if not isinstance(checkpoints, list):
+        raise RuntimeError("Training manifest checkpoints must be a list")
+    for index, entry in enumerate(checkpoints):
+        allowed = zipped(f"artifacts.checkpoints[{index}]", entry)
+        if allowed is not None:
+            yield allowed
+
+    pool = artifacts.get("checkpoint_pool") or {}
+    if not isinstance(pool, dict):
+        raise RuntimeError("Training manifest checkpoint_pool must be an object")
+    snapshots = pool.get("snapshots_on_disk", [])
+    if not isinstance(snapshots, list):
+        raise RuntimeError(
+            "Training manifest checkpoint-pool snapshots must be a list")
+    for index, entry in enumerate(snapshots):
+        allowed = zipped(
+            f"artifacts.checkpoint_pool.snapshots_on_disk[{index}]", entry)
+        if allowed is not None:
+            yield allowed
+
+
+def _validated_artifact_entry(pointer: str, entry: dict) -> dict:
+    if not isinstance(entry, dict):
+        raise RuntimeError(
+            f"Training manifest model pointer {pointer} is not an object")
+    path = entry.get("path")
+    sha256 = str(entry.get("sha256", "")).casefold()
+    size_bytes = entry.get("size_bytes")
+    if (not isinstance(path, str)
+            or not path.strip().casefold().endswith(".zip")):
+        raise RuntimeError(
+            f"Training manifest model pointer {pointer} is not a ZIP model")
+    if (len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)):
+        raise RuntimeError(
+            f"Training manifest model pointer {pointer} has invalid SHA-256")
+    if (isinstance(size_bytes, bool) or not isinstance(size_bytes, int)
+            or size_bytes < 1):
+        raise RuntimeError(
+            f"Training manifest model pointer {pointer} has invalid size")
+    return {
+        "pointer": pointer,
+        "path": path,
+        "sha256": sha256,
+        "size_bytes": size_bytes,
+    }
+
+
+def _lineage_sha256(lineage: dict, key: str, *, owner: str) -> str:
+    identity = lineage.get(key) if isinstance(lineage, dict) else None
+    sha256 = str(
+        identity.get("sha256", "") if isinstance(identity, dict) else ""
+    ).casefold()
+    if (len(sha256) != 64
+            or any(character not in "0123456789abcdef" for character in sha256)):
+        raise RuntimeError(
+            f"{owner} has no valid {key.replace('_', '-')} SHA-256 lineage")
+    return sha256
+
+
+def current_checkpoint_policy_boundary() -> dict:
+    """Return the code identities every Harvest checkpoint must implement."""
+    import main as training_entrypoint
+    from Playersim.observation_schema import (
+        OBSERVATION_SCHEMA_SHA256,
+        OBSERVATION_SCHEMA_VERSION,
+    )
+
+    return {
+        "observation_schema_version": OBSERVATION_SCHEMA_VERSION,
+        "observation_schema_sha256": OBSERVATION_SCHEMA_SHA256,
+        "feature_extractor_architecture":
+            training_entrypoint.feature_extractor_architecture_identity(),
+    }
+
+
+def validate_checkpoint_provenance(
+        path: Path | str, harvest_lineage: dict, *, role: str) -> dict:
+    """Bind one checkpoint to its source run and the live Harvest boundary."""
+    label = str(role).strip() or "Checkpoint"
+    checkpoint = resolve_checkpoint_path(path)
+    identity = checkpoint_identity(checkpoint)
+    manifest_path = _nearest_training_manifest(checkpoint)
+    try:
+        manifest_bytes = manifest_path.read_bytes()
+        source_manifest = json.loads(manifest_bytes.decode("utf-8"))
+    except (OSError, UnicodeError, ValueError) as error:
+        raise RuntimeError(
+            f"{label} checkpoint companion training manifest is unreadable: "
+            f"{error}") from error
+    if not isinstance(source_manifest, dict) or source_manifest.get(
+            "kind") != "playersim_training_run":
+        raise RuntimeError(
+            f"{label} checkpoint companion has an unknown artifact kind")
+    source_run_id = source_manifest.get("run_id")
+    if not isinstance(source_run_id, str) or not source_run_id.strip():
+        raise RuntimeError(
+            f"{label} checkpoint companion has no source training run ID")
+
+    matches = []
+    for pointer, raw_entry in _model_artifact_pointers(
+            source_manifest.get("artifacts")):
+        entry = _validated_artifact_entry(pointer, raw_entry)
+        if (entry["sha256"] == identity["sha256"]
+                and entry["size_bytes"] == identity["size"]):
+            matches.append(entry)
+    if not matches:
+        raise RuntimeError(
+            f"{label} checkpoint bytes are not an allowed ZIP model artifact "
+            "in the nearest training_run.json")
+
+    current = current_checkpoint_policy_boundary()
+    resolved = source_manifest.get("resolved")
+    if not isinstance(resolved, dict):
+        raise RuntimeError(
+            f"{label} checkpoint source run has no resolved policy lineage")
+    recorded_version = resolved.get("observation_schema_version")
+    recorded_observation_sha256 = resolved.get(
+        "observation_schema_sha256")
+    if (recorded_version != current["observation_schema_version"]
+            or recorded_observation_sha256
+            != current["observation_schema_sha256"]):
+        raise RuntimeError(
+            f"{label} checkpoint source run does not match Observation "
+            f"v{current['observation_schema_version']} version/hash")
+    recorded_architecture = resolved.get(
+        "feature_extractor_architecture")
+    if recorded_architecture != current["feature_extractor_architecture"]:
+        recorded_hash = (
+            recorded_architecture.get("sha256")
+            if isinstance(recorded_architecture, dict) else None)
+        raise RuntimeError(
+            f"{label} checkpoint feature-extractor architecture drifted: "
+            f"recorded={recorded_hash!r}, required="
+            f"{current['feature_extractor_architecture']['sha256']!r}")
+
+    source_lineage = source_manifest.get("lineage")
+    if not isinstance(source_lineage, dict):
+        raise RuntimeError(
+            f"{label} checkpoint source run has no training lineage")
+    source_registry = _lineage_sha256(
+        source_lineage, "card_registry", owner=f"{label} checkpoint source run")
+    source_features = _lineage_sha256(
+        source_lineage, "feature_schema", owner=f"{label} checkpoint source run")
+    harvest_registry = _lineage_sha256(
+        harvest_lineage, "card_registry", owner="Harvest evaluation corpus")
+    harvest_features = _lineage_sha256(
+        harvest_lineage, "feature_schema", owner="Harvest evaluation corpus")
+    if source_registry != harvest_registry:
+        raise RuntimeError(
+            f"{label} checkpoint card-registry lineage does not match "
+            "the Harvest evaluation corpus")
+    if source_features != harvest_features:
+        raise RuntimeError(
+            f"{label} checkpoint feature-schema lineage does not match "
+            "the Harvest evaluation corpus")
+
+    manifest_identity = {
+        "name": manifest_path.name,
+        "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "size_bytes": len(manifest_bytes),
+    }
+    return {
+        "kind": "maskable_ppo_checkpoint",
+        **identity,
+        "source_training_run": {
+            "run_id": source_run_id,
+            "status": source_manifest.get("status"),
+            "manifest": manifest_identity,
+            "artifact_matches": matches,
+            "resolved_policy_lineage": {
+                "observation_schema_version": recorded_version,
+                "observation_schema_sha256": recorded_observation_sha256,
+                "feature_extractor_architecture": recorded_architecture,
+            },
+            # Preserve training corpus/strategy lineage independently from
+            # run_manifest.lineage, which describes the evaluation decks.
+            "lineage": source_lineage,
+        },
+    }
+
+
+def verify_checkpoint_identity_unchanged(
+        path: Path | str, expected: dict, *, role: str) -> None:
+    """Recheck source bytes immediately around deserialization."""
+    label = str(role).strip() or "Checkpoint"
+    actual = checkpoint_identity(path)
+    if (actual["sha256"] != expected.get("sha256")
+            or actual["size"] != expected.get("size")):
+        raise RuntimeError(
+            f"{label} checkpoint bytes changed after provenance validation")
+    expected_manifest = (
+        (expected.get("source_training_run") or {}).get("manifest")
+        if isinstance(expected, dict) else None)
+    manifest_path = _nearest_training_manifest(resolve_checkpoint_path(path))
+    manifest_bytes = manifest_path.read_bytes()
+    actual_manifest = {
+        "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+        "size_bytes": len(manifest_bytes),
+    }
+    if (not isinstance(expected_manifest, dict)
+            or actual_manifest["sha256"] != expected_manifest.get("sha256")
+            or actual_manifest["size_bytes"]
+            != expected_manifest.get("size_bytes")):
+        raise RuntimeError(
+            f"{label} checkpoint companion manifest changed after "
+            "provenance validation")
+
+
 def load_checkpoint_policy(path: Path | str):
     """Load a MaskablePPO checkpoint with this project's custom classes known."""
     import main as _training_entrypoint  # noqa: F401 - registers custom policy classes
     from sb3_contrib import MaskablePPO
 
     return MaskablePPO.load(str(resolve_checkpoint_path(path)), device="auto")
+
+
+def validate_checkpoint_policy_compatibility(policy, env, *, role: str):
+    """Require one Harvest checkpoint to match the live policy boundary.
+
+    Loading without an environment is useful because Harvest drives its raw
+    environment directly, but it also means SB3 cannot perform its normal
+    observation/action-space compatibility check. Perform that check here,
+    before reset or prediction, so an older observation policy cannot silently
+    ignore newly added dictionary fields.
+    """
+    label = str(role).strip() or "Checkpoint"
+    if not callable(getattr(policy, "predict", None)):
+        raise RuntimeError(
+            f"{label} checkpoint does not expose callable predict")
+
+    expected_observation_space = getattr(env, "observation_space", None)
+    checkpoint_observation_space = getattr(
+        policy, "observation_space", None)
+    if expected_observation_space is None:
+        raise RuntimeError(
+            "Harvest environment does not expose an observation space")
+    if checkpoint_observation_space is None:
+        raise RuntimeError(
+            f"{label} checkpoint does not expose an observation space")
+    if checkpoint_observation_space != expected_observation_space:
+        details = []
+        expected_fields = getattr(expected_observation_space, "spaces", None)
+        checkpoint_fields = getattr(
+            checkpoint_observation_space, "spaces", None)
+        if isinstance(expected_fields, dict) and isinstance(
+                checkpoint_fields, dict):
+            missing = sorted(set(expected_fields) - set(checkpoint_fields))
+            unexpected = sorted(set(checkpoint_fields) - set(expected_fields))
+            if missing:
+                details.append(f"missing fields={missing!r}")
+            if unexpected:
+                details.append(f"unexpected fields={unexpected!r}")
+        schema_version = getattr(env, "OBSERVATION_SCHEMA_VERSION", None)
+        schema_label = (
+            f"Observation v{schema_version}"
+            if schema_version is not None else "the current observation")
+        suffix = f"; {'; '.join(details)}" if details else ""
+        raise RuntimeError(
+            f"{label} checkpoint observation space is incompatible with "
+            f"the Harvest environment ({schema_label}){suffix}")
+
+    expected_action_space = getattr(env, "action_space", None)
+    checkpoint_action_space = getattr(policy, "action_space", None)
+    if expected_action_space is None:
+        raise RuntimeError("Harvest environment does not expose an action space")
+    if checkpoint_action_space is None:
+        raise RuntimeError(
+            f"{label} checkpoint does not expose an action space")
+    if checkpoint_action_space != expected_action_space:
+        raise RuntimeError(
+            f"{label} checkpoint action space is incompatible with the "
+            "Harvest environment")
+    return policy
 
 
 def choose_checkpoint_action(policy, observation: dict, action_mask: Iterable) -> int:
@@ -909,9 +1219,9 @@ def run_harvest(games: int, seed: int, output_directory: Path,
         raise ValueError("agent_is_p1 must be a boolean")
 
     output = prepare_output_directory(Path(output_directory))
-    agent_identity = checkpoint_identity(agent_model) if agent_model else None
-    opponent_identity = checkpoint_identity(opponent_model) if opponent_model else None
-    agent_version = policy_version(seed, agent_identity, opponent_identity)
+    agent_identity = None
+    opponent_identity = None
+    agent_version = None
     previous_log_disable = logging.root.manager.disable
     previous_root_level = None
     previous_debug_action_steps = None
@@ -937,17 +1247,26 @@ def run_harvest(games: int, seed: int, output_directory: Path,
                     decks_directory, format_name, format_dir),
                 format_name=format_name, format_dir=format_dir)
         deck_names = tuple(deck.get("name") for deck in decks)
+
+        # Reject unbound, foreign, or lineage-incompatible bytes before SB3
+        # deserializes either policy. Training corpus identity is deliberately
+        # retained as source provenance, but it need not equal the evaluation
+        # corpus: held-out Harvest decks are a supported use case.
+        if agent_model:
+            agent_identity = validate_checkpoint_provenance(
+                agent_model, lineage, role="Agent")
+        if opponent_model:
+            opponent_identity = validate_checkpoint_provenance(
+                opponent_model, lineage, role="Opponent")
+        agent_version = policy_version(
+            seed, agent_identity, opponent_identity)
+
         from Playersim import environment as environment_module
 
         previous_debug_action_steps = environment_module.DEBUG_ACTION_STEPS
         environment_module.DEBUG_ACTION_STEPS = False
         AlphaZeroMTGEnv = environment_module.AlphaZeroMTGEnv
         previous_root_level = _quiet_engine_console_logging()
-        if agent_model:
-            agent_policy = load_checkpoint_policy(agent_model)
-        if opponent_model:
-            opponent_policy = load_checkpoint_policy(opponent_model)
-
         env = AlphaZeroMTGEnv(
             decks,
             card_db,
@@ -956,6 +1275,27 @@ def run_harvest(games: int, seed: int, output_directory: Path,
             agent_is_p1=agent_is_p1,
         )
         env.set_agent_version(agent_version)
+
+        # Bind every loaded policy to the exact live v6 boundary before a
+        # reset, opponent installation, or prediction can occur. This keeps
+        # both externally driven agent policies and direct opponent policies
+        # from bypassing the checkpoint-league's stricter loader.
+        if agent_model:
+            verify_checkpoint_identity_unchanged(
+                agent_model, agent_identity, role="Agent")
+            agent_policy = load_checkpoint_policy(agent_model)
+            verify_checkpoint_identity_unchanged(
+                agent_model, agent_identity, role="Agent")
+            agent_policy = validate_checkpoint_policy_compatibility(
+                agent_policy, env, role="Agent")
+        if opponent_model:
+            verify_checkpoint_identity_unchanged(
+                opponent_model, opponent_identity, role="Opponent")
+            opponent_policy = load_checkpoint_policy(opponent_model)
+            verify_checkpoint_identity_unchanged(
+                opponent_model, opponent_identity, role="Opponent")
+            opponent_policy = validate_checkpoint_policy_compatibility(
+                opponent_policy, env, role="Opponent")
         if opponent_policy is not None:
             env.set_opponent_policy(opponent_policy)
 

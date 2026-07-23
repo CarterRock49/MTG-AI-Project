@@ -28,10 +28,25 @@ Harvest paths are operational and gated by a large regression suite. Rules and
 card coverage are still expanding, and **no checkpoint has yet been shown to beat
 scripted play**, so the statistics are not yet strength-grade.
 
+The next-policy architecture now implements Observation v6 and its dedicated
+archetype-conditioning path. `my_exact_deck_strategy_profile` is an
+observer-own `float32` vector with shape `(54,)` and bounds `0..1`; the other
+seat's reviewed/exact deck profile is never exposed, and public opponent
+inference remains separate. A bounded FiLM branch consumes this field without
+placing it in generic state concatenation. The v6 schema hash is
+`6521db9c0c70c919a63c34e9c99463a3b801e25ae91149fd518a34054989e790`.
+The full v6 delivery gate is green. No fresh v6 canary, canary name, or launch
+command has yet been created; defining and then launching that fresh canary is
+the next task. Training resume and checkpoint-backed Harvest now fail closed
+unless the selected ZIP's SHA-256 and size are authorized by its companion
+`training_run.json`; Observation, FiLM, registry, feature-schema, and
+applicable corpus lineage are validated before the policy is used.
+
 [ROADMAP.md](ROADMAP.md) is the authoritative status and next-work list;
 [STATS_SCHEMA.md](STATS_SCHEMA.md) is the contract for anything that consumes the
 output statistics; [ARCHETYPE_SCHEMA.md](ARCHETYPE_SCHEMA.md) defines the
-versioned deck-strategy taxonomy and its hidden-information boundary.
+versioned deck-strategy taxonomy and its hidden-information boundary; and
+[OBSERVATION_SCHEMA.md](OBSERVATION_SCHEMA.md) pins the policy-input contract.
 `DeckStats_Viewer/` provides a dependency-free local
 workbench for run provenance, checkpoint trends, every evaluation case and
 debug replay, DeckStats scopes, canonical-ID CardMemory comparisons, safe
@@ -96,7 +111,9 @@ flowchart LR
   so adding cards cannot silently change model input width or invalidate a
   checkpoint.
 - **Training** (`main.py`) runs mask-aware PPO, alternating the learned policy
-  between seats, and writes a full provenance manifest per run.
+  between seats. The next-policy extractor uses a dedicated 54-to-64 bounded
+  FiLM branch for the observer's exact-own strategy profile and records both
+  observation and extractor-architecture lineage in each run manifest.
 - **Harvest** (`harvest_fixtures.py`, `harvest_protocol.py`) plays games to
   produce statistics; the parallel protocol also scores checkpoint promotions.
 - **Statistics** are the product: an append-only game log, tracker aggregates,
@@ -168,11 +185,11 @@ python tests/train_smoke_test.py
 python tests/invariant_fuzz_test.py --profile default
 ```
 
-For the current working tree, those gates are green at 848/848 discovered unit
-tests, 409/409 scenarios, 9/9 runtime smoke, 13/13 training smoke, and all 8
-default fuzz seeds x 1,000 valid actions plus the phase-boundary check. The
-previously recorded long-fuzz result remains historical until that
-scheduled/manual gate is rerun.
+For the current working tree, those gates are green at 873/873 discovered unit
+tests, 409/409 scenarios, 9/9 runtime smoke, 14/14 training smoke, and all 8
+default fuzz seeds x 1,000 valid actions (8,000 actions total) plus the
+phase-boundary check. The previously recorded long-fuzz result remains
+historical until that scheduled/manual gate is rerun.
 
 ```bash
 python tests/smoke_test.py                    # engine end-to-end (no training stack)
@@ -242,9 +259,12 @@ append new cards without renumbering existing IDs; a card that would widen the
 frozen subtype vocabulary is rejected (that requires a new schema version, and
 therefore a new checkpoint lineage).
 
-The separate global policy-input contract is Observation v5, documented in
+The separate global policy-input contract is Observation v6, documented in
 [OBSERVATION_SCHEMA.md](OBSERVATION_SCHEMA.md) and self-hashed by
-`Playersim/observation_schema.py`.
+`Playersim/observation_schema.py`. Observation v6 and the bounded FiLM
+extractor are incompatible with every prior checkpoint and named canary,
+including Round 7.99. The delivery gate has passed, but no v6 canary or command
+has yet been defined; the next policy must be created and launched fresh.
 
 Every run-level manifest (`training_run.json`, `harvest_run.json`,
 `harvest_protocol.json`, `promotion.json`) stamps a `lineage` object recording
@@ -487,8 +507,8 @@ cards remain `semantic_status=unverified`.
 ## Training
 
 Round 7.99 is complete; do not relaunch or resume it. The next training command
-will be published only after the Observation-v6 strategy encoding and
-archetype-conditioning delivery gate passes. That canary must start fresh while
+has not yet been defined. The Observation-v6/FiLM delivery gate is green; the
+next task is to define a fresh named canary and its command, then launch it while
 holding the 7.99 reward, curriculum, checkpoint-league, evaluation, and seed
 contracts fixed.
 

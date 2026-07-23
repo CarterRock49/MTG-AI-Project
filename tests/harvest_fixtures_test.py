@@ -198,6 +198,66 @@ def _write_valid_artifact_fixture(output: Path, version: str) -> dict:
     return record
 
 
+def _checkpoint_harvest_lineage(*, registry_sha="a" * 64,
+                                feature_sha="b" * 64,
+                                corpus_sha="e" * 64) -> dict:
+    from Playersim.observation_schema import observation_schema_identity
+
+    return {
+        "format": "test",
+        "card_registry": {"sha256": registry_sha},
+        "feature_schema": {"sha256": feature_sha},
+        "corpus": {"sha256": corpus_sha},
+        "observation_schema": observation_schema_identity(),
+    }
+
+
+def _write_checkpoint_training_manifest(
+        run_directory: Path, checkpoints: list[Path], *,
+        registry_sha="a" * 64, feature_sha="b" * 64,
+        training_corpus_sha="d" * 64) -> dict:
+    boundary = harvest.current_checkpoint_policy_boundary()
+    entries = []
+    for checkpoint in checkpoints:
+        identity = harvest.checkpoint_identity(checkpoint)
+        entries.append({
+            "path": f"models/source/checkpoints/{checkpoint.name}",
+            "sha256": identity["sha256"],
+            "size_bytes": identity["size"],
+        })
+    manifest = {
+        "schema_version": 1,
+        "kind": "playersim_training_run",
+        "run_id": "source-training-run",
+        "status": "complete",
+        "resolved": {
+            **boundary,
+        },
+        "lineage": {
+            "format": "test",
+            "card_registry": {"sha256": registry_sha},
+            "feature_schema": {"sha256": feature_sha},
+            "corpus": {"sha256": training_corpus_sha},
+            "observation_schema": {
+                "schema_version": boundary["observation_schema_version"],
+                "sha256": boundary["observation_schema_sha256"],
+            },
+            "strategy_profiles": {
+                "reviewed_profiles_sha256": "c" * 64,
+            },
+        },
+        "artifacts": {
+            "final_model": entries[0] if entries else None,
+            "checkpoints": entries[1:],
+            "checkpoint_pool": {"snapshots_on_disk": []},
+        },
+    }
+    (run_directory / "training_run.json").write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8")
+    return manifest
+
+
 class HarvestFixturesTest(unittest.TestCase):
     def test_meta_rates_use_two_deck_seats_per_match(self):
         from Playersim.card import Card
@@ -261,6 +321,399 @@ class HarvestFixturesTest(unittest.TestCase):
         self.assertEqual(
             harvest.choose_fixture_action(concede_only, random.Random(1)), 12
         )
+
+    def test_checkpoint_provenance_binds_source_and_keeps_corpora_distinct(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "source"
+            checkpoint_dir = run_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True)
+            checkpoint = checkpoint_dir / "agent.zip"
+            checkpoint.write_bytes(b"attributable policy bytes")
+            _write_checkpoint_training_manifest(
+                run_dir, [checkpoint], training_corpus_sha="d" * 64)
+            evaluation_lineage = _checkpoint_harvest_lineage(
+                corpus_sha="e" * 64)
+
+            identity = harvest.validate_checkpoint_provenance(
+                checkpoint, evaluation_lineage, role="Agent")
+
+        source = identity["source_training_run"]
+        self.assertEqual(identity["kind"], "maskable_ppo_checkpoint")
+        self.assertEqual(source["run_id"], "source-training-run")
+        self.assertEqual(
+            source["artifact_matches"][0]["pointer"],
+            "artifacts.final_model")
+        self.assertEqual(
+            source["lineage"]["corpus"]["sha256"], "d" * 64)
+        self.assertEqual(
+            evaluation_lineage["corpus"]["sha256"], "e" * 64)
+        self.assertNotEqual(
+            source["lineage"]["corpus"]["sha256"],
+            evaluation_lineage["corpus"]["sha256"])
+        self.assertEqual(
+            source["resolved_policy_lineage"],
+            harvest.current_checkpoint_policy_boundary())
+
+    def test_harvest_manifest_separates_training_and_evaluation_lineage(self):
+        from gymnasium import spaces
+        from Playersim.observation_schema import (
+            EXACT_OWN_STRATEGY_PROFILE_FIELD,
+            EXACT_OWN_STRATEGY_PROFILE_SIZE,
+        )
+
+        observation_space = spaces.Dict({
+            "state": spaces.Box(
+                low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            EXACT_OWN_STRATEGY_PROFILE_FIELD: spaces.Box(
+                low=0.0, high=1.0,
+                shape=(EXACT_OWN_STRATEGY_PROFILE_SIZE,),
+                dtype=np.float32),
+        })
+        action_space = spaces.Discrete(480)
+        observation = {
+            "state": np.zeros(2, dtype=np.float32),
+            EXACT_OWN_STRATEGY_PROFILE_FIELD: np.zeros(
+                EXACT_OWN_STRATEGY_PROFILE_SIZE, dtype=np.float32),
+        }
+
+        class Policy:
+            def __init__(self):
+                self.observation_space = observation_space
+                self.action_space = action_space
+
+            @staticmethod
+            def predict(_observation, *, action_masks, deterministic):
+                return np.asarray(11), None
+
+        class State:
+            _consecutive_no_ops = 0
+            turn = 1
+            phase = 1
+            priority_player = None
+            stack = []
+
+        class Environment:
+            def __init__(self, decks, card_db, **kwargs):
+                self.decks = decks
+                self.observation_space = observation_space
+                self.action_space = action_space
+                self.game_state = State()
+                self.action_handler = None
+                self.last_observation_error = None
+                self.last_observation_traceback = None
+                self._game_result_recorded = False
+                self._game_result = None
+
+            def set_agent_version(self, version):
+                self.agent_version = version
+
+            def reset(self, seed=None):
+                p1, p2 = self.decks._pair
+                self.current_deck_name_p1 = p1["name"]
+                self.current_deck_name_p2 = p2["name"]
+                return observation, {}
+
+            def action_mask(self):
+                mask = np.zeros(480, dtype=bool)
+                mask[11] = True
+                return mask
+
+            def step(self, action):
+                self._game_result_recorded = True
+                self._game_result = "win"
+                return observation, 1.0, True, False, {"game_result": "win"}
+
+            def close(self):
+                return None
+
+        decks = [{"name": name, "cards": [0] * 60}
+                 for name in harvest.EXPECTED_SAMPLE_DECKS]
+        evaluation_lineage = _checkpoint_harvest_lineage(
+            corpus_sha="e" * 64)
+        fidelity = {name: 0 for name in harvest.FIDELITY_COUNTERS}
+        fidelity["unparsed_cards"] = {}
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "source"
+            checkpoint_dir = source / "checkpoints"
+            checkpoint_dir.mkdir(parents=True)
+            checkpoint = checkpoint_dir / "agent.zip"
+            checkpoint.write_bytes(b"attributable policy bytes")
+            _write_checkpoint_training_manifest(
+                source, [checkpoint], training_corpus_sha="d" * 64)
+            output = root / "evaluation"
+
+            with mock.patch.object(
+                    harvest, "load_corpus_decks",
+                    return_value=(decks, {}, evaluation_lineage)), \
+                    mock.patch.object(
+                        harvest, "load_checkpoint_policy",
+                        return_value=Policy()), \
+                    mock.patch.object(
+                        harvest, "_validate_artifacts",
+                        return_value=([{"result": "win"}], fidelity, {})), \
+                    mock.patch(
+                        "Playersim.card_support.reset_manifest_for_tests"), \
+                    mock.patch(
+                        "Playersim.environment.AlphaZeroMTGEnv", Environment):
+                result = harvest.run_harvest(
+                    1, 17, output, max_steps=2, agent_model=checkpoint)
+
+            saved = json.loads(
+                (output / "harvest_run.json").read_text(encoding="utf-8"))
+
+        for run_manifest in (result["run_manifest"], saved):
+            self.assertEqual(
+                run_manifest["lineage"]["corpus"]["sha256"], "e" * 64)
+            self.assertEqual(
+                run_manifest["agent_policy"]["source_training_run"]
+                ["lineage"]["corpus"]["sha256"],
+                "d" * 64)
+            self.assertEqual(
+                run_manifest["agent_policy"]["source_training_run"]["run_id"],
+                "source-training-run")
+
+    def test_checkpoint_provenance_rejects_semantic_and_lineage_drift(self):
+        cases = (
+            (
+                "legacy observation version",
+                lambda manifest: manifest["resolved"].__setitem__(
+                    "observation_schema_version", 5),
+                "Observation v6",
+            ),
+            (
+                "observation semantic hash",
+                lambda manifest: manifest["resolved"].__setitem__(
+                    "observation_schema_sha256", "0" * 64),
+                "Observation v6",
+            ),
+            (
+                "same-shaped FiLM semantic drift",
+                lambda manifest: manifest["resolved"][
+                    "feature_extractor_architecture"
+                ]["strategy_conditioning"].__setitem__(
+                    "operation", "same shapes, different semantics"),
+                "feature-extractor architecture drifted",
+            ),
+            (
+                "FiLM architecture hash",
+                lambda manifest: manifest["resolved"][
+                    "feature_extractor_architecture"
+                ].__setitem__("sha256", "0" * 64),
+                "feature-extractor architecture drifted",
+            ),
+            (
+                "card registry",
+                lambda manifest: manifest["lineage"][
+                    "card_registry"
+                ].__setitem__("sha256", "0" * 64),
+                "card-registry lineage",
+            ),
+            (
+                "feature schema",
+                lambda manifest: manifest["lineage"][
+                    "feature_schema"
+                ].__setitem__("sha256", "0" * 64),
+                "feature-schema lineage",
+            ),
+        )
+        for case_name, mutate, expected_error in cases:
+            with self.subTest(case=case_name), \
+                    tempfile.TemporaryDirectory() as temp:
+                run_dir = Path(temp) / "source"
+                checkpoint_dir = run_dir / "checkpoints"
+                checkpoint_dir.mkdir(parents=True)
+                checkpoint = checkpoint_dir / "agent.zip"
+                checkpoint.write_bytes(b"same-shaped policy bytes")
+                manifest = _write_checkpoint_training_manifest(
+                    run_dir, [checkpoint])
+                mutate(manifest)
+                (run_dir / "training_run.json").write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8")
+
+                with self.assertRaisesRegex(RuntimeError, expected_error):
+                    harvest.validate_checkpoint_provenance(
+                        checkpoint, _checkpoint_harvest_lineage(),
+                        role="Agent")
+
+    def test_foreign_checkpoint_bytes_are_rejected_before_deserialization(self):
+        decks = [{"name": name, "cards": [0] * 60}
+                 for name in harvest.EXPECTED_SAMPLE_DECKS]
+        lineage = _checkpoint_harvest_lineage()
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            run_dir = root / "source"
+            checkpoint_dir = run_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True)
+            checkpoint = checkpoint_dir / "agent.zip"
+            checkpoint.write_bytes(b"manifest-bound-bytes")
+            _write_checkpoint_training_manifest(run_dir, [checkpoint])
+            # Preserve size so this specifically proves SHA binding.
+            checkpoint.write_bytes(b"foreign-model-bytes!")
+            self.assertEqual(
+                len(b"manifest-bound-bytes"), len(b"foreign-model-bytes!"))
+
+            with mock.patch.object(
+                    harvest, "load_corpus_decks",
+                    return_value=(decks, {}, lineage)), \
+                    mock.patch.object(
+                        harvest, "load_checkpoint_policy") as load_policy, \
+                    mock.patch(
+                        "Playersim.card_support.reset_manifest_for_tests"):
+                with self.assertRaisesRegex(
+                        RuntimeError, "not an allowed ZIP model artifact"):
+                    harvest.run_harvest(
+                        1, 17, root / "evaluation", max_steps=2,
+                        agent_model=checkpoint)
+            load_policy.assert_not_called()
+
+    def test_non_zip_checkpoint_inventory_entry_does_not_authorize_load(self):
+        with tempfile.TemporaryDirectory() as temp:
+            run_dir = Path(temp) / "source"
+            checkpoint_dir = run_dir / "checkpoints"
+            checkpoint_dir.mkdir(parents=True)
+            checkpoint = checkpoint_dir / "agent.zip"
+            checkpoint.write_bytes(b"policy bytes")
+            manifest = _write_checkpoint_training_manifest(
+                run_dir, [checkpoint])
+            manifest["artifacts"]["final_model"]["path"] = (
+                "models/source/checkpoints/not-a-model.pth")
+            (run_dir / "training_run.json").write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                    RuntimeError, "not an allowed ZIP model artifact"):
+                harvest.validate_checkpoint_provenance(
+                    checkpoint, _checkpoint_harvest_lineage(),
+                    role="Agent")
+
+    def test_harvest_rejects_legacy_or_wrong_space_policies_before_reset(self):
+        from gymnasium import spaces
+        from Playersim.observation_schema import (
+            EXACT_OWN_STRATEGY_PROFILE_FIELD,
+            EXACT_OWN_STRATEGY_PROFILE_SIZE,
+        )
+
+        current_observation_space = spaces.Dict({
+            "state": spaces.Box(
+                low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+            EXACT_OWN_STRATEGY_PROFILE_FIELD: spaces.Box(
+                low=0.0, high=1.0,
+                shape=(EXACT_OWN_STRATEGY_PROFILE_SIZE,),
+                dtype=np.float32),
+        })
+        legacy_v5_observation_space = spaces.Dict({
+            "state": spaces.Box(
+                low=-1.0, high=1.0, shape=(2,), dtype=np.float32),
+        })
+        current_action_space = spaces.Discrete(480)
+        wrong_action_space = spaces.Discrete(479)
+
+        class Policy:
+            def __init__(self, observation_space, action_space):
+                self.observation_space = observation_space
+                self.action_space = action_space
+                self.predict = mock.Mock(side_effect=AssertionError(
+                    "an incompatible checkpoint reached prediction"))
+
+        class BoundaryEnvironment:
+            OBSERVATION_SCHEMA_VERSION = 6
+            reset_calls = 0
+            opponent_install_calls = 0
+
+            def __init__(self, decks, card_db, **kwargs):
+                self.decks = decks
+                self.observation_space = current_observation_space
+                self.action_space = current_action_space
+
+            def set_agent_version(self, version):
+                self.agent_version = version
+
+            def set_opponent_policy(self, policy):
+                type(self).opponent_install_calls += 1
+
+            def reset(self, seed=None):
+                type(self).reset_calls += 1
+                raise AssertionError(
+                    "an incompatible checkpoint reached environment reset")
+
+            def close(self):
+                return None
+
+        decks = [{"name": name, "cards": [0] * 60}
+                 for name in harvest.EXPECTED_SAMPLE_DECKS]
+        lineage = _checkpoint_harvest_lineage()
+        cases = (
+            (
+                "agent legacy observation", "Agent", "observation space",
+                legacy_v5_observation_space, current_action_space,
+                current_observation_space, current_action_space,
+                EXACT_OWN_STRATEGY_PROFILE_FIELD,
+            ),
+            (
+                "agent wrong action", "Agent", "action space",
+                current_observation_space, wrong_action_space,
+                current_observation_space, current_action_space, None,
+            ),
+            (
+                "opponent legacy observation", "Opponent",
+                "observation space", current_observation_space,
+                current_action_space, legacy_v5_observation_space,
+                current_action_space, EXACT_OWN_STRATEGY_PROFILE_FIELD,
+            ),
+            (
+                "opponent wrong action", "Opponent", "action space",
+                current_observation_space, current_action_space,
+                current_observation_space, wrong_action_space, None,
+            ),
+        )
+
+        for (case_name, role, mismatch_kind,
+             agent_observation_space, agent_action_space,
+             opponent_observation_space, opponent_action_space,
+             required_detail) in cases:
+            with self.subTest(case=case_name), tempfile.TemporaryDirectory() as temp:
+                BoundaryEnvironment.reset_calls = 0
+                BoundaryEnvironment.opponent_install_calls = 0
+                agent_policy = Policy(
+                    agent_observation_space, agent_action_space)
+                opponent_policy = Policy(
+                    opponent_observation_space, opponent_action_space)
+                root = Path(temp)
+                agent_path = root / "agent.zip"
+                opponent_path = root / "opponent.zip"
+                agent_path.write_bytes(b"agent checkpoint")
+                opponent_path.write_bytes(b"opponent checkpoint")
+                _write_checkpoint_training_manifest(
+                    root, [agent_path, opponent_path])
+
+                with mock.patch.object(
+                        harvest, "load_corpus_decks",
+                        return_value=(decks, {}, lineage)), \
+                        mock.patch.object(
+                            harvest, "load_checkpoint_policy",
+                            side_effect=[agent_policy, opponent_policy]), \
+                        mock.patch(
+                            "Playersim.card_support.reset_manifest_for_tests"), \
+                        mock.patch(
+                            "Playersim.environment.AlphaZeroMTGEnv",
+                            BoundaryEnvironment):
+                    expected = f"{role} checkpoint {mismatch_kind}"
+                    with self.assertRaisesRegex(RuntimeError, expected) as caught:
+                        harvest.run_harvest(
+                            1, 17, root / "run", max_steps=2,
+                            agent_model=agent_path,
+                            opponent_model=opponent_path)
+
+                if required_detail is not None:
+                    self.assertIn(required_detail, str(caught.exception))
+                self.assertEqual(BoundaryEnvironment.reset_calls, 0)
+                self.assertEqual(
+                    BoundaryEnvironment.opponent_install_calls, 0)
+                self.assertEqual(agent_policy.predict.call_count, 0)
+                self.assertEqual(opponent_policy.predict.call_count, 0)
 
     def test_matchup_rotation_and_pair_adapter_are_deterministic(self):
         decks = [{"name": name} for name in harvest.EXPECTED_SAMPLE_DECKS]

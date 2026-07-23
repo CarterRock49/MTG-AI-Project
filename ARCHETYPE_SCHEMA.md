@@ -2,7 +2,9 @@
 
 `Playersim/archetypes.py` owns the versioned deck-strategy contract used by
 deck manifests, analytics classification, and own-deck planner initialization.
-It does not replace the public opponent inference vector in Observation v5.
+Observation v6 encodes that contract for the observing player's own exact deck;
+it does not replace the public opponent-inference vector carried forward from
+Observation v5.
 
 ## Version 1 profile
 
@@ -49,8 +51,8 @@ rule inference until a reviewed declaration is supplied.
   taxonomy version.
 - `compatibility_primary()` maps historic specialized strings onto the closed
   macro vocabulary.
-- `encode_profile()` defines a stable vector API for a future observation
-  version. It is intentionally unused by Observation v5.
+- `encode_profile()` defines the stable 54-value vector consumed by
+  Observation v6 as `my_exact_deck_strategy_profile`.
 
 Classification traverses canonical card counts in a stable order, weights
 copies explicitly, recognizes every card type independently (including
@@ -59,20 +61,43 @@ becomes `unknown`; a close top-two score becomes `hybrid`.
 
 ## Information boundary and compatibility
 
-An observer may use its own exact full-deck profile. It must never receive the
-opponent seat's reviewed profile or exact deck metadata. Opponent inference
-continues to use only public battlefield, graveyard, and visible exile evidence
-under the existing six-value Observation-v5 contract.
+An observer receives its own exact full-deck profile in
+`my_exact_deck_strategy_profile`, a `float32` `(54,)` vector bounded to `0..1`.
+The exact order is the eight primary one-hot values, eight secondary one-hot
+values, 27 tags, ten axes, and confidence. It must never receive the opponent
+seat's reviewed profile or exact deck metadata. Axis integers are normalized
+by 100 and confidence basis points by 10,000; those rules are schema-hashed.
+Opponent inference continues
+to use only public battlefield, graveyard, and visible-exile evidence under the
+independent six-value contract carried forward from Observation v5.
+
+The policy routes this exact-own vector only through a dedicated conditioning
+branch: a 54-to-64 encoder feeds FiLM scale and shift for the projected shared
+state, with both modulations bounded by `tanh` to `0.25`. The vector is excluded
+from generic feature concatenation. This lets one policy specialize its state
+interpretation by its own game plan without creating an unbounded activation
+path or turning the opponent's curated deck metadata into an observation.
 
 `DeckStatsTracker.identify_archetype()` retains its lowercase string return
 type, now sourced from the centralized profile. This avoids silently changing
 the existing statistics file schema. Historical buckets are not relabeled or
-merged. Any future profile vectors, wider opponent beliefs, or FiLM conditioning
-must ship as Observation v6 with new schema, model, and lineage identities.
+merged. The delivered exact-own vector and FiLM path therefore form one
+declared Observation-v6 capacity lever; wider opponent beliefs would require a
+new observation, model, and lineage identity.
 
-Run lineage records the taxonomy hash, classifier hash, every reviewed
-per-deck profile hash, and their aggregate. A resume is rejected unless the
-source manifest contains that contract and the freshly loaded corpus matches
-it exactly. Named-canary validation exposes the same taxonomy, classifier,
-profile-count, and reviewed-profile aggregate identities for the next canary
-to pin.
+Training-run lineage explicitly records the taxonomy hash, classifier hash,
+every reviewed per-deck profile hash, and their aggregate. A training resume is
+rejected unless the source manifest contains that contract and the freshly
+loaded corpus, registry, and feature schema match it exactly. Checkpoint-backed
+Harvest binds each selected ZIP to an allowed artifact in its source
+`training_run.json`, preserves that run's complete training lineage under the
+policy identity, and separately records the evaluation corpus at the Harvest
+run level. Held-out evaluation decks may differ, but their registry and feature
+schema must match; the Observation-v6 hash independently pins the taxonomy,
+classifier, and exact vector semantics. Named-canary validation exposes the
+taxonomy, classifier, profile count, and reviewed-profile aggregate identities
+for the next canary to pin. Observation v6 additionally pins schema hash
+`6521db9c0c70c919a63c34e9c99463a3b801e25ae91149fd518a34054989e790`
+and a separate feature-extractor architecture identity. Every prior checkpoint
+and named canary, including Round 7.99, is incompatible; the delivery gate must
+finish before any fresh v6 canary is created.

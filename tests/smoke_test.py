@@ -339,7 +339,7 @@ def build_env(decks, card_db):
     assert env.strategy_memory is None, (
         "strategy memory must be explicitly enabled and must not perturb "
         "training/evaluation observations")
-    assert env.OBSERVATION_SCHEMA_VERSION == 5
+    assert env.OBSERVATION_SCHEMA_VERSION == 6
     return env
 
 

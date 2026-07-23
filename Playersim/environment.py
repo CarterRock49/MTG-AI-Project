@@ -31,8 +31,11 @@ from collections import defaultdict
 from .deck_stats_tracker import DeckStatsTracker
 from .card_memory import CardMemory
 from .ability_types import ManaAbility
+from .archetypes import classify_full_deck, encode_profile
 from .curriculum import CurriculumScheduler, OPPONENT_PROFILES, _stable_seed
 from .observation_schema import (
+    EXACT_OWN_STRATEGY_PROFILE_FIELD,
+    EXACT_OWN_STRATEGY_PROFILE_SIZE,
     OBSERVATION_SCHEMA_SHA256, OBSERVATION_SCHEMA_VERSION,
     SEMANTIC_IDENTITY_MAX, MAX_DECK_OBSERVATION_SIZE,
 )
@@ -117,6 +120,10 @@ class AlphaZeroMTGEnv(gym.Env):
         super().__init__()
         self.decks = decks
         self.card_db = card_db
+        # Populated from the two selected full decklists at every reset.  Each
+        # policy observation indexes this cache by its current observer seat;
+        # no observation ever receives the other seat's exact profile.
+        self._exact_deck_strategy_profiles = {}
         self.deck_stats_path = deck_stats_path
         self.card_memory_path = card_memory_path
         self.adaptive_decision_history_enabled = bool(
@@ -504,6 +511,13 @@ class AlphaZeroMTGEnv(gym.Env):
             "strategic_metrics": spaces.Box(low=-1, high=1, shape=(7,), dtype=np.float32),
             "position_advantage": spaces.Box(low=-1, high=1, shape=(1,), dtype=np.float32),
             "deck_composition_estimate": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
+            # v6: deterministic centralized strategy encoding for this
+            # observer's exact full deck. There is intentionally no
+            # opponent-exact counterpart; opponent_archetype remains a belief
+            # inferred only from public game evidence.
+            EXACT_OWN_STRATEGY_PROFILE_FIELD: spaces.Box(
+                low=0.0, high=1.0,
+                shape=(EXACT_OWN_STRATEGY_PROFILE_SIZE,), dtype=np.float32),
             "opponent_archetype": spaces.Box(low=0, high=1, shape=(6,), dtype=np.float32),
             # v4: the observer's own full starting decklist as canonical
             # identities (order-free multiset), and the remaining-library
@@ -978,6 +992,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 # Safely copy card lists (ensure they are lists of IDs)
                 self.original_p1_deck = p1_deck_data.get("cards", []).copy()
                 self.original_p2_deck = p2_deck_data.get("cards", []).copy()
+                self._cache_exact_deck_strategy_profiles(
+                    p1_deck_data, p2_deck_data)
 
                 # --- Initialize GameState ---
                 # Create fresh GameState instance
@@ -1126,6 +1142,9 @@ class AlphaZeroMTGEnv(gym.Env):
             self.strategic_planner = None
             self.current_analysis = None
             self._observer_strategy_profiles = {}
+            fallback_deck = {"cards": [dummy_card_id] * 60}
+            self._cache_exact_deck_strategy_profiles(
+                fallback_deck, fallback_deck)
 
             # Set pointers
             self.game_state.turn = 1
@@ -1439,6 +1458,51 @@ class AlphaZeroMTGEnv(gym.Env):
             except Exception as save_e:
                 logging.error(f"Error persisting stats after game record: {save_e}")
                  
+    def _cache_exact_deck_strategy_profiles(
+            self, p1_deck_data, p2_deck_data):
+        """Pin one immutable centralized full-deck profile per observer seat.
+
+        Reviewed metadata is authoritative when present; otherwise the same
+        deterministic classifier used by ingestion, analytics, and planning
+        infers a profile.  This method accepts selected deck records rather
+        than live zones so draw order and later hidden-zone mutations cannot
+        change the exact-own policy input mid-episode.
+        """
+        profiles = {}
+        for seat_is_p1, deck_data in (
+                (True, p1_deck_data), (False, p2_deck_data)):
+            if not isinstance(deck_data, dict):
+                raise ValueError("selected deck record must be a dictionary")
+            card_ids = list(deck_data.get("cards", []))
+            if not card_ids:
+                raise ValueError("selected deck has no cards to classify")
+            profile = classify_full_deck(
+                card_ids, self.card_db,
+                declared=deck_data.get("strategy_profile"))
+            encoded = np.asarray(encode_profile(profile), dtype=np.float32)
+            if encoded.shape != (EXACT_OWN_STRATEGY_PROFILE_SIZE,):
+                raise ValueError(
+                    "centralized strategy profile has an incompatible width")
+            if (not np.all(np.isfinite(encoded))
+                    or np.any(encoded < 0.0) or np.any(encoded > 1.0)):
+                raise ValueError(
+                    "centralized strategy profile exceeds declared bounds")
+            profiles[seat_is_p1] = profile
+        self._exact_deck_strategy_profiles = profiles
+
+    def _get_exact_own_strategy_profile(self):
+        """Encode only the active observer's pinned exact-deck profile."""
+        observer_is_p1 = bool(self.game_state.agent_is_p1)
+        profile = getattr(
+            self, "_exact_deck_strategy_profiles", {}).get(observer_is_p1)
+        if profile is None:
+            raise RuntimeError(
+                "Exact-own deck strategy profile unavailable for observer")
+        encoded = np.asarray(encode_profile(profile), dtype=np.float32)
+        if encoded.shape != (EXACT_OWN_STRATEGY_PROFILE_SIZE,):
+            raise RuntimeError("Exact-own strategy profile width drifted")
+        return encoded
+
     def _refresh_observer_strategy_profiles(self):
         """Cache deck-derived planner inputs independently for P1 and P2.
 
@@ -6389,6 +6453,8 @@ class AlphaZeroMTGEnv(gym.Env):
                 obs["strategic_metrics"] = np.zeros(7, dtype=np.float32) # Default
                 obs["position_advantage"] = np.array([self._calculate_position_advantage()], dtype=np.float32)
                 obs["deck_composition_estimate"] = self._get_deck_composition(agent_player_obj)
+                obs[EXACT_OWN_STRATEGY_PROFILE_FIELD] = \
+                    self._get_exact_own_strategy_profile()
                 # v4: the observer's own decklist and remaining-library
                 # composition (observer-own; opponent deck never exposed).
                 obs["my_deck_card_identity"] = self._get_deck_card_identities(agent_player_obj)
